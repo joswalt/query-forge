@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="650" viewBox="0 0 2400 650"><defs>
+<linearGradient id="q" x1=".02" y1=".1" x2=".95" y2=".95" objectBoundingBox="true"><stop offset="0" stop-color="#1DDBFC"/><stop offset=".34" stop-color="#1663F7"/><stop offset=".59" stop-color="#8D35EC"/><stop offset=".79" stop-color="#FC477F"/><stop offset="1" stop-color="#FF9A13"/></linearGradient>
+<linearGradient id="tail" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#F75D42"/><stop offset="1" stop-color="#FFAA15"/></linearGradient>
+<linearGradient id="db" x1="0" y1="0" x2="1" y2=".9"><stop stop-color="#09CEF4"/><stop offset=".50" stop-color="#087BE6"/><stop offset="1" stop-color="#3036A5"/></linearGradient>
+<linearGradient id="top" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#20E8FA"/><stop offset=".58" stop-color="#0795ED"/><stop offset="1" stop-color="#5252C8"/></linearGradient>
+<linearGradient id="tile" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0D2955"/><stop offset="1" stop-color="#020A21"/></linearGradient></defs><g transform="translate(4,8) scale(.61)"><circle cx="491" cy="471" r="323" fill="none" stroke="url(#q)" stroke-width="105"/>
+<path d="M625 631 L808 809" fill="none" stroke="url(#tail)" stroke-width="110" stroke-linecap="round"/>
+<path d="M348 401 C348 369 630 369 630 401 L630 610 C630 680 348 680 348 610 Z" fill="url(#db)"/>
+<path d="M348 454 Q489 516 630 454 L630 486 Q489 550 348 486 Z" fill="#071D47"/>
+<path d="M348 541 Q489 605 630 541 L630 573 Q489 637 348 573 Z" fill="#071D47"/>
+<ellipse cx="489" cy="401" rx="141" ry="55" fill="url(#top)"/>
+<path d="M350 614 Q489 674 628 614" fill="none" stroke="#44CDFA" stroke-opacity=".7" stroke-width="7"/>
+</g><text x="642" y="407" font-family="Inter,Arial,sans-serif" font-size="260" font-weight="750" letter-spacing="-9" fill="#F5F8FF">Query</text><text x="1390" y="407" font-family="Inter,Arial,sans-serif" font-size="260" font-weight="750" letter-spacing="-9" fill="#FF791E">Forge</text></svg>

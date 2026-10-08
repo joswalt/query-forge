@@ -1,0 +1,14 @@
+node_modules/
+out/
+dist/
+dist-electron/
+release/
+*.log
+.DS_Store
+.env
+.env.local
+*.local.db
+*.sqlite
+*.sqlite3
+coverage/
+*.tsbuildinfo
