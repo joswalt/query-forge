@@ -13,6 +13,7 @@ import type {
   ResultChunk,
   TestResult
 } from '@shared/types/database-provider'
+import type { ExportFormat } from '@shared/types/export'
 
 /**
  * The renderer's only path to Connection Manager data — never direct SQLite,
@@ -124,10 +125,92 @@ const queryStreamApi = {
 
 export type QueryStreamApi = typeof queryStreamApi
 
+export interface ExportHandle {
+  executionId: string
+  /** Fire-and-forget, mirroring `QueryStreamApi`'s own `cancel` — the
+   * eventual `onDone`/`onError` is what actually tears down listeners. */
+  cancel: () => void
+}
+
+export interface ExportAllStreamHandlers {
+  onProgress: (rowsWritten: number) => void
+  onDone: () => void
+  onError: (message: string) => void
+}
+
+/**
+ * The renderer's path to the Export Service (user stories 45-48) —
+ * `exportLoaded` is a single bounded call (the source is already a capped,
+ * in-memory row array); `exportAll` streams progress the same way
+ * `queryStreamApi.execute` streams result chunks, for the same reason
+ * (export-ipc.ts's doc: `export:all` can run arbitrarily long against a
+ * large result set, so it is the path with progress/cancel).
+ *
+ * Known MVP limitation: `exportLoaded` structured-clones its entire `rows`
+ * array across the renderer→main `invoke` boundary in one call — up to
+ * `MAX_DISPLAY_ROWS` (query-run-reducer.ts) rows at once. Acceptable for
+ * this MVP's result sizes; a future revision could instead have main read
+ * the rows back out of the already-streamed run if this proves slow in
+ * practice.
+ */
+const exportApi = {
+  chooseDestination: (defaultFileName: string): Promise<string | undefined> =>
+    ipcRenderer.invoke('export:chooseDestination', defaultFileName),
+
+  exportLoaded: (
+    rows: unknown[],
+    format: ExportFormat,
+    destinationPath: string
+  ): Promise<void> => ipcRenderer.invoke('export:loaded', { rows, format, destinationPath }),
+
+  exportAll: async (
+    profileId: string,
+    query: string,
+    options: QueryOptions | undefined,
+    format: ExportFormat,
+    destinationPath: string,
+    handlers: ExportAllStreamHandlers
+  ): Promise<ExportHandle> => {
+    const { executionId }: { executionId: ExecutionId } = await ipcRenderer.invoke('export:start')
+    const progressChannel = `export:progress:${executionId}`
+    const doneChannel = `export:done:${executionId}`
+    const errorChannel = `export:error:${executionId}`
+
+    const onProgress = (_event: IpcRendererEvent, progress: { rowsWritten: number }): void =>
+      handlers.onProgress(progress.rowsWritten)
+    const onDone = (): void => {
+      cleanup()
+      handlers.onDone()
+    }
+    const onError = (_event: IpcRendererEvent, message: string): void => {
+      cleanup()
+      handlers.onError(message)
+    }
+    function cleanup(): void {
+      ipcRenderer.removeListener(progressChannel, onProgress)
+      ipcRenderer.removeListener(doneChannel, onDone)
+      ipcRenderer.removeListener(errorChannel, onError)
+    }
+
+    ipcRenderer.on(progressChannel, onProgress)
+    ipcRenderer.on(doneChannel, onDone)
+    ipcRenderer.on(errorChannel, onError)
+    ipcRenderer.send('export:all', { profileId, executionId, query, options, format, destinationPath })
+
+    return {
+      executionId,
+      cancel: () => ipcRenderer.send('export:cancel', { profileId, executionId })
+    }
+  }
+}
+
+export type ExportApi = typeof exportApi
+
 const api = {
   connections: connectionsApi,
   queryExecution: queryExecutionApi,
-  queryStream: queryStreamApi
+  queryStream: queryStreamApi,
+  export: exportApi
 }
 
 export type QueryForgeApi = typeof api

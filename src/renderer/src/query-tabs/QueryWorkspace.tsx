@@ -1,6 +1,8 @@
 import { useRef, useState } from 'react'
 import type { ConnectionProfile } from '@shared/types/connection-profile'
+import type { ExportFormat } from '@shared/types/export'
 import { QueryEditor, type QueryEditorHandle } from '../editor/QueryEditor'
+import { initialExportState, type ExportState } from '../results/export-state'
 import { QueryResultsView } from './QueryResultsView'
 import {
   initialQueryRunState,
@@ -14,7 +16,14 @@ interface QueryTabState {
   title: string
   connectionId: string | undefined
   queryText: string
+  /** The exact text last sent to `queryStream.execute` — distinct from
+   * `queryText` (the editor's *current* contents, which may have since
+   * changed). "Export all matching rows" re-runs this, not whatever is
+   * currently in the editor, so the export always matches what's on
+   * screen. */
+  lastExecutedQuery: string | undefined
   run: QueryRunState
+  exportState: ExportState
 }
 
 /** Transient, non-rendered bookkeeping for one tab's in-flight execution —
@@ -32,7 +41,9 @@ function createTab(index: number): QueryTabState {
     title: `Query ${index}`,
     connectionId: undefined,
     queryText: '',
-    run: initialQueryRunState
+    lastExecutedQuery: undefined,
+    run: initialQueryRunState,
+    exportState: initialExportState
   }
 }
 
@@ -51,6 +62,7 @@ export function QueryWorkspace({
   const [activeTabId, setActiveTabId] = useState<string>(() => tabs[0].id)
   const nextIndexRef = useRef(2)
   const executionsRef = useRef(new Map<string, ExecutionHandle>())
+  const exportExecutionsRef = useRef(new Map<string, ExecutionHandle>())
   const editorRef = useRef<QueryEditorHandle>(null)
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId)
@@ -110,6 +122,7 @@ export function QueryWorkspace({
     }
 
     const startedAt = Date.now()
+    updateTab(tabId, (t) => ({ ...t, lastExecutedQuery: queryText }))
     dispatchRun(tabId, { type: 'started', startedAt })
 
     // Placeholder registered *before* the `query:start` round-trip below
@@ -157,6 +170,107 @@ export function QueryWorkspace({
 
   function handleCancel(tabId: string): void {
     const execution = executionsRef.current.get(tabId)
+    if (!execution) return
+    execution.cancelRequested = true
+    execution.cancel()
+  }
+
+  function dispatchExport(tabId: string, exportState: ExportState): void {
+    updateTab(tabId, (t) => ({ ...t, exportState }))
+  }
+
+  /** "Export loaded rows" (user story 45): the rows already in `tab.run`,
+   * capped at MAX_DISPLAY_ROWS — a single bounded `invoke`, no progress
+   * events or cancel (see export-ipc.ts's doc for why). */
+  async function handleExportLoaded(tabId: string, format: ExportFormat): Promise<void> {
+    const tab = tabs.find((t) => t.id === tabId)
+    if (!tab) return
+
+    const destinationPath = await window.api.export.chooseDestination(`export.${format}`)
+    if (!destinationPath) return
+
+    dispatchExport(tabId, { status: 'running', kind: 'loaded' })
+    try {
+      await window.api.export.exportLoaded(tab.run.rows, format, destinationPath)
+      dispatchExport(tabId, { status: 'done' })
+    } catch (err) {
+      dispatchExport(tabId, {
+        status: 'error',
+        message: err instanceof Error ? err.message : String(err)
+      })
+    }
+  }
+
+  /** "Export all matching rows" (user story 46): re-executes
+   * `tab.lastExecutedQuery` against `tab.connectionId` under a new
+   * Execution ID (export-service.ts's doc: a second RU charge for
+   * Cosmos — this is why it's a visibly distinct action from "export
+   * loaded", not a toggle on the same button, per user story 47), with
+   * progress and cancel (user story 48). */
+  function handleExportAll(tabId: string, format: ExportFormat): void {
+    const tab = tabs.find((t) => t.id === tabId)
+    if (!tab) return
+
+    if (!tab.connectionId || !tab.lastExecutedQuery) {
+      dispatchExport(tabId, {
+        status: 'error',
+        message: 'Run a query in this tab before exporting all matching rows.'
+      })
+      return
+    }
+    const connectionId = tab.connectionId
+    const query = tab.lastExecutedQuery
+
+    window.api.export
+      .chooseDestination(`export.${format}`)
+      .then((destinationPath) => {
+        if (!destinationPath) return
+
+        dispatchExport(tabId, { status: 'running', kind: 'all', rowsWritten: undefined })
+
+        // Same placeholder-then-swap pattern as handleExecute's `handle`:
+        // a Cancel click during the `export:start` round-trip must still
+        // find an entry to cancel.
+        const handle: ExecutionHandle = { cancel: () => {}, cancelRequested: false }
+        exportExecutionsRef.current.set(tabId, handle)
+
+        window.api.export
+          .exportAll(connectionId, query, undefined, format, destinationPath, {
+            onProgress: (rowsWritten) =>
+              dispatchExport(tabId, { status: 'running', kind: 'all', rowsWritten }),
+            onDone: () => {
+              exportExecutionsRef.current.delete(tabId)
+              dispatchExport(tabId, { status: 'done' })
+            },
+            onError: (message) => {
+              const cancelled = exportExecutionsRef.current.get(tabId)?.cancelRequested ?? false
+              exportExecutionsRef.current.delete(tabId)
+              dispatchExport(tabId, cancelled ? { status: 'cancelled' } : { status: 'error', message })
+            }
+          })
+          .then((resolved) => {
+            if (!exportExecutionsRef.current.has(tabId)) return
+            handle.cancel = resolved.cancel
+            if (handle.cancelRequested) resolved.cancel()
+          })
+          .catch((err) => {
+            exportExecutionsRef.current.delete(tabId)
+            dispatchExport(tabId, {
+              status: 'error',
+              message: err instanceof Error ? err.message : String(err)
+            })
+          })
+      })
+      .catch((err) => {
+        dispatchExport(tabId, {
+          status: 'error',
+          message: err instanceof Error ? err.message : String(err)
+        })
+      })
+  }
+
+  function handleCancelExport(tabId: string): void {
+    const execution = exportExecutionsRef.current.get(tabId)
     if (!execution) return
     execution.cancelRequested = true
     execution.cancel()
@@ -236,7 +350,13 @@ export function QueryWorkspace({
             onExecute={(text) => handleExecute(activeTab.id, text)}
           />
 
-          <QueryResultsView run={activeTab.run} />
+          <QueryResultsView
+            run={activeTab.run}
+            exportState={activeTab.exportState}
+            onExportLoaded={(format) => void handleExportLoaded(activeTab.id, format)}
+            onExportAll={(format) => handleExportAll(activeTab.id, format)}
+            onCancelExport={() => handleCancelExport(activeTab.id)}
+          />
         </div>
       )}
     </section>

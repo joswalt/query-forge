@@ -6,7 +6,9 @@ import { ConnectionManager } from './connection-manager/connection-manager'
 import { SafeStorageSecretStore } from './connection-manager/safe-storage-secret-store'
 import { registerConnectionIpcHandlers } from './ipc/connection-ipc'
 import { registerQueryExecutionIpcHandlers } from './ipc/query-execution-ipc'
+import { registerExportIpcHandlers } from './ipc/export-ipc'
 import { QueryExecutionClient } from './query-execution/query-execution-client'
+import { ExportService } from './export/export-service'
 
 function createConnectionManager(): ConnectionManager {
   const dbPath = join(app.getPath('userData'), 'queryforge.db')
@@ -59,6 +61,7 @@ app.whenReady().then(() => {
   queryExecutionClient = createQueryExecutionClient()
   registerConnectionIpcHandlers(connectionManager)
   registerQueryExecutionIpcHandlers(connectionManager, queryExecutionClient)
+  registerExportIpcHandlers(new ExportService(queryExecutionClient), queryExecutionClient)
   createMainWindow()
 
   app.on('activate', () => {

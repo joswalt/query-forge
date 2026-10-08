@@ -2,13 +2,22 @@ import type { ResultChunk } from '@shared/types/database-provider'
 
 /**
  * Upper bound on rows retained for display per query run (user story 31:
- * large result sets must not exhaust memory). The *displayed* grid is a
- * minimal, non-virtualized placeholder in this slice (the full TanStack
- * Table/Virtual grid is later work, per spec.md's build order) — capping
- * what it holds in memory is this slice's mitigation. `rowCount` keeps
- * counting past the cap so the true total is never understated.
+ * large result sets must not exhaust memory). The results/export slice
+ * made the grid virtualized (TanStack Virtual only renders visible rows),
+ * which removes the *rendering-cost* reason for a cap, but the renderer
+ * still holds every retained row as plain JS objects in memory — the cap
+ * stays for that reason. `rowCount` keeps counting past the cap so the
+ * true total is never understated.
+ *
+ * This cap is also the exact boundary of "export loaded rows" (user story
+ * 45): exporting "loaded" rows exports precisely what's in `rows` here,
+ * capped at `MAX_DISPLAY_ROWS` — it is not a snapshot of everything the
+ * query has produced so far. "Export all matching rows" (user story 46)
+ * is a deliberately separate path that re-executes the query in main,
+ * uncapped, and never touches this renderer-side array — see
+ * src/main/export/export-service.ts.
  */
-export const MAX_DISPLAY_ROWS = 1000
+export const MAX_DISPLAY_ROWS = 50_000
 
 export type QueryRunStatus = 'idle' | 'running' | 'success' | 'error' | 'cancelled'
 
