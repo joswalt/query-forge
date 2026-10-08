@@ -10,7 +10,11 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
-    include: ['src/main/**/*.test.ts', 'src/shared/**/*.test.ts'],
+    include: [
+      'src/main/**/*.test.ts',
+      'src/shared/**/*.test.ts',
+      'src/renderer/**/*.test.ts'
+    ],
     exclude: ['node_modules', 'out', 'dist']
   }
 })
