@@ -1,7 +1,5 @@
 import { describe, expect, it, beforeEach } from 'vitest'
-import Database from 'better-sqlite3'
-import { runMigrations } from '../local-storage/migration-runner'
-import { migrations } from '../local-storage/migrations'
+import { createTestDb } from '../local-storage/test-support/create-test-db'
 import { ConnectionProfileRepository } from '../local-storage/connection-profile-repository'
 import { ConnectionManager } from './connection-manager'
 import type { SecretStore } from './secret-store'
@@ -35,10 +33,8 @@ describe('ConnectionManager', () => {
   let secretStore: ReversingSecretStore
 
   beforeEach(() => {
-    const db = new Database(':memory:')
-    runMigrations(db, migrations)
     secretStore = new ReversingSecretStore()
-    manager = new ConnectionManager(new ConnectionProfileRepository(db), secretStore)
+    manager = new ConnectionManager(new ConnectionProfileRepository(createTestDb()), secretStore)
   })
 
   it('creates a connection profile without a secret', () => {

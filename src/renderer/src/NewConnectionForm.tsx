@@ -15,6 +15,7 @@ export function NewConnectionForm({ onCreated }: Props): React.JSX.Element {
   const [name, setName] = useState('')
   const [server, setServer] = useState('')
   const [database, setDatabase] = useState('')
+  const [username, setUsername] = useState('')
   const [endpoint, setEndpoint] = useState('')
   const [secret, setSecret] = useState('')
   const [readOnly, setReadOnly] = useState(false)
@@ -28,7 +29,7 @@ export function NewConnectionForm({ onCreated }: Props): React.JSX.Element {
 
     const config: ConnectionConfig =
       kind === 'azure-sql'
-        ? { kind: 'azure-sql', server, database, authMode: 'sql-credentials' }
+        ? { kind: 'azure-sql', server, database, authMode: 'sql-credentials', username }
         : { kind: 'cosmos-db', endpoint, authMode: 'account-key' }
 
     try {
@@ -41,6 +42,7 @@ export function NewConnectionForm({ onCreated }: Props): React.JSX.Element {
       setName('')
       setServer('')
       setDatabase('')
+      setUsername('')
       setEndpoint('')
       setSecret('')
       onCreated()
@@ -75,6 +77,10 @@ export function NewConnectionForm({ onCreated }: Props): React.JSX.Element {
           <label>
             Database name
             <input value={database} onChange={(e) => setDatabase(e.target.value)} required />
+          </label>
+          <label>
+            SQL username
+            <input value={username} onChange={(e) => setUsername(e.target.value)} required />
           </label>
           <label>
             Password

@@ -5,7 +5,7 @@ import type { ConnectionProfile } from './connection-profile'
  * only transiently — handed from the Connection Manager to the Query
  * Execution Service once per connect, never persisted or re-transmitted.
  */
-export type Secret = string
+export type DecryptedSecret = string
 
 /**
  * Opaque identifier for one in-flight `executeQuery` call (GLOSSARY.md:
@@ -60,8 +60,11 @@ export interface QueryOptions {
  * is client-side abandonment only (RU charges already incurred stand).
  */
 export interface DatabaseProvider {
-  connect(profile: ConnectionProfile, secret: Secret | undefined): Promise<void>
-  testConnection(profile: ConnectionProfile, secret: Secret | undefined): Promise<TestResult>
+  connect(profile: ConnectionProfile, secret: DecryptedSecret | undefined): Promise<void>
+  testConnection(
+    profile: ConnectionProfile,
+    secret: DecryptedSecret | undefined
+  ): Promise<TestResult>
   disconnect(): Promise<void>
   executeQuery(query: string, options?: QueryOptions): AsyncIterable<ResultChunk>
   cancel(executionId: ExecutionId): void

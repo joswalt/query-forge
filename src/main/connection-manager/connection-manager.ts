@@ -1,25 +1,14 @@
-import type { ConnectionConfig, ConnectionProfile } from '@shared/types/connection-profile'
+import type {
+  ConnectionProfile,
+  CreateConnectionProfileRequest,
+  UpdateConnectionProfileRequest
+} from '@shared/types/connection-profile'
 import type {
   ConnectionProfileRepository,
   CreateConnectionProfileInput,
   UpdateConnectionProfileInput
 } from '../local-storage/connection-profile-repository'
 import type { SecretStore } from './secret-store'
-
-export interface CreateConnectionProfileRequest {
-  name: string
-  readOnly?: boolean
-  config: ConnectionConfig
-  secret?: string
-}
-
-export interface UpdateConnectionProfileRequest {
-  name?: string
-  readOnly?: boolean
-  config?: ConnectionConfig
-  /** `null` clears the stored secret; `undefined` (or omitted) leaves it untouched. */
-  secret?: string | null
-}
 
 /**
  * Connection Manager (GLOSSARY.md) — owns Connection Profile CRUD and secret

@@ -1,22 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   ConnectionProfile,
-  ConnectionConfig
+  CreateConnectionProfileRequest,
+  UpdateConnectionProfileRequest
 } from '@shared/types/connection-profile'
-
-export interface CreateConnectionProfileRequest {
-  name: string
-  readOnly?: boolean
-  config: ConnectionConfig
-  secret?: string
-}
-
-export interface UpdateConnectionProfileRequest {
-  name?: string
-  readOnly?: boolean
-  config?: ConnectionConfig
-  secret?: string | null
-}
 
 /**
  * The renderer's only path to Connection Manager data — never direct SQLite,

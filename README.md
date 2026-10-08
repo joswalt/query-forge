@@ -40,4 +40,4 @@ Per the implementation spec's Testing Decisions (mirroring map.md ticket 11), te
 
 ## Status
 
-Phase 1 slice only: application shell, Local Storage Service (SQLite + hand-rolled migrations), and Connection Manager (Connection Profile CRUD + secret encrypt/decrypt) wired end-to-end through IPC to a minimal renderer. No Database Provider implementations, query editor, results grid, or export yet — see the implementation spec's suggested build order for what's next.
+Phase 1 slice only: application shell, Local Storage Service (SQLite + hand-rolled migrations), and Connection Manager (Connection Profile CRUD + secret encrypt/decrypt). `ConnectionManager.update` is implemented and unit-tested, but the renderer only wires up list/create/delete so far — there's no edit form yet. The JSON preferences file (Local Storage Service's other persistence target) isn't started either; nothing in this slice has preferences to store. No Database Provider implementations, query editor, results grid, or export yet — see the implementation spec's suggested build order for what's next.

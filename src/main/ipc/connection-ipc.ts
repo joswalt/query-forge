@@ -3,7 +3,7 @@ import type { ConnectionManager } from '../connection-manager/connection-manager
 import type {
   CreateConnectionProfileRequest,
   UpdateConnectionProfileRequest
-} from '../connection-manager/connection-manager'
+} from '@shared/types/connection-profile'
 
 /**
  * Registers the Connection Manager's IPC surface. The renderer never

@@ -41,3 +41,25 @@ export interface ConnectionProfile {
   createdAt: string
   updatedAt: string
 }
+
+/**
+ * Shared request shape for the Connection Manager's public API — used by
+ * both the preload bridge (renderer-facing) and `ConnectionManager` itself
+ * (main-process), so the two never drift out of sync. `secret`, when
+ * present, is plaintext sent once for main to encrypt immediately; it is
+ * never echoed back in any response (GLOSSARY.md: "Decrypted Secret").
+ */
+export interface CreateConnectionProfileRequest {
+  name: string
+  readOnly?: boolean
+  config: ConnectionConfig
+  secret?: string
+}
+
+export interface UpdateConnectionProfileRequest {
+  name?: string
+  readOnly?: boolean
+  config?: ConnectionConfig
+  /** `null` clears the stored secret; `undefined` (or omitted) leaves it untouched. */
+  secret?: string | null
+}

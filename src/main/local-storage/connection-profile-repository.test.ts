@@ -1,15 +1,7 @@
 import { describe, expect, it, beforeEach } from 'vitest'
-import Database from 'better-sqlite3'
-import { runMigrations } from './migration-runner'
-import { migrations } from './migrations'
+import { createTestDb } from './test-support/create-test-db'
 import { ConnectionProfileRepository } from './connection-profile-repository'
 import type { AzureSqlConnectionConfig } from '@shared/types/connection-profile'
-
-function createTestDb(): Database.Database {
-  const db = new Database(':memory:')
-  runMigrations(db, migrations)
-  return db
-}
 
 const sampleConfig: AzureSqlConnectionConfig = {
   kind: 'azure-sql',
