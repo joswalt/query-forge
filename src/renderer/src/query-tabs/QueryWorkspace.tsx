@@ -112,7 +112,15 @@ export function QueryWorkspace({
     const startedAt = Date.now()
     dispatchRun(tabId, { type: 'started', startedAt })
 
-    void window.api.queryStream
+    // Placeholder registered *before* the `query:start` round-trip below
+    // resolves — without it, a Cancel click during that (brief, but real)
+    // window would find no entry in `executionsRef` and silently do
+    // nothing. `cancel` is swapped for the real one once `execute` resolves
+    // below; a cancel requested in the meantime is honored immediately then.
+    const handle: ExecutionHandle = { cancel: () => {}, cancelRequested: false }
+    executionsRef.current.set(tabId, handle)
+
+    window.api.queryStream
       .execute(tab.connectionId, queryText, undefined, {
         onChunk: (chunk) => dispatchRun(tabId, { type: 'chunk', chunk }),
         onDone: () => {
@@ -125,8 +133,25 @@ export function QueryWorkspace({
           dispatchRun(tabId, { type: 'failed', message, finishedAt: Date.now(), cancelled })
         }
       })
-      .then((handle) => {
-        executionsRef.current.set(tabId, { cancel: handle.cancel, cancelRequested: false })
+      .then((resolved) => {
+        // Already torn down by a fast `onDone`/`onError` — nothing left to
+        // attach the real `cancel` to.
+        if (!executionsRef.current.has(tabId)) return
+        handle.cancel = resolved.cancel
+        if (handle.cancelRequested) resolved.cancel()
+      })
+      .catch((err) => {
+        // `query:start`/`query:execute` setup itself failed (e.g. the
+        // utilityProcess round-trip rejected) — without this, the tab
+        // would stay stuck at `status: 'running'` forever, since neither
+        // `onDone` nor `onError` above would ever fire.
+        executionsRef.current.delete(tabId)
+        dispatchRun(tabId, {
+          type: 'failed',
+          message: err instanceof Error ? err.message : String(err),
+          finishedAt: Date.now(),
+          cancelled: false
+        })
       })
   }
 
