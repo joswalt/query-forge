@@ -14,6 +14,8 @@ import type {
   TestResult
 } from '@shared/types/database-provider'
 import type { ExportFormat } from '@shared/types/export'
+import type { QueryHistoryEntry } from '@shared/types/query-history'
+import type { Preferences } from '@shared/types/preferences'
 
 /**
  * The renderer's only path to Connection Manager data — never direct SQLite,
@@ -206,11 +208,43 @@ const exportApi = {
 
 export type ExportApi = typeof exportApi
 
+/**
+ * The renderer's path to Query History Entries (user stories 50, 52) —
+ * read-only from the renderer's side, since entries are only ever written
+ * as a side effect of a query run (main's `streamQuery`), never directly.
+ * `onUpdated` lets the renderer refresh its list right after a run settles
+ * instead of only on a manual refresh or next app launch.
+ */
+const historyApi = {
+  list: (limit?: number): Promise<QueryHistoryEntry[]> => ipcRenderer.invoke('history:list', limit),
+  search: (term: string, limit?: number): Promise<QueryHistoryEntry[]> =>
+    ipcRenderer.invoke('history:search', term, limit),
+  clear: (): Promise<void> => ipcRenderer.invoke('history:clear'),
+  onUpdated: (callback: () => void): (() => void) => {
+    const listener = (): void => callback()
+    ipcRenderer.on('history:updated', listener)
+    return () => ipcRenderer.removeListener('history:updated', listener)
+  }
+}
+
+export type HistoryApi = typeof historyApi
+
+/** The renderer's path to Preferences (e.g. user story 53's opt-in). */
+const preferencesApi = {
+  get: (): Promise<Preferences> => ipcRenderer.invoke('preferences:get'),
+  update: (patch: Partial<Preferences>): Promise<Preferences> =>
+    ipcRenderer.invoke('preferences:update', patch)
+}
+
+export type PreferencesApi = typeof preferencesApi
+
 const api = {
   connections: connectionsApi,
   queryExecution: queryExecutionApi,
   queryStream: queryStreamApi,
-  export: exportApi
+  export: exportApi,
+  history: historyApi,
+  preferences: preferencesApi
 }
 
 export type QueryForgeApi = typeof api

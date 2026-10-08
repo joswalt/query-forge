@@ -3,6 +3,7 @@ import type { ConnectionProfile } from '@shared/types/connection-profile'
 import type { DatabaseMetadata } from '@shared/types/database-provider'
 import { NewConnectionForm } from './NewConnectionForm'
 import { QueryWorkspace } from './query-tabs/QueryWorkspace'
+import { HistoryPanel } from './history/HistoryPanel'
 
 /** Connection status (user story 10) — tracked client-side; the Query
  * Execution Service itself has no separate "status" concept, only whether
@@ -153,6 +154,8 @@ export function App(): React.JSX.Element {
       </section>
 
       <QueryWorkspace connections={connections} />
+
+      <HistoryPanel />
     </main>
   )
 }

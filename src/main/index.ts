@@ -2,20 +2,38 @@ import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'node:path'
 import { openDatabase } from './local-storage/open-database'
 import { ConnectionProfileRepository } from './local-storage/connection-profile-repository'
+import { QueryHistoryRepository } from './local-storage/query-history-repository'
+import { PreferencesStore } from './local-storage/preferences-store'
 import { ConnectionManager } from './connection-manager/connection-manager'
 import { SafeStorageSecretStore } from './connection-manager/safe-storage-secret-store'
 import { registerConnectionIpcHandlers } from './ipc/connection-ipc'
 import { registerQueryExecutionIpcHandlers } from './ipc/query-execution-ipc'
 import { registerExportIpcHandlers } from './ipc/export-ipc'
+import { registerHistoryIpcHandlers } from './ipc/history-ipc'
+import { registerPreferencesIpcHandlers } from './ipc/preferences-ipc'
 import { QueryExecutionClient } from './query-execution/query-execution-client'
 import { ExportService } from './export/export-service'
 
-function createConnectionManager(): ConnectionManager {
+/**
+ * Both the Connection Manager and Query History Entry persistence live in
+ * the same SQLite database (Local Storage Service, map.md ticket 07) — one
+ * `openDatabase` call, shared across repositories, rather than one
+ * connection per repository.
+ */
+function createLocalStorage(): {
+  connectionManager: ConnectionManager
+  historyRepository: QueryHistoryRepository
+  preferencesStore: PreferencesStore
+} {
   const dbPath = join(app.getPath('userData'), 'queryforge.db')
   const db = openDatabase(dbPath)
-  const repository = new ConnectionProfileRepository(db)
-  const secretStore = new SafeStorageSecretStore()
-  return new ConnectionManager(repository, secretStore)
+  const connectionManager = new ConnectionManager(
+    new ConnectionProfileRepository(db),
+    new SafeStorageSecretStore()
+  )
+  const historyRepository = new QueryHistoryRepository(db)
+  const preferencesStore = new PreferencesStore(join(app.getPath('userData'), 'preferences.json'))
+  return { connectionManager, historyRepository, preferencesStore }
 }
 
 function createQueryExecutionClient(): QueryExecutionClient {
@@ -57,11 +75,18 @@ function createMainWindow(): void {
 let queryExecutionClient: QueryExecutionClient | undefined
 
 app.whenReady().then(() => {
-  const connectionManager = createConnectionManager()
+  const { connectionManager, historyRepository, preferencesStore } = createLocalStorage()
   queryExecutionClient = createQueryExecutionClient()
   registerConnectionIpcHandlers(connectionManager)
-  registerQueryExecutionIpcHandlers(connectionManager, queryExecutionClient)
+  registerQueryExecutionIpcHandlers(
+    connectionManager,
+    queryExecutionClient,
+    historyRepository,
+    preferencesStore
+  )
   registerExportIpcHandlers(new ExportService(queryExecutionClient), queryExecutionClient)
+  registerHistoryIpcHandlers(historyRepository)
+  registerPreferencesIpcHandlers(preferencesStore)
   createMainWindow()
 
   app.on('activate', () => {

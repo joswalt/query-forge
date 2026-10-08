@@ -99,8 +99,12 @@ async function runExportAll(
     // the async iterator from `client.executeQuery` simply throws either
     // way (same asymmetric-cancel note as query-execution-ipc.ts's
     // `streamQuery`). Distinguishing "cancelled" from "error" is the
-    // renderer's job, since only it knows whether it called
-    // `export:cancel`.
+    // renderer's job here, since only it knows whether it called
+    // `export:cancel` and nothing else in main consumes that distinction.
+    // `streamQuery`'s own cancel path differs deliberately, not
+    // inconsistently: it persists a Query History Entry whose `status` main
+    // itself must get right, so it tracks cancelled Execution IDs
+    // main-side instead of leaving the distinction to the renderer alone.
     if (!sender.isDestroyed()) {
       sender.send(
         `export:error:${request.executionId}`,

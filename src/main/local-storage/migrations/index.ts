@@ -1,4 +1,5 @@
 import migration0001 from './0001_create_connection_profiles.sql?raw'
+import migration0002 from './0002_create_query_history.sql?raw'
 
 export interface Migration {
   version: number
@@ -16,5 +17,6 @@ export interface Migration {
  * asset-copy build step.
  */
 export const migrations: Migration[] = [
-  { version: 1, name: 'create_connection_profiles', sql: migration0001 }
+  { version: 1, name: 'create_connection_profiles', sql: migration0001 },
+  { version: 2, name: 'create_query_history', sql: migration0002 }
 ].sort((a, b) => a.version - b.version)

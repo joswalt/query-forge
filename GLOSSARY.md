@@ -51,3 +51,11 @@ _Avoid_: CredentialStore (collides with Secret Ciphertext/Decrypted Secret namin
 **Test Connection**:
 A short-lived connection attempt (`testConnection`) used only to validate a Connection Profile's parameters before saving it. Does not populate the Query Execution Service's live connection pool — that only happens on a real `connect()`.
 _Avoid_: Ping, Validate (both too generic — this is specifically the pre-save connectivity check)
+
+**Query History Entry**:
+A single automatically recorded past query execution — profile, status (`success`/`error`/`cancelled`), duration, row count, and timestamp — persisted in SQLite's `query_history` table after every run. Denormalizes the connection's display name at record time so an entry stays readable after its Connection Profile is renamed or deleted. The query text itself is withheld unless Preferences opts into persisting it.
+_Avoid_: History Record (too generic), Query Log (implies append-only diagnostic output, not a user-facing reusable record)
+
+**Preferences**:
+The JSON-file-backed (not SQLite) settings owned by the Local Storage Service alongside its SQLite database (map.md ticket 07) — non-secret, non-Connection-Profile user settings. Currently holds whether Query History Entries persist query text; a future theme choice (user story 54) is expected to live here too but is not yet implemented.
+_Avoid_: Settings (used informally elsewhere in product-overview.md, but "Preferences" is this codebase's identifier — e.g. `PreferencesStore`, `preferences.json`)
