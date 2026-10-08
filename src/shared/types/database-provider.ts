@@ -38,6 +38,9 @@ export interface ResultChunk {
 export interface DatabaseMetadataObject {
   name: string
   kind: string
+  /** Optional supplementary display info (e.g. a SQL column's data type)
+   * that belongs alongside the name, not folded into it. */
+  detail?: string
   children?: DatabaseMetadataObject[]
 }
 
@@ -47,6 +50,16 @@ export interface DatabaseMetadata {
 
 export interface QueryOptions {
   timeoutMs?: number
+  /**
+   * Assigned by the caller (the Query Execution Service) before invoking
+   * `executeQuery`, not by the Database Provider. The locked interface
+   * (spec.md) leaves how a caller obtains an Execution ID for `cancel()`
+   * unspecified beyond "tracks Execution IDs for cancel()" — this is the
+   * concrete resolution: the caller mints the id upfront and a Provider
+   * tracks any per-call cancellation state (AbortController, mssql Request)
+   * under it. Omitted entirely, `cancel()` has nothing to address.
+   */
+  executionId?: ExecutionId
 }
 
 /**
@@ -69,4 +82,20 @@ export interface DatabaseProvider {
   executeQuery(query: string, options?: QueryOptions): AsyncIterable<ResultChunk>
   cancel(executionId: ExecutionId): void
   getMetadata(): Promise<DatabaseMetadata>
+}
+
+/**
+ * Thrown by a Database Provider's `connect`/`testConnection` when asked to
+ * use an auth mode it does not yet implement. Currently: `entra-id` on both
+ * providers — the msal-node interactive Authorization Code + PKCE flow is a
+ * separate, later Connection Manager slice (spec.md's suggested build
+ * order puts providers/testing/metadata before query editing, and the full
+ * Entra ID flow is tracked separately from both). Never thrown for
+ * `account-key` / `sql-credentials`.
+ */
+export class UnsupportedAuthModeError extends Error {
+  constructor(public readonly authMode: string) {
+    super(`Auth mode "${authMode}" is not yet supported`)
+    this.name = 'UnsupportedAuthModeError'
+  }
 }

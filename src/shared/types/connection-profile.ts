@@ -63,3 +63,12 @@ export interface UpdateConnectionProfileRequest {
   /** `null` clears the stored secret; `undefined` (or omitted) leaves it untouched. */
   secret?: string | null
 }
+
+/**
+ * Request shape for Test Connection (GLOSSARY.md) — validating connection
+ * parameters via the Query Execution Service without persisting anything.
+ * Either re-tests an already-saved Connection Profile by id (decrypting
+ * its stored secret), or tests unsaved form data directly (user story 6:
+ * "test a connection's parameters before saving it") — never both.
+ */
+export type TestConnectionRequest = { profileId: string } | { config: ConnectionConfig; secret?: string }

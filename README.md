@@ -34,10 +34,20 @@ Run this once after `npm install`, and again after any `better-sqlite3` or Elect
 
 Per the implementation spec's Testing Decisions (mirroring map.md ticket 11), tests split three ways:
 
-1. **Plain-Node unit tests (Vitest, this repo today):** the Database Provider Interface and its implementations, the Local Storage Service, and the Connection Manager (with `SecretStore` mocked) — none need a real Electron runtime.
-2. **Electron-runtime integration tests (Playwright's Electron support, not yet set up):** `SafeStorageSecretStore`'s real `safeStorage` round-trip, and the main↔utility `MessagePort` Decrypted Secret handoff once the Query Execution Service exists.
+1. **Plain-Node unit tests (Vitest, this repo today):** the Database Provider Interface and its implementations (`CosmosDbProvider`, `AzureSqlProvider`, each tested against an injected fake SDK client rather than a mock of the real SDK), the `QueryExecutionService` request router, the Local Storage Service, and the Connection Manager (with `SecretStore` mocked) — none need a real Electron runtime.
+2. **Electron-runtime integration tests (Playwright's Electron support, not yet set up):** `SafeStorageSecretStore`'s real `safeStorage` round-trip; the main↔utility `MessagePort` Decrypted Secret handoff (`QueryExecutionClient` ↔ `utility-entry.ts`, confirmed as a seam deferred to this layer rather than Vitest — see `src/main/query-execution/query-execution-client.ts`'s class doc).
 3. **Provider integration tests (not yet set up):** Cosmos DB Provider against the vNext emulator (via `testcontainers`) and a free-tier account; Azure SQL Provider against a free-tier Azure SQL Database.
 
 ## Status
 
-Phase 1 slice only: application shell, Local Storage Service (SQLite + hand-rolled migrations), and Connection Manager (Connection Profile CRUD + secret encrypt/decrypt). `ConnectionManager.update` is implemented and unit-tested, but the renderer only wires up list/create/delete so far — there's no edit form yet. The JSON preferences file (Local Storage Service's other persistence target) isn't started either; nothing in this slice has preferences to store. No Database Provider implementations, query editor, results grid, or export yet — see the implementation spec's suggested build order for what's next.
+Phase 2 slice (on top of Phase 1's application shell, Local Storage Service, and Connection Manager): the Database Provider Interface now has both implementations —`CosmosDbProvider` (`@azure/cosmos`) and `AzureSqlProvider` (`mssql`) — running inside a Query Execution Service that lives in a shared Electron `utilityProcess` (`src/main/query-execution/`), reached from main via a correlation-id protocol (`protocol.ts`) over the main↔utility `MessagePort` (ADR 0001). Connection testing, connect/disconnect, and initial metadata discovery are wired end-to-end through new `connection:test` / `connection:connect` / `connection:disconnect` / `connection:getMetadata` IPC channels, with a minimal renderer UI (status per connection, a metadata list) proving the vertical slice.
+
+Known gaps/decisions carried forward explicitly (not oversights):
+
+- **Entra ID auth is not implemented** on either Provider — both throw a typed `UnsupportedAuthModeError` for `entra-id`; only `account-key` / `sql-credentials` work today. The interactive `msal-node` PKCE flow is a separate, later Connection Manager slice.
+- **`QueryExecutionClient` (the main-side utilityProcess fork/correlation wrapper) is not unit-tested** — confirmed seam, left for a Playwright-Electron integration test later; `QueryExecutionService`, the part of it that *is* plain-Node-testable, has full coverage.
+- **The utilityProcess fork target (`utility-entry.ts`) has not been smoke-tested against a real Electron runtime** in this environment (sandboxed; `npm run build` validates the bundler output and that both `out/main/index.js` and `out/main/utility-entry.js` emit correctly, but not the actual `utilityProcess.fork()` + ESM-loading path) — run `npm run dev` locally to confirm before relying on it.
+- **Azure SQL's `QueryOptions.timeoutMs` is not a true per-query override** — mssql only exposes timeout at pool-creation time, so it's set once from the profile's `connectionTimeoutMs` at `connect()`.
+- Query execution (`executeQuery`/`cancel`) is implemented and unit-tested at the Provider and `QueryExecutionService` layers, but not yet wired into renderer UI (query editor, cancel button) — that's Phase 3 (product-overview.md §11).
+
+No query editor, results grid, or export yet — see the implementation spec's suggested build order for what's next.

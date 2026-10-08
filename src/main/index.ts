@@ -5,6 +5,8 @@ import { ConnectionProfileRepository } from './local-storage/connection-profile-
 import { ConnectionManager } from './connection-manager/connection-manager'
 import { SafeStorageSecretStore } from './connection-manager/safe-storage-secret-store'
 import { registerConnectionIpcHandlers } from './ipc/connection-ipc'
+import { registerQueryExecutionIpcHandlers } from './ipc/query-execution-ipc'
+import { QueryExecutionClient } from './query-execution/query-execution-client'
 
 function createConnectionManager(): ConnectionManager {
   const dbPath = join(app.getPath('userData'), 'queryforge.db')
@@ -12,6 +14,14 @@ function createConnectionManager(): ConnectionManager {
   const repository = new ConnectionProfileRepository(db)
   const secretStore = new SafeStorageSecretStore()
   return new ConnectionManager(repository, secretStore)
+}
+
+function createQueryExecutionClient(): QueryExecutionClient {
+  // Sibling output file to this one (electron.vite.config.ts's `main`
+  // target builds both as separate rollup inputs) — the utilityProcess
+  // fork target for the Query Execution Service (ADR 0001).
+  const utilityModulePath = join(__dirname, 'utility-entry.js')
+  return new QueryExecutionClient(utilityModulePath)
 }
 
 function createMainWindow(): void {
@@ -42,9 +52,13 @@ function createMainWindow(): void {
   }
 }
 
+let queryExecutionClient: QueryExecutionClient | undefined
+
 app.whenReady().then(() => {
   const connectionManager = createConnectionManager()
+  queryExecutionClient = createQueryExecutionClient()
   registerConnectionIpcHandlers(connectionManager)
+  registerQueryExecutionIpcHandlers(connectionManager, queryExecutionClient)
   createMainWindow()
 
   app.on('activate', () => {
@@ -54,4 +68,10 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+// Terminate the shared Query Execution Service utilityProcess alongside
+// the app — it does not exit on its own when all windows close.
+app.on('before-quit', () => {
+  queryExecutionClient?.shutdown()
 })

@@ -1,0 +1,139 @@
+import { utilityProcess } from 'electron'
+import type { UtilityProcess } from 'electron'
+import { randomUUID } from 'node:crypto'
+import type { ConnectionProfile } from '@shared/types/connection-profile'
+import type {
+  DatabaseMetadata,
+  DecryptedSecret,
+  ExecutionId,
+  QueryOptions,
+  ResultChunk,
+  TestResult
+} from '@shared/types/database-provider'
+import type { QueryExecutionRequest, QueryExecutionResponse } from './protocol'
+import { AsyncQueue } from './async-queue'
+
+interface PendingResult {
+  resolve: (value: unknown) => void
+  reject: (err: Error) => void
+}
+
+/**
+ * Main-side counterpart to `utility-entry.ts` — forks the shared Query
+ * Execution Service `utilityProcess` once (lazily, on first use) and tags
+ * each call with a Request ID so replies can be correlated on an
+ * otherwise-unordered `MessagePort`. The `connection:*` IPC handlers call
+ * into this; the renderer never does directly (§6).
+ *
+ * The main↔utility Decrypted Secret handoff (ADR 0001) happens at the
+ * `connect()` call below: `secret` crosses this boundary exactly once per
+ * connection, is never logged, and is not retained by this class beyond
+ * the single `postMessage` call.
+ *
+ * Confirmed seam (see Phase 2 planning): not unit-tested here — this is
+ * thin Electron `utilityProcess`/`MessagePort` plumbing around the
+ * already-unit-tested `QueryExecutionService`, better exercised by a
+ * Playwright-Electron integration test than by mocking `utilityProcess` in
+ * Vitest. Smoke-test via `npm run dev` after changes here.
+ */
+export class QueryExecutionClient {
+  private child: UtilityProcess | undefined
+  private readonly pendingResults = new Map<string, PendingResult>()
+  private readonly pendingStreams = new Map<string, AsyncQueue<ResultChunk>>()
+
+  constructor(private readonly utilityModulePath: string) {}
+
+  async connect(profile: ConnectionProfile, secret: DecryptedSecret | undefined): Promise<void> {
+    await this.sendForResult({ id: randomUUID(), method: 'connect', profile, secret })
+  }
+
+  async testConnection(
+    profile: ConnectionProfile,
+    secret: DecryptedSecret | undefined
+  ): Promise<TestResult> {
+    return this.sendForResult<TestResult>({
+      id: randomUUID(),
+      method: 'testConnection',
+      profile,
+      secret
+    })
+  }
+
+  async disconnect(profileId: string): Promise<void> {
+    await this.sendForResult({ id: randomUUID(), method: 'disconnect', profileId })
+  }
+
+  async getMetadata(profileId: string): Promise<DatabaseMetadata> {
+    return this.sendForResult<DatabaseMetadata>({
+      id: randomUUID(),
+      method: 'getMetadata',
+      profileId
+    })
+  }
+
+  /** Fire-and-forget by design, mirroring `DatabaseProvider.cancel()`'s own
+   * synchronous void signature — a failed cancel has nothing meaningful to
+   * surface back to a caller that isn't awaiting anything. */
+  cancel(profileId: string, executionId: ExecutionId): void {
+    this.sendForResult({ id: randomUUID(), method: 'cancel', profileId, executionId }).catch(
+      () => {}
+    )
+  }
+
+  executeQuery(
+    profileId: string,
+    executionId: ExecutionId,
+    query: string,
+    options?: QueryOptions
+  ): AsyncIterable<ResultChunk> {
+    const id = randomUUID()
+    const queue = new AsyncQueue<ResultChunk>()
+    this.pendingStreams.set(id, queue)
+    this.ensureChild().postMessage({ id, method: 'executeQuery', profileId, executionId, query, options })
+    return queue
+  }
+
+  /** Terminates the shared utilityProcess. Call on app quit. */
+  shutdown(): void {
+    this.child?.kill()
+    this.child = undefined
+  }
+
+  private ensureChild(): UtilityProcess {
+    if (this.child) return this.child
+    const child = utilityProcess.fork(this.utilityModulePath, [], {
+      serviceName: 'QueryForge Query Execution Service'
+    })
+    child.on('message', (message: QueryExecutionResponse) => this.onMessage(message))
+    this.child = child
+    return child
+  }
+
+  private sendForResult<T>(request: QueryExecutionRequest): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      this.pendingResults.set(request.id, { resolve: resolve as (value: unknown) => void, reject })
+      this.ensureChild().postMessage(request)
+    })
+  }
+
+  private onMessage(response: QueryExecutionResponse): void {
+    if (response.kind === 'chunk') {
+      this.pendingStreams.get(response.id)?.push(response.value)
+      return
+    }
+
+    const stream = this.pendingStreams.get(response.id)
+    if (stream) {
+      this.pendingStreams.delete(response.id)
+      if (response.kind === 'error') stream.fail(new Error(response.message))
+      else stream.close()
+      return
+    }
+
+    const pending = this.pendingResults.get(response.id)
+    if (!pending) return
+    this.pendingResults.delete(response.id)
+    if (response.kind === 'error') pending.reject(new Error(response.message))
+    else pending.resolve(response.value)
+  }
+}

@@ -21,16 +21,37 @@ export function NewConnectionForm({ onCreated }: Props): React.JSX.Element {
   const [readOnly, setReadOnly] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [testing, setTesting] = useState(false)
+  const [testMessage, setTestMessage] = useState<string | null>(null)
+
+  function buildConfig(): ConnectionConfig {
+    return kind === 'azure-sql'
+      ? { kind: 'azure-sql', server, database, authMode: 'sql-credentials', username }
+      : { kind: 'cosmos-db', endpoint, authMode: 'account-key' }
+  }
+
+  async function handleTest(): Promise<void> {
+    setTesting(true)
+    setTestMessage(null)
+    try {
+      const result = await window.api.queryExecution.test({
+        config: buildConfig(),
+        secret: secret || undefined
+      })
+      setTestMessage(result.success ? 'Connection OK' : `Failed: ${result.message ?? 'unknown error'}`)
+    } catch (err) {
+      setTestMessage(`Failed: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setTesting(false)
+    }
+  }
 
   async function handleSubmit(event: React.FormEvent): Promise<void> {
     event.preventDefault()
     setSubmitting(true)
     setError(null)
 
-    const config: ConnectionConfig =
-      kind === 'azure-sql'
-        ? { kind: 'azure-sql', server, database, authMode: 'sql-credentials', username }
-        : { kind: 'cosmos-db', endpoint, authMode: 'account-key' }
+    const config = buildConfig()
 
     try {
       await window.api.connections.create({
@@ -110,7 +131,11 @@ export function NewConnectionForm({ onCreated }: Props): React.JSX.Element {
       </label>
 
       {error && <p role="alert">{error}</p>}
+      {testMessage && <p>{testMessage}</p>}
 
+      <button type="button" disabled={testing} onClick={handleTest}>
+        Test connection
+      </button>
       <button type="submit" disabled={submitting}>
         Save connection
       </button>
