@@ -9,6 +9,7 @@ import { QueryEditor, type QueryEditorHandle } from '../editor/QueryEditor'
 import { initialExportState, type ExportState } from '../results/export-state'
 import { CloseIcon, PlayIcon, PlusIcon } from '../icons'
 import { QueryResultsView } from './QueryResultsView'
+import { EditorResizer, useEditorHeight } from './EditorResizer'
 import {
   initialQueryRunState,
   queryRunReducer,
@@ -169,6 +170,7 @@ export const QueryWorkspace = forwardRef<
   const executionsRef = useRef(new Map<string, ExecutionHandle>())
   const exportExecutionsRef = useRef(new Map<string, ExecutionHandle>())
   const editorRef = useRef<QueryEditorHandle>(null)
+  const editorHeight = useEditorHeight()
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId)
 
@@ -549,7 +551,10 @@ export const QueryWorkspace = forwardRef<
       {fileMessage && <p className="query-workspace__message">{fileMessage}</p>}
 
       {activeTab && (
-        <div className="query-workspace__tab">
+        <div
+          className="query-workspace__tab"
+          style={{ '--qf-editor-height': `${editorHeight.height}px` } as React.CSSProperties}
+        >
           <div className="query-workspace__toolbar">
             <div className="query-workspace__targets">
               <label className="query-workspace__connection">
@@ -597,6 +602,14 @@ export const QueryWorkspace = forwardRef<
               </button>
               <button type="button" className="btn--ghost" onClick={() => void handleSaveToFile()}>
                 Save to file…
+              </button>
+              <button
+                type="button"
+                className="btn--ghost"
+                disabled={!activeTab.queryText.trim()}
+                onClick={() => editorRef.current?.format()}
+              >
+                Format
               </button>
               <button
                 type="button"
@@ -659,6 +672,8 @@ export const QueryWorkspace = forwardRef<
             onChange={(text) => updateTab(activeTab.id, (t) => ({ ...t, queryText: text }))}
             onExecute={(text) => handleExecute(activeTab.id, text)}
           />
+
+          <EditorResizer {...editorHeight} />
 
           <QueryResultsView
             run={activeTab.run}

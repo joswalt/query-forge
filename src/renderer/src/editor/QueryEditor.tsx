@@ -20,6 +20,7 @@ import {
 } from '@codemirror/view'
 import type { ConnectionConfig } from '@shared/types/connection-profile'
 import { sqlLanguageFor } from './sql-dialects'
+import { formatQuery } from './format-query'
 
 /** Colours come from CSS variables, so a theme switch restyles live editors
  * without reconfiguring them. */
@@ -63,6 +64,9 @@ export interface QueryEditorHandle {
    * document rule as the in-editor `Mod-Enter` shortcut, rather than always
    * running the tab's full stored text. */
   getExecutionText: () => string
+  /** Formats the selection if non-empty, else the whole document, as one
+   * undoable edit (user story 20). No-op if formatting changes nothing. */
+  format: () => void
 }
 
 export interface QueryEditorProps {
@@ -104,9 +108,26 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
   useImperativeHandle(
     ref,
     () => ({
-      getExecutionText: () => (viewRef.current ? executionText(viewRef.current) : initialValue)
+      getExecutionText: () => (viewRef.current ? executionText(viewRef.current) : initialValue),
+      format: () => {
+        const view = viewRef.current
+        if (!view) return
+        const { from, to } = view.state.selection.main
+        const hasSelection = to > from
+        const start = hasSelection ? from : 0
+        const end = hasSelection ? to : view.state.doc.length
+        const original = view.state.sliceDoc(start, end)
+        const formatted = formatQuery(original, dialect).trimEnd()
+        if (formatted === original) return
+        view.dispatch({
+          changes: { from: start, to: end, insert: formatted },
+          selection: { anchor: start + formatted.length },
+          userEvent: 'input.format'
+        })
+        view.focus()
+      }
     }),
-    [initialValue]
+    [initialValue, dialect]
   )
 
   useEffect(() => {
