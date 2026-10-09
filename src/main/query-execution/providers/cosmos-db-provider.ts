@@ -78,13 +78,38 @@ export const COSMOS_RETRY_OPTIONS = {
   maxWaitTimeInSeconds: 30
 } as const
 
+/**
+ * The `connectionPolicy` every Cosmos client is built with.
+ *
+ * `enableEndpointDiscovery` is deliberately **off**. With it on, the SDK
+ * first resolves the account's read/write regions, and when that lookup
+ * fails at the network level (typo'd host, DNS failure, no connectivity) it
+ * retries in a loop that outlives both `requestTimeout` and an
+ * `AbortSignal` — measured at 60s+ with no result, which left "Test
+ * connection" spinning and made Cancel ineffective. With it off the SDK
+ * talks to the endpoint the user typed and surfaces `ENOTFOUND` /
+ * `ECONNREFUSED` immediately.
+ *
+ * Tradeoff: no SDK-driven failover to other regions of a geo-replicated
+ * account. For an interactive query tool pointed at one explicit endpoint
+ * that is the right trade; revisit if multi-region failover is ever needed.
+ */
+export function buildCosmosConnectionPolicy(requestTimeoutMs: number | undefined): {
+  enableEndpointDiscovery: false
+  retryOptions: typeof COSMOS_RETRY_OPTIONS
+  requestTimeout?: number
+} {
+  return {
+    enableEndpointDiscovery: false,
+    retryOptions: { ...COSMOS_RETRY_OPTIONS },
+    ...(requestTimeoutMs ? { requestTimeout: requestTimeoutMs } : {})
+  }
+}
+
 const defaultClientFactory: CosmosClientFactory = ({ requestTimeoutMs, ...options }) =>
   new CosmosClient({
     ...options,
-    connectionPolicy: {
-      retryOptions: { ...COSMOS_RETRY_OPTIONS },
-      ...(requestTimeoutMs ? { requestTimeout: requestTimeoutMs } : {})
-    }
+    connectionPolicy: buildCosmosConnectionPolicy(requestTimeoutMs)
   } as ConstructorParameters<typeof CosmosClient>[0]) as unknown as CosmosClientLike
 
 /**

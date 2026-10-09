@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import type { ConnectionProfile, CosmosConnectionConfig } from '@shared/types/connection-profile'
-import { CosmosDbProvider } from './cosmos-db-provider'
+import {
+  buildCosmosConnectionPolicy,
+  COSMOS_RETRY_OPTIONS,
+  CosmosDbProvider
+} from './cosmos-db-provider'
 import type {
   CosmosClientFactory,
   CosmosClientFactoryOptions,
@@ -273,5 +277,22 @@ describe('CosmosDbProvider', () => {
       // fake's generator — fewer than all 3 pages come through.
       expect(chunks.length).toBeLessThan(3)
     })
+  })
+})
+
+describe('buildCosmosConnectionPolicy', () => {
+  // Regression: with endpoint discovery on, an unreachable host made the
+  // SDK retry for 60s+, ignoring requestTimeout and AbortSignal.
+  it('disables endpoint discovery so an unreachable host fails fast', () => {
+    expect(buildCosmosConnectionPolicy(undefined).enableEndpointDiscovery).toBe(false)
+  })
+
+  it('keeps the explicit 429 retry options', () => {
+    expect(buildCosmosConnectionPolicy(5000).retryOptions).toEqual(COSMOS_RETRY_OPTIONS)
+  })
+
+  it('passes the profile timeout through as requestTimeout, and omits it when unset', () => {
+    expect(buildCosmosConnectionPolicy(5000).requestTimeout).toBe(5000)
+    expect('requestTimeout' in buildCosmosConnectionPolicy(undefined)).toBe(false)
   })
 })

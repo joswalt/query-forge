@@ -12,3 +12,5 @@ release/
 *.sqlite3
 coverage/
 *.tsbuildinfo
+test-results/
+playwright-report/

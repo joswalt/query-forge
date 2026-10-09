@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import { _electron as electron, expect, test } from '@playwright/test'
 import type { ElectronApplication } from 'playwright-core'
 
-const APP_ENTRY = join(__dirname, '..', 'out', 'main', 'index.js')
+const APP_ENTRY = join(import.meta.dirname, '..', 'out', 'main', 'index.js')
 
 /**
  * `safeStorage` (ADR 0001) is reachable only from Electron's main process —
@@ -65,8 +65,13 @@ test.describe('safeStorage round-trip (ADR 0001)', () => {
   test('survives a round-trip through a better-sqlite3 BLOB column', async () => {
     const plaintext = 'correct-horse-battery-staple'
 
-    const decrypted = await electronApp.evaluate(({ safeStorage }, secret) => {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const decrypted = await electronApp.evaluate(({ app, safeStorage }, secret) => {
+      // The built main process is ESM (package.json `"type": "module"`), so
+      // there is no ambient `require` here — build one anchored at the app's
+      // own package.json so `better-sqlite3` resolves from the same
+      // node_modules the app itself uses.
+      const { createRequire } = process.getBuiltinModule('node:module')
+      const require = createRequire(`${app.getAppPath()}/package.json`)
       const Database = require('better-sqlite3')
       const db = new Database(':memory:')
       db.exec('CREATE TABLE secrets (ciphertext BLOB NOT NULL)')

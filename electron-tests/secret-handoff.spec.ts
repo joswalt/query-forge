@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import { _electron as electron, expect, test } from '@playwright/test'
 import type { ElectronApplication, Page } from 'playwright-core'
 
-const APP_ENTRY = join(__dirname, '..', 'out', 'main', 'index.js')
+const APP_ENTRY = join(import.meta.dirname, '..', 'out', 'main', 'index.js')
 
 // user@password-shaped and distinctive enough that an accidental substring
 // match (e.g. inside a generic driver error message) would be implausible.
