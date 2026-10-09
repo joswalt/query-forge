@@ -5,6 +5,7 @@ import type {
   ConnectionProfile,
   CosmosAuthMode
 } from '@shared/types/connection-profile'
+import { parseSqlConnectionString } from './connection-string'
 
 interface Props {
   onCreated: () => void
@@ -45,6 +46,16 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
   const [server, setServer] = useState(initialSql?.server ?? '')
   const [database, setDatabase] = useState(initialSql?.database ?? '')
   const [username, setUsername] = useState(initialSql?.username ?? '')
+  const [port, setPort] = useState(initialSql?.port ? String(initialSql.port) : '')
+  // '' = leave unset (provider default), otherwise an explicit choice.
+  const [encrypt, setEncrypt] = useState<'' | 'on' | 'off'>(
+    initialSql?.encrypt === undefined ? '' : initialSql.encrypt ? 'on' : 'off'
+  )
+  const [connectionString, setConnectionString] = useState('')
+  const [connectionStringMessage, setConnectionStringMessage] = useState<{
+    ok: boolean
+    text: string
+  } | null>(null)
   const [endpoint, setEndpoint] = useState(initialCosmos?.endpoint ?? '')
   const [cosmosDatabase, setCosmosDatabase] = useState(initialCosmos?.database ?? '')
   const [cosmosContainer, setCosmosContainer] = useState(initialCosmos?.container ?? '')
@@ -68,6 +79,39 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
     setAuthMode(defaultAuthModeFor(nextKind))
   }
 
+  /** Fills the structured fields from a pasted ADO.NET connection string. The
+   * raw string (which may hold a password) is cleared immediately; only the
+   * parsed fields reach form state, and the password goes to the secret field. */
+  function handleApplyConnectionString(): void {
+    const result = parseSqlConnectionString(connectionString)
+    if (!result.ok) {
+      setConnectionStringMessage({ ok: false, text: result.error })
+      return
+    }
+    const parsed = result.value
+    setServer(parsed.server)
+    setPort(parsed.port ? String(parsed.port) : '')
+    if (parsed.database !== undefined) setDatabase(parsed.database)
+    if (parsed.encrypt !== undefined) setEncrypt(parsed.encrypt ? 'on' : 'off')
+    setAuthMode(parsed.authMode)
+    if (parsed.authMode === 'entra-id') {
+      setUsername('')
+      setSecret('')
+    } else {
+      if (parsed.username !== undefined) setUsername(parsed.username)
+      if (parsed.password !== undefined) setSecret(parsed.password)
+    }
+    const followUp =
+      parsed.authMode === 'entra-id'
+        ? ['Entra ID sign-in needs your app registration’s Client ID, Tenant ID and Redirect URI below.']
+        : []
+    setConnectionString('')
+    setConnectionStringMessage({
+      ok: true,
+      text: ['Fields filled from the connection string.', ...followUp, ...parsed.notes].join(' ')
+    })
+  }
+
   function buildConfig(): ConnectionConfig {
     const entraId = isEntraId ? { clientId, tenantId, redirectUri } : undefined
     const connectionTimeoutMs = timeoutSeconds.trim()
@@ -80,6 +124,8 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
           ...initialSql,
           kind: 'azure-sql',
           server,
+          port: port.trim() ? Number(port) : undefined,
+          encrypt: encrypt === '' ? undefined : encrypt === 'on',
           database,
           authMode: authMode as AzureSqlAuthMode,
           username: isEntraId ? undefined : username,
@@ -151,6 +197,9 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
       setServer('')
       setDatabase('')
       setUsername('')
+      setPort('')
+      setEncrypt('')
+      setConnectionStringMessage(null)
       setEndpoint('')
       setCosmosDatabase('')
       setCosmosContainer('')
@@ -206,9 +255,56 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
 
       {kind === 'azure-sql' ? (
         <>
+          <fieldset className="conn-form__connstring">
+            <legend>Paste connection string (optional)</legend>
+            <textarea
+              aria-label="ADO.NET connection string"
+              rows={3}
+              spellCheck={false}
+              autoComplete="off"
+              placeholder="Azure portal → your database → Connection strings → ADO.NET"
+              value={connectionString}
+              onChange={(e) => setConnectionString(e.target.value)}
+            />
+            <button
+              type="button"
+              disabled={!connectionString.trim()}
+              onClick={handleApplyConnectionString}
+            >
+              Fill fields
+            </button>
+            {connectionStringMessage && (
+              <p
+                className="conn-form__test"
+                role={connectionStringMessage.ok ? 'status' : 'alert'}
+                data-ok={connectionStringMessage.ok ? 'true' : 'false'}
+              >
+                {connectionStringMessage.text}
+              </p>
+            )}
+          </fieldset>
           <label>
             Server hostname
             <input value={server} onChange={(e) => setServer(e.target.value)} required />
+          </label>
+          <label>
+            Port (optional)
+            <input
+              type="number"
+              min="1"
+              max="65535"
+              placeholder="1433"
+              value={port}
+              onChange={(e) => setPort(e.target.value)}
+            />
+          </label>
+          <label>
+            Encryption
+            <select value={encrypt} onChange={(e) => setEncrypt(e.target.value as '' | 'on' | 'off')}>
+              <option value="">Default</option>
+              <option value="on">On</option>
+              <option value="off">Off</option>
+            </select>
           </label>
           <label>
             Database name
