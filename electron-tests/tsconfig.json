@@ -1,0 +1,19 @@
+{
+  "include": ["**/*.ts", "../src/preload/index.d.ts", "../src/shared/**/*"],
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM"],
+    "types": ["node"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "baseUrl": "..",
+    "paths": {
+      "@shared/*": ["src/shared/*"]
+    }
+  }
+}

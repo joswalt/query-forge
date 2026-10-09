@@ -1,8 +1,10 @@
 import { useRef, useState } from 'react'
 import type { ConnectionProfile } from '@shared/types/connection-profile'
 import type { ExportFormat } from '@shared/types/export'
+import type { SavedQuery } from '@shared/types/saved-query'
 import { QueryEditor, type QueryEditorHandle } from '../editor/QueryEditor'
 import { initialExportState, type ExportState } from '../results/export-state'
+import { SavedQueriesPanel } from '../saved-queries/SavedQueriesPanel'
 import { QueryResultsView } from './QueryResultsView'
 import {
   initialQueryRunState,
@@ -35,12 +37,15 @@ interface ExecutionHandle {
   cancelRequested: boolean
 }
 
-function createTab(index: number): QueryTabState {
+function createTab(
+  index: number,
+  seed?: { queryText: string; connectionId: string | undefined }
+): QueryTabState {
   return {
     id: crypto.randomUUID(),
     title: `Query ${index}`,
-    connectionId: undefined,
-    queryText: '',
+    connectionId: seed?.connectionId,
+    queryText: seed?.queryText ?? '',
     lastExecutedQuery: undefined,
     run: initialQueryRunState,
     exportState: initialExportState
@@ -276,6 +281,37 @@ export function QueryWorkspace({
     execution.cancel()
   }
 
+  /** "Open in new tab" (user story 51's companion to saving) — a saved
+   * query's connection association is only honored if that profile still
+   * exists; a deleted Connection Profile (user story 5) must not leave the
+   * new tab pointing at a dangling id. */
+  function handleOpenSavedQuery(savedQuery: SavedQuery): void {
+    const connectionId = connections.some((c) => c.id === savedQuery.profileId)
+      ? savedQuery.profileId
+      : undefined
+    const tab = createTab(nextIndexRef.current++, {
+      queryText: savedQuery.queryText,
+      connectionId
+    })
+    setTabs((prev) => [...prev, tab])
+    setActiveTabId(tab.id)
+  }
+
+  /** "Save current query" — the active tab's full query text (not
+   * `editorRef.getExecutionText()`, which returns only the selection when
+   * one exists; saving a query should never silently save a sub-selection
+   * instead of the whole thing the user is looking at). */
+  async function handleSaveCurrentQuery(name: string): Promise<void> {
+    if (!activeTab) return
+    const databaseKind = connections.find((c) => c.id === activeTab.connectionId)?.config.kind
+    await window.api.savedQueries.create({
+      name,
+      queryText: activeTab.queryText,
+      profileId: activeTab.connectionId,
+      databaseKind
+    })
+  }
+
   return (
     <section className="query-workspace">
       <h2>Queries</h2>
@@ -359,6 +395,12 @@ export function QueryWorkspace({
           />
         </div>
       )}
+
+      <SavedQueriesPanel
+        canSaveCurrent={Boolean(activeTab?.queryText.trim())}
+        onSaveCurrent={handleSaveCurrentQuery}
+        onOpen={handleOpenSavedQuery}
+      />
     </section>
   )
 }

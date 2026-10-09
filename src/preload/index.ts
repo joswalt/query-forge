@@ -16,6 +16,11 @@ import type {
 import type { ExportFormat } from '@shared/types/export'
 import type { QueryHistoryEntry } from '@shared/types/query-history'
 import type { Preferences } from '@shared/types/preferences'
+import type {
+  CreateSavedQueryRequest,
+  SavedQuery,
+  UpdateSavedQueryRequest
+} from '@shared/types/saved-query'
 
 /**
  * The renderer's only path to Connection Manager data — never direct SQLite,
@@ -238,13 +243,31 @@ const preferencesApi = {
 
 export type PreferencesApi = typeof preferencesApi
 
+/**
+ * The renderer's path to Saved Query CRUD (user story 51) — distinct from
+ * `historyApi`'s read-only surface: a Saved Query is deliberately created,
+ * named, and edited by the user, not recorded as a side effect.
+ */
+const savedQueriesApi = {
+  list: (): Promise<SavedQuery[]> => ipcRenderer.invoke('savedQuery:list'),
+  get: (id: string): Promise<SavedQuery | undefined> => ipcRenderer.invoke('savedQuery:get', id),
+  create: (request: CreateSavedQueryRequest): Promise<SavedQuery> =>
+    ipcRenderer.invoke('savedQuery:create', request),
+  update: (id: string, request: UpdateSavedQueryRequest): Promise<SavedQuery> =>
+    ipcRenderer.invoke('savedQuery:update', id, request),
+  delete: (id: string): Promise<void> => ipcRenderer.invoke('savedQuery:delete', id)
+}
+
+export type SavedQueriesApi = typeof savedQueriesApi
+
 const api = {
   connections: connectionsApi,
   queryExecution: queryExecutionApi,
   queryStream: queryStreamApi,
   export: exportApi,
   history: historyApi,
-  preferences: preferencesApi
+  preferences: preferencesApi,
+  savedQueries: savedQueriesApi
 }
 
 export type QueryForgeApi = typeof api

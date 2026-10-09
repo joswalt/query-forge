@@ -31,6 +31,14 @@ describe('PreferencesStore', () => {
     expect(reloaded.get().queryHistory.persistQueryText).toBe(true)
   })
 
+  it('persists a theme update across a new PreferencesStore instance (same file)', () => {
+    new PreferencesStore(filePath).update({ theme: 'dark' })
+
+    const reloaded = new PreferencesStore(filePath)
+
+    expect(reloaded.get().theme).toBe('dark')
+  })
+
   it('fills in defaults for keys missing from an on-disk file written by an older version', () => {
     writeFileSync(filePath, JSON.stringify({}), 'utf8')
 

@@ -4,6 +4,8 @@
  * file for preferences"). Shared between main's `PreferencesStore` and the
  * renderer so both type against the same shape.
  */
+export type Theme = 'light' | 'dark'
+
 export interface Preferences {
   queryHistory: {
     /** User story 53: "avoid persisting sensitive query parameters unless
@@ -12,8 +14,14 @@ export interface Preferences {
      * query text itself is withheld unless this is `true`. */
     persistQueryText: boolean
   }
+  /** User story 54: "dark and light themes." A plain top-level value, not
+   * nested like `queryHistory`, since it has no sibling settings of its
+   * own yet — nesting it under e.g. `appearance` preemptively would be
+   * speculative structure with nothing to justify it. */
+  theme: Theme
 }
 
 export const defaultPreferences: Preferences = {
-  queryHistory: { persistQueryText: false }
+  queryHistory: { persistQueryText: false },
+  theme: 'light'
 }

@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { openDatabase } from './local-storage/open-database'
 import { ConnectionProfileRepository } from './local-storage/connection-profile-repository'
 import { QueryHistoryRepository } from './local-storage/query-history-repository'
+import { SavedQueryRepository } from './local-storage/saved-query-repository'
 import { PreferencesStore } from './local-storage/preferences-store'
 import { ConnectionManager } from './connection-manager/connection-manager'
 import { SafeStorageSecretStore } from './connection-manager/safe-storage-secret-store'
@@ -11,6 +12,7 @@ import { registerQueryExecutionIpcHandlers } from './ipc/query-execution-ipc'
 import { registerExportIpcHandlers } from './ipc/export-ipc'
 import { registerHistoryIpcHandlers } from './ipc/history-ipc'
 import { registerPreferencesIpcHandlers } from './ipc/preferences-ipc'
+import { registerSavedQueryIpcHandlers } from './ipc/saved-query-ipc'
 import { QueryExecutionClient } from './query-execution/query-execution-client'
 import { ExportService } from './export/export-service'
 
@@ -23,6 +25,7 @@ import { ExportService } from './export/export-service'
 function createLocalStorage(): {
   connectionManager: ConnectionManager
   historyRepository: QueryHistoryRepository
+  savedQueryRepository: SavedQueryRepository
   preferencesStore: PreferencesStore
 } {
   const dbPath = join(app.getPath('userData'), 'queryforge.db')
@@ -32,8 +35,9 @@ function createLocalStorage(): {
     new SafeStorageSecretStore()
   )
   const historyRepository = new QueryHistoryRepository(db)
+  const savedQueryRepository = new SavedQueryRepository(db)
   const preferencesStore = new PreferencesStore(join(app.getPath('userData'), 'preferences.json'))
-  return { connectionManager, historyRepository, preferencesStore }
+  return { connectionManager, historyRepository, savedQueryRepository, preferencesStore }
 }
 
 function createQueryExecutionClient(): QueryExecutionClient {
@@ -75,7 +79,8 @@ function createMainWindow(): void {
 let queryExecutionClient: QueryExecutionClient | undefined
 
 app.whenReady().then(() => {
-  const { connectionManager, historyRepository, preferencesStore } = createLocalStorage()
+  const { connectionManager, historyRepository, savedQueryRepository, preferencesStore } =
+    createLocalStorage()
   queryExecutionClient = createQueryExecutionClient()
   registerConnectionIpcHandlers(connectionManager)
   registerQueryExecutionIpcHandlers(
@@ -87,6 +92,7 @@ app.whenReady().then(() => {
   registerExportIpcHandlers(new ExportService(queryExecutionClient), queryExecutionClient)
   registerHistoryIpcHandlers(historyRepository)
   registerPreferencesIpcHandlers(preferencesStore)
+  registerSavedQueryIpcHandlers(savedQueryRepository)
   createMainWindow()
 
   app.on('activate', () => {

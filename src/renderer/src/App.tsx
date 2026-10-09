@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { ConnectionProfile } from '@shared/types/connection-profile'
 import type { DatabaseMetadata } from '@shared/types/database-provider'
+import type { Theme } from '@shared/types/preferences'
 import { NewConnectionForm } from './NewConnectionForm'
 import { QueryWorkspace } from './query-tabs/QueryWorkspace'
 import { HistoryPanel } from './history/HistoryPanel'
@@ -18,6 +19,35 @@ export function App(): React.JSX.Element {
   const [metadataByConnection, setMetadataByConnection] = useState<
     Record<string, DatabaseMetadata>
   >({})
+  const [theme, setTheme] = useState<Theme>('light')
+
+  useEffect(() => {
+    window.api.preferences
+      .get()
+      .then((prefs) => {
+        setTheme(prefs.theme)
+        document.documentElement.dataset.theme = prefs.theme
+      })
+      .catch(() => {})
+  }, [])
+
+  async function handleToggleTheme(): Promise<void> {
+    const previous = theme
+    const next: Theme = theme === 'light' ? 'dark' : 'light'
+    setTheme(next)
+    document.documentElement.dataset.theme = next
+    try {
+      await window.api.preferences.update({ theme: next })
+    } catch (err) {
+      // Revert the optimistic UI/DOM update — otherwise the app could show
+      // (and keep rendering in) a theme that was never actually persisted,
+      // same failure mode HistoryPanel's persistQueryText toggle guards
+      // against.
+      setTheme(previous)
+      document.documentElement.dataset.theme = previous
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
 
   async function refresh(): Promise<void> {
     try {
@@ -91,7 +121,12 @@ export function App(): React.JSX.Element {
 
   return (
     <main>
-      <h1>QueryForge</h1>
+      <h1>
+        QueryForge
+        <button type="button" onClick={() => void handleToggleTheme()}>
+          {theme === 'light' ? '🌙 Dark mode' : '☀️ Light mode'}
+        </button>
+      </h1>
       {error && <p role="alert">{error}</p>}
 
       <section>

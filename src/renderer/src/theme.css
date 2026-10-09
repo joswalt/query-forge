@@ -1,0 +1,33 @@
+/* Dark and light themes (user story 54). Variables are read by component
+   styles via `var(--qf-...)`; `[data-theme="dark"]` on `<html>` (toggled in
+   App.tsx from Preferences) is the single switch — no component needs its
+   own light/dark branch. */
+:root,
+:root[data-theme='light'] {
+  --qf-bg: #ffffff;
+  --qf-bg-elevated: #f5f5f5;
+  --qf-fg: #1a1a1a;
+  --qf-border: #d0d0d0;
+  --qf-accent: #0a66c2;
+}
+
+:root[data-theme='dark'] {
+  --qf-bg: #1e1e1e;
+  --qf-bg-elevated: #2a2a2a;
+  --qf-fg: #e4e4e4;
+  --qf-border: #444444;
+  --qf-accent: #4da3ff;
+}
+
+body {
+  background: var(--qf-bg);
+  color: var(--qf-fg);
+}
+
+button,
+input,
+select {
+  background: var(--qf-bg-elevated);
+  color: var(--qf-fg);
+  border: 1px solid var(--qf-border);
+}
