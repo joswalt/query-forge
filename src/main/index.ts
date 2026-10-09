@@ -101,6 +101,13 @@ app.whenReady().then(() => {
   const { connectionManager, historyRepository, savedQueryRepository, preferencesStore } =
     createLocalStorage()
   queryExecutionClient = createQueryExecutionClient()
+  // Story 63: the fresh child forked on the next call has no live providers,
+  // so tell every window its "connected" statuses are stale.
+  queryExecutionClient.onUnexpectedExit(() => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send('query-execution:service-exited')
+    }
+  })
   registerConnectionIpcHandlers(connectionManager)
   registerQueryExecutionIpcHandlers(
     connectionManager,

@@ -50,7 +50,7 @@ Implemented:
 - **Resizable panels** (story 54) — sidebar width and editor/results split (drag, arrow keys, double-click to reset), both remembered across launches.
 - **Query editor/tabs** — CodeMirror 6 (no autocomplete, per ticket 04), independent tabs, streamed execution, cancel, `Cmd/Ctrl+Enter`, open/save query files via native dialogs, and unsaved-tab drafts restored after a crash (renderer `localStorage`, debounced; **only when the query-history text opt-in is enabled**, since drafts hold query text — user story 53).
 - **Results** — virtualized TanStack grid, JSON view, cell inspector, CSV/JSON export (loaded rows or all matching rows with progress/cancel).
-- **Reliability** — Cosmos 429 retry policy stated explicitly (`COSMOS_RETRY_OPTIONS`); if the utilityProcess dies, all in-flight calls reject with a "disconnect and reconnect" message and the next call forks a fresh child.
+- **Reliability** — Cosmos 429 retry policy stated explicitly (`COSMOS_RETRY_OPTIONS`); if the utilityProcess dies, all in-flight calls reject with a "reconnect, then retry" message, connected profiles flip to `error` in the UI, and the next call forks a fresh child.
 - **History, saved queries, preferences/theme** — SQLite-backed; history text is opt-in (user story 53).
 - **Packaging/tests** — `electron-builder` unsigned config; Playwright Electron scaffolding in `electron-tests/`.
 
@@ -61,6 +61,5 @@ Known gaps/decisions carried forward explicitly (not oversights):
 - **Azure SQL's `QueryOptions.timeoutMs` is not a per-query override** — mssql only exposes timeout at pool creation, so the profile's timeout field sets both connect and query (`requestTimeout`) timeouts; unset defaults to 60s query timeout (mssql's own default is 15s). Cosmos maps the same field to `connectionPolicy.requestTimeout`.
 - **Editing a connected profile disconnects it** — the Query Execution Service keeps the profile as of `connect()`, so edits (including read-only) apply on reconnect.
 - **No mid-session Entra ID token refresh** — the token is handed over once per `connect()` (ADR 0001); an expired token surfaces a "disconnect and reconnect" message.
-- **After a utilityProcess crash the UI may still show a profile as "connected"** until the next call fails; reconnect to recover.
 - **`QueryExecutionClient` and `utility-entry.ts` are not unit-tested** — a seam deferred to the Playwright-Electron layer.
 - **Provider integration tests** against the Cosmos emulator / free-tier Azure SQL are not set up; CI is deferred per spec.

@@ -9,15 +9,12 @@ import { SavedQueriesPanel } from './saved-queries/SavedQueriesPanel'
 import { Collapsible } from './Collapsible'
 import { OverflowMenu } from './OverflowMenu'
 import { SidebarResizer, useSidebarWidth } from './SidebarResizer'
+import { markConnectionsLost, type ConnectionStatus } from './connection-status'
 import type { SavedQuery } from '@shared/types/saved-query'
 import { CosmosIcon, DatabaseIcon, LockIcon, MoonIcon, PlusIcon, SunIcon } from './icons'
 import logoOnDark from './assets/brand/queryforge-logo-dark.png'
 import logoOnLight from './assets/brand/queryforge-logo-light.png'
 
-/** Connection status (user story 10) — tracked client-side; the Query
- * Execution Service itself has no separate "status" concept, only whether
- * a profile id currently has a live provider instance. */
-type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
 
 export function App(): React.JSX.Element {
   const [connections, setConnections] = useState<ConnectionProfile[]>([])
@@ -34,6 +31,32 @@ export function App(): React.JSX.Element {
   const workspaceRef = useRef<QueryWorkspaceHandle>(null)
   const sidebar = useSidebarWidth()
   const [savedQueriesVersion, setSavedQueriesVersion] = useState(0)
+
+  // Story 63: the utilityProcess died, so every live connection is gone.
+  // Messages are derived from a ref, not inside a state updater, which must
+  // stay pure (StrictMode double-invokes updaters).
+  const statusesRef = useRef(statuses)
+  statusesRef.current = statuses
+  useEffect(
+    () =>
+      window.api.queryExecution.onServiceExited(() => {
+        const lostIds = Object.keys(statusesRef.current).filter(
+          (id) => statusesRef.current[id] === 'connected'
+        )
+        setStatuses((prev) => markConnectionsLost(prev))
+        setTestMessages((prev) => ({
+          ...prev,
+          ...Object.fromEntries(
+            lostIds.map((id) => [
+              id,
+              'The query execution service stopped unexpectedly. Reconnect to continue.'
+            ])
+          )
+        }))
+        setMetadataByConnection({})
+      }),
+    []
+  )
 
   useEffect(() => {
     window.api.preferences

@@ -55,7 +55,14 @@ const queryExecutionApi = {
   disconnect: (profileId: string): Promise<void> =>
     ipcRenderer.invoke('connection:disconnect', profileId),
   getMetadata: (profileId: string): Promise<DatabaseMetadata> =>
-    ipcRenderer.invoke('connection:getMetadata', profileId)
+    ipcRenderer.invoke('connection:getMetadata', profileId),
+  /** Fires when the shared utilityProcess died unexpectedly, dropping every
+   * live connection (user story 63). Returns an unsubscribe function. */
+  onServiceExited: (callback: () => void): (() => void) => {
+    const listener = (): void => callback()
+    ipcRenderer.on('query-execution:service-exited', listener)
+    return () => ipcRenderer.removeListener('query-execution:service-exited', listener)
+  }
 }
 
 export type QueryExecutionApi = typeof queryExecutionApi

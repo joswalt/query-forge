@@ -41,7 +41,16 @@ export class QueryExecutionClient {
   private readonly pendingResults = new Map<string, PendingResult>()
   private readonly pendingStreams = new Map<string, AsyncQueue<ResultChunk>>()
 
+  private unexpectedExitListener: (() => void) | undefined
+
   constructor(private readonly utilityModulePath: string) {}
+
+  /** Registers the single listener notified when the utilityProcess dies
+   * unexpectedly (not via `shutdown()`), so main can tell the renderer its
+   * "connected" statuses are stale (user story 63). */
+  onUnexpectedExit(listener: () => void): void {
+    this.unexpectedExitListener = listener
+  }
 
   async connect(profile: ConnectionProfile, secret: DecryptedSecret | undefined): Promise<void> {
     await this.sendForResult({ id: randomUUID(), method: 'connect', profile, secret })
@@ -111,12 +120,16 @@ export class QueryExecutionClient {
     // message and drop the dead handle so the next call forks a fresh child.
     // The new child has no live providers, so connections must be re-established.
     child.on('exit', () => {
-      if (this.child === child) this.child = undefined
+      // `shutdown()` clears `this.child` before killing, so a deliberate
+      // quit never counts as unexpected.
+      const unexpected = this.child === child
+      if (unexpected) this.child = undefined
       this.failAllPending(
         new Error(
-          'The query execution service stopped unexpectedly. Disconnect and reconnect, then retry.'
+          'The query execution service stopped unexpectedly. Reconnect, then retry.'
         )
       )
+      if (unexpected) this.unexpectedExitListener?.()
     })
     this.child = child
     return child
