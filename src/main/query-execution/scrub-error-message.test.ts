@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { TokenRefreshError } from './refreshing-token-source'
 import {
   describeTokenIdentity,
   isNetworkInterruption,
@@ -151,5 +152,17 @@ describe('toExecutionErrorMessage', () => {
   it('is idempotent on its own output', () => {
     const once = toExecutionErrorMessage(coded('ESOCKET'))
     expect(toExecutionErrorMessage(new Error(once))).toBe(once)
+  })
+})
+
+describe('token refresh failures', () => {
+  it('surfaces a TokenRefreshError buried inside a driver AggregateError, for both entry points', () => {
+    const buried = new AggregateError([
+      new Error('Security token could not be authenticated or authorized.'),
+      new TokenRefreshError(new Error('refresh token revoked'))
+    ])
+
+    expect(toExecutionErrorMessage(buried)).toMatch(/could not be renewed.*reconnect/s)
+    expect(toConnectionErrorMessage(buried, 'entra-id')).toMatch(/could not be renewed.*reconnect/s)
   })
 })

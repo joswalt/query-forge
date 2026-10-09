@@ -49,7 +49,20 @@ export interface EntraIdAuthenticator {
    * distinguish "password" from "AAD access token", both are just the
    * `secret` parameter.
    */
-  acquireToken(entraId: EntraIdAuthConfig, scopes: string[], profileId: string): Promise<string>
+  acquireToken(
+    entraId: EntraIdAuthConfig,
+    scopes: string[],
+    profileId: string,
+    options?: AcquireTokenOptions
+  ): Promise<string>
+}
+
+export interface AcquireTokenOptions {
+  /** Defaults to true. Background renewals (a live connection asking for a
+   * newer token, ADR 0002) pass false: they must never open a browser
+   * unprompted, so a cached account that can't be renewed silently is an
+   * error telling the user to reconnect instead. */
+  allowInteractive?: boolean
 }
 
 /** Opens `url` in the OS's default browser — never an embedded
@@ -77,7 +90,8 @@ export class MsalEntraIdAuthenticator implements EntraIdAuthenticator {
   async acquireToken(
     entraId: EntraIdAuthConfig,
     scopes: string[],
-    profileId: string
+    profileId: string,
+    options: AcquireTokenOptions = {}
   ): Promise<string> {
     const app = this.appFactory({
       auth: {
@@ -102,6 +116,12 @@ export class MsalEntraIdAuthenticator implements EntraIdAuthenticator {
         // "expired credential" case recovering gracefully via a fresh
         // sign-in, rather than surfacing a raw silent-flow error).
       }
+    }
+
+    if (options.allowInteractive === false) {
+      throw new Error(
+        'Entra ID sign-in has expired and could not be renewed silently — disconnect and reconnect to sign in again.'
+      )
     }
 
     const interactive = await app.acquireTokenInteractive({
@@ -134,7 +154,7 @@ const defaultConfidentialFactory: ConfidentialClientApplicationFactory = (config
  * token is handed to the Query Execution Service as the Decrypted Secret
  * (ADR 0001) — the client secret itself never leaves main. No browser, no
  * redirect URI, and nothing to cache: a fresh token is minted per
- * `connect()`/Test Connection.
+ * `connect()`, Test Connection or mid-session renewal (ADR 0002).
  */
 export interface ServicePrincipalAuthenticator {
   acquireToken(

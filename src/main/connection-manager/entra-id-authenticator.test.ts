@@ -38,6 +38,43 @@ describe('MsalEntraIdAuthenticator', () => {
     expect(openBrowser).not.toHaveBeenCalled()
   })
 
+  it('with allowInteractive: false, never opens a browser — it errors so the user reconnects', async () => {
+    const app: PublicClientApplicationLike = {
+      getTokenCache: () => ({ getAllAccounts: async () => [{ username: 'user@example.com' }] }),
+      acquireTokenSilent: vi.fn(async () => Promise.reject(new Error('refresh token expired'))),
+      acquireTokenInteractive: vi.fn(async () => ({ accessToken: 'interactive-token' }))
+    }
+    const openBrowser = vi.fn(async () => {})
+    const authenticator = new MsalEntraIdAuthenticator(
+      () => noopTokenCacheStore(),
+      openBrowser,
+      () => app
+    )
+
+    await expect(
+      authenticator.acquireToken(ENTRA_ID, ['scope-a'], 'profile-1', { allowInteractive: false })
+    ).rejects.toThrow(/reconnect/)
+    expect(app.acquireTokenInteractive).not.toHaveBeenCalled()
+    expect(openBrowser).not.toHaveBeenCalled()
+  })
+
+  it('with allowInteractive: false, still returns a silently renewed token', async () => {
+    const app: PublicClientApplicationLike = {
+      getTokenCache: () => ({ getAllAccounts: async () => [{ username: 'user@example.com' }] }),
+      acquireTokenSilent: vi.fn(async () => ({ accessToken: 'silent-token' })),
+      acquireTokenInteractive: vi.fn(async () => ({ accessToken: 'interactive-token' }))
+    }
+    const authenticator = new MsalEntraIdAuthenticator(
+      () => noopTokenCacheStore(),
+      async () => {},
+      () => app
+    )
+
+    await expect(
+      authenticator.acquireToken(ENTRA_ID, ['scope-a'], 'profile-1', { allowInteractive: false })
+    ).resolves.toBe('silent-token')
+  })
+
   it('falls back to an interactive sign-in when no cached account exists', async () => {
     const app: PublicClientApplicationLike = {
       getTokenCache: () => ({ getAllAccounts: async () => [] }),

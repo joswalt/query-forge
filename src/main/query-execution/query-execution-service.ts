@@ -1,5 +1,6 @@
 import type { ConnectionConfig, ConnectionProfile } from '@shared/types/connection-profile'
-import type { DatabaseProvider } from '@shared/types/database-provider'
+import { randomUUID } from 'node:crypto'
+import type { DatabaseProvider, DecryptedSecret } from '@shared/types/database-provider'
 import { assertReadOnlyQuery } from './read-only-guard'
 import { toExecutionErrorMessage } from './scrub-error-message'
 import type { QueryExecutionRequest, QueryExecutionResponse } from './protocol'
@@ -21,6 +22,11 @@ export type ProviderFactory = (config: ConnectionConfig) => DatabaseProvider
 export class QueryExecutionService {
   private readonly providers = new Map<string, DatabaseProvider>()
   private readonly profiles = new Map<string, ConnectionProfile>()
+  /** Secret refreshes sent to main and awaiting its `refreshSecretResult`. */
+  private readonly pendingRefreshes = new Map<
+    string,
+    { resolve: (secret: DecryptedSecret) => void; reject: (err: Error) => void }
+  >()
 
   constructor(private readonly providerFactory: ProviderFactory) {}
 
@@ -32,7 +38,12 @@ export class QueryExecutionService {
       switch (request.method) {
         case 'connect': {
           const provider = this.providerFactory(request.profile.config)
-          await provider.connect(request.profile, request.secret)
+          // The Provider may call back for a renewed token (Entra ID /
+          // service principal) long after this request has been answered;
+          // `send` is just the transport to main, so it stays valid.
+          await provider.connect(request.profile, request.secret, () =>
+            this.requestSecretRefresh(request.profile.id, send)
+          )
           this.providers.set(request.profile.id, provider)
           this.profiles.set(request.profile.id, request.profile)
           send({ id: request.id, kind: 'result', value: undefined, done: true })
@@ -62,6 +73,14 @@ export class QueryExecutionService {
         case 'getMetadata': {
           const metadata = await this.requireProvider(request.profileId).getMetadata()
           send({ id: request.id, kind: 'result', value: metadata, done: true })
+          return
+        }
+
+        case 'refreshSecretResult': {
+          const pending = this.pendingRefreshes.get(request.id)
+          this.pendingRefreshes.delete(request.id)
+          if (request.secret !== undefined) pending?.resolve(request.secret)
+          else pending?.reject(new Error(request.error ?? 'Could not renew the access token'))
           return
         }
 
@@ -95,6 +114,17 @@ export class QueryExecutionService {
         done: true
       })
     }
+  }
+
+  private requestSecretRefresh(
+    profileId: string,
+    send: (response: QueryExecutionResponse) => void
+  ): Promise<DecryptedSecret> {
+    return new Promise<DecryptedSecret>((resolve, reject) => {
+      const id = randomUUID()
+      this.pendingRefreshes.set(id, { resolve, reject })
+      send({ id, kind: 'refreshSecret', profileId })
+    })
   }
 
   private requireProvider(profileId: string): DatabaseProvider {

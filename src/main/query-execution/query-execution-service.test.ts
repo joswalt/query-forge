@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ConnectionProfile } from '@shared/types/connection-profile'
-import type { DatabaseProvider, ResultChunk, TestResult } from '@shared/types/database-provider'
+import type {
+  DatabaseProvider,
+  ResultChunk,
+  SecretRefresher,
+  TestResult
+} from '@shared/types/database-provider'
 import { QueryExecutionService } from './query-execution-service'
 import type { QueryExecutionResponse } from './protocol'
 
@@ -26,8 +31,15 @@ class FakeProvider implements DatabaseProvider {
   canceledExecutionIds: string[] = []
   metadata = { objects: [{ name: 'table1', kind: 'table' }] }
 
-  async connect(): Promise<void> {
+  refresher: SecretRefresher | undefined
+
+  async connect(
+    _profile?: ConnectionProfile,
+    _secret?: string,
+    refreshSecret?: SecretRefresher
+  ): Promise<void> {
     this.connected = true
+    this.refresher = refreshSecret
   }
   async testConnection(): Promise<TestResult> {
     return this.testResult
@@ -55,6 +67,39 @@ function collectResponses(): {
 }
 
 describe('QueryExecutionService', () => {
+  it('connect: hands the provider a refresher that round-trips a renewed secret through main', async () => {
+    const provider = new FakeProvider()
+    const service = new QueryExecutionService(() => provider)
+    const { send, responses } = collectResponses()
+
+    await service.handle(
+      { id: 'req-1', method: 'connect', profile: makeProfile(), secret: 'old-token' },
+      send
+    )
+    const renewed = provider.refresher!()
+
+    const ask = responses.find((r) => r.kind === 'refreshSecret')
+    expect(ask).toMatchObject({ kind: 'refreshSecret', profileId: 'profile-1' })
+    await service.handle({ id: ask!.id, method: 'refreshSecretResult', secret: 'new-token' }, send)
+    await expect(renewed).resolves.toBe('new-token')
+  })
+
+  it('refreshSecretResult: rejects the waiting refresh when main reports an error', async () => {
+    const provider = new FakeProvider()
+    const service = new QueryExecutionService(() => provider)
+    const { send, responses } = collectResponses()
+    await service.handle(
+      { id: 'req-1', method: 'connect', profile: makeProfile(), secret: 'old-token' },
+      send
+    )
+    const renewed = provider.refresher!()
+    const ask = responses.find((r) => r.kind === 'refreshSecret')!
+
+    await service.handle({ id: ask.id, method: 'refreshSecretResult', error: 'revoked' }, send)
+
+    await expect(renewed).rejects.toThrow('revoked')
+  })
+
   it('connect: tracks the provider by profile id and replies once', async () => {
     const provider = new FakeProvider()
     const service = new QueryExecutionService(() => provider)

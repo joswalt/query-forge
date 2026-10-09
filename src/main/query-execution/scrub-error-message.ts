@@ -1,3 +1,5 @@
+import { findTokenRefreshError } from './refreshing-token-source'
+
 /**
  * Strips credential-shaped substrings from an error message before it
  * crosses back to the renderer. `mssql`/tedious connection errors can embed
@@ -54,10 +56,11 @@ const TOKEN_IDENTIFIED_PRINCIPAL_PATTERN = /login failed for user '<token-identi
  * Wraps `toSafeErrorMessage` with user story 62's "clear messaging, a path
  * to re-authenticate" for an `entra-id` connection's failure — ADR 0001
  * hands a Decrypted Secret (here, an access token) to the Query Execution
- * Service once per `connect()`/`testConnection()`; there is no silent
- * mid-session refresh by design, so an expired token surfaces as a normal
- * connection failure unless a Provider recognizes the shape and rewrites
- * it. The path to re-authenticate is simply disconnecting and reconnecting
+ * Service at `connect()`/`testConnection()`; a connected profile's token is
+ * then renewed silently mid-session (ADR 0002), so what reaches this
+ * function is either a token that was never renewable (Test Connection) or
+ * one whose renewal failed, and a Provider rewrites the recognizable shapes.
+ * The path to re-authenticate is simply disconnecting and reconnecting
  * (or re-running Test Connection) — ConnectionManager.resolveSecret()
  * always acquires a fresh token (silently refreshed, or interactively if
  * the cached refresh token is also no longer usable) on the next attempt,
@@ -65,6 +68,8 @@ const TOKEN_IDENTIFIED_PRINCIPAL_PATTERN = /login failed for user '<token-identi
  * exists.
  */
 export function toConnectionErrorMessage(err: unknown, authMode: string, token?: string): string {
+  const refreshFailure = findTokenRefreshError(err)
+  if (refreshFailure) return toSafeErrorMessage(refreshFailure)
   const safe = toSafeErrorMessage(err)
   const isEntraMode = authMode === 'entra-id' || authMode === 'service-principal'
   // Azure SQL's answer when the Entra token is valid but its principal has no
@@ -117,6 +122,8 @@ export function isNetworkInterruption(err: unknown): boolean {
  * is safe.
  */
 export function toExecutionErrorMessage(err: unknown): string {
+  const refreshFailure = findTokenRefreshError(err)
+  if (refreshFailure) return toSafeErrorMessage(refreshFailure)
   const safe = toSafeErrorMessage(err)
   if (isNetworkInterruption(err)) {
     return `Network connection to the database was interrupted — check your connectivity and retry. If it keeps failing, disconnect and reconnect. (${safe})`

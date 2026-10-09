@@ -42,6 +42,7 @@ export class QueryExecutionClient {
   private readonly pendingStreams = new Map<string, AsyncQueue<ResultChunk>>()
 
   private unexpectedExitListener: (() => void) | undefined
+  private secretRefresher: ((profileId: string) => Promise<DecryptedSecret>) | undefined
 
   constructor(private readonly utilityModulePath: string) {}
 
@@ -50,6 +51,12 @@ export class QueryExecutionClient {
    * "connected" statuses are stale (user story 63). */
   onUnexpectedExit(listener: () => void): void {
     this.unexpectedExitListener = listener
+  }
+
+  /** Registers how main renews a connected profile's access token when the
+   * utilityProcess asks for one mid-session (docs/adr/0002-...). */
+  onSecretRefreshRequested(refresher: (profileId: string) => Promise<DecryptedSecret>): void {
+    this.secretRefresher = refresher
   }
 
   async connect(profile: ConnectionProfile, secret: DecryptedSecret | undefined): Promise<void> {
@@ -135,6 +142,24 @@ export class QueryExecutionClient {
     return child
   }
 
+  /** The renewed token crosses main→utility exactly like the one handed over
+   * at `connect()` (ADR 0001/0002): never logged, not retained here. */
+  private async answerSecretRefresh(id: string, profileId: string): Promise<void> {
+    let reply: QueryExecutionRequest
+    try {
+      if (!this.secretRefresher) throw new Error('Token renewal is not configured')
+      reply = { id, method: 'refreshSecretResult', secret: await this.secretRefresher(profileId) }
+    } catch (err) {
+      reply = {
+        id,
+        method: 'refreshSecretResult',
+        error: err instanceof Error ? err.message : String(err)
+      }
+    }
+    // The child may have exited while main was renewing; nothing to answer then.
+    this.child?.postMessage(reply)
+  }
+
   private failAllPending(error: Error): void {
     for (const pending of this.pendingResults.values()) pending.reject(error)
     this.pendingResults.clear()
@@ -150,6 +175,11 @@ export class QueryExecutionClient {
   }
 
   private onMessage(response: QueryExecutionResponse): void {
+    if (response.kind === 'refreshSecret') {
+      void this.answerSecretRefresh(response.id, response.profileId)
+      return
+    }
+
     if (response.kind === 'chunk') {
       this.pendingStreams.get(response.id)?.push(response.value)
       return

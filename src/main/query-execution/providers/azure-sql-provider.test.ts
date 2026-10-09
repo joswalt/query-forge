@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { AzureSqlConnectionConfig, ConnectionProfile } from '@shared/types/connection-profile'
 import { AzureSqlProvider } from './azure-sql-provider'
 import type { SqlConfig, SqlPoolFactory, SqlPoolLike, SqlRequestLike } from './azure-sql-provider'
@@ -196,6 +196,43 @@ describe('AzureSqlProvider', () => {
       })
       expect(capturedConfig).not.toHaveProperty('user')
       expect(capturedConfig).not.toHaveProperty('password')
+    })
+
+    it('uses a token-credential for a live entra-id connection so each pool login can renew the token', async () => {
+      let capturedConfig: SqlConfig | undefined
+      const provider = new AzureSqlProvider((config) => {
+        capturedConfig = config
+        return new FakeSqlPool()
+      })
+      const refresh = vi.fn(async () => 'renewed-token')
+      // An expired JWT, so the very next login must renew.
+      const expired = `h.${Buffer.from(JSON.stringify({ exp: 1 })).toString('base64url')}.s`
+
+      await provider.connect(makeProfile({ ...baseConfig, authMode: 'entra-id' }), expired, refresh)
+
+      const authentication = capturedConfig?.authentication
+      expect(authentication?.type).toBe('token-credential')
+      if (authentication?.type !== 'token-credential') throw new Error('unreachable')
+      expect((await authentication.options.credential.getToken()).token).toBe('renewed-token')
+      expect(refresh).toHaveBeenCalledTimes(1)
+      expect(capturedConfig).not.toHaveProperty('password')
+    })
+
+    it('reuses the token from connect() while it is still fresh', async () => {
+      let capturedConfig: SqlConfig | undefined
+      const provider = new AzureSqlProvider((config) => {
+        capturedConfig = config
+        return new FakeSqlPool()
+      })
+      const refresh = vi.fn(async () => 'renewed-token')
+      const fresh = `h.${Buffer.from(JSON.stringify({ exp: Date.now() / 1000 + 3600 })).toString('base64url')}.s`
+
+      await provider.connect(makeProfile({ ...baseConfig, authMode: 'service-principal' }), fresh, refresh)
+
+      const authentication = capturedConfig?.authentication
+      if (authentication?.type !== 'token-credential') throw new Error('expected token-credential')
+      expect((await authentication.options.credential.getToken()).token).toBe(fresh)
+      expect(refresh).not.toHaveBeenCalled()
     })
 
     it('maps profile config + secret into mssql config shape', async () => {

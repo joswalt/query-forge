@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { ConnectionProfile, CosmosConnectionConfig } from '@shared/types/connection-profile'
 import {
   buildCosmosConnectionPolicy,
@@ -214,6 +214,25 @@ describe('CosmosDbProvider', () => {
       expect(await capturedOptions?.aadCredentials?.getToken([])).toMatchObject({
         token: 'aad-access-token'
       })
+    })
+  })
+
+  describe('entra-id token renewal', () => {
+    it('renews the token through the refresher once the connect() token has expired', async () => {
+      let capturedOptions: CosmosClientFactoryOptions | undefined
+      const provider = new CosmosDbProvider((options) => {
+        capturedOptions = options
+        return new FakeCosmosClient()
+      })
+      const expired = `h.${Buffer.from(JSON.stringify({ exp: 1 })).toString('base64url')}.s`
+      const refresh = vi.fn(async () => 'renewed-token')
+
+      await provider.connect(makeProfile({ ...baseConfig, authMode: 'entra-id' }), expired, refresh)
+
+      expect(await capturedOptions?.aadCredentials?.getToken([])).toMatchObject({
+        token: 'renewed-token'
+      })
+      expect(refresh).toHaveBeenCalledTimes(1)
     })
   })
 

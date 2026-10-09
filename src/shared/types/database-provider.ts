@@ -8,6 +8,16 @@ import type { ConnectionProfile } from './connection-profile'
 export type DecryptedSecret = string
 
 /**
+ * Asks main for a fresh Decrypted Secret for the profile a Provider is
+ * connected with (docs/adr/0002-refresh-entra-tokens-over-the-message-port.md).
+ * Only supplied for token-based auth modes (Entra ID, service principal),
+ * whose secret is a short-lived access token; a Provider calls it when a
+ * mid-session login needs a token newer than the one handed over at
+ * `connect()`. Rejects when main can't renew it without user interaction.
+ */
+export type SecretRefresher = () => Promise<DecryptedSecret>
+
+/**
  * Opaque identifier for one in-flight `executeQuery` call (GLOSSARY.md:
  * "Execution ID"), used to address it for `cancel()`.
  */
@@ -92,7 +102,11 @@ export interface QueryOptions {
  * is client-side abandonment only (RU charges already incurred stand).
  */
 export interface DatabaseProvider {
-  connect(profile: ConnectionProfile, secret: DecryptedSecret | undefined): Promise<void>
+  connect(
+    profile: ConnectionProfile,
+    secret: DecryptedSecret | undefined,
+    refreshSecret?: SecretRefresher
+  ): Promise<void>
   testConnection(
     profile: ConnectionProfile,
     secret: DecryptedSecret | undefined

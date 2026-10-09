@@ -13,7 +13,7 @@ The `safeStorage`-encrypted form of a credential (SQL password, Cosmos account k
 _Avoid_: Secret, Credential (both too ambiguous about encryption state — always say which state you mean)
 
 **Decrypted Secret**:
-The plaintext form of a credential, produced by decrypting a Secret Ciphertext in main at connect-time. Exists only transiently: handed once to the Query Execution Service over the main↔utility `MessagePort` and never persisted or re-transmitted beyond that. Never logged, never written to disk, never passed to the renderer.
+The plaintext form of a credential, produced by decrypting a Secret Ciphertext in main at connect-time. Exists only transiently: handed once to the Query Execution Service over the main↔utility `MessagePort` and never persisted or re-transmitted beyond that — with one exception: an Entra ID / service principal *access token* is renewed in main and sent again when the Query Execution Service asks (ADR 0002). Never logged, never written to disk, never passed to the renderer.
 _Avoid_: Secret (ambiguous — see Secret Ciphertext)
 
 **Connection Manager**:

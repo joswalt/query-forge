@@ -36,6 +36,9 @@ export type QueryExecutionRequest =
     }
   | { id: RequestId; method: 'cancel'; profileId: string; executionId: ExecutionId }
   | { id: RequestId; method: 'getMetadata'; profileId: string }
+  /** Main's answer to a `refreshSecret` response (same `id`): the renewed
+   * Decrypted Secret, or why it couldn't be renewed. */
+  | { id: RequestId; method: 'refreshSecretResult'; secret?: DecryptedSecret; error?: string }
 
 /**
  * `chunk` responses (`done: false`) may be sent zero or more times per
@@ -51,3 +54,11 @@ export type QueryExecutionResponse =
   | { id: RequestId; kind: 'chunk'; value: ResultChunk; done: false }
   | { id: RequestId; kind: 'result'; value: TestResult | DatabaseMetadata | undefined; done: true }
   | { id: RequestId; kind: 'error'; message: string; done: true }
+  /**
+   * Utility → main: a connected Provider needs a newer access token for
+   * `profileId` (docs/adr/0002-refresh-entra-tokens-over-the-message-port.md).
+   * Unlike every other response this opens a new exchange rather than
+   * answering a request: `id` is fresh, and main replies with a
+   * `refreshSecretResult` request carrying the same `id`.
+   */
+  | { id: RequestId; kind: 'refreshSecret'; profileId: string }
