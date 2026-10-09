@@ -4,9 +4,12 @@ import { openDatabase } from './local-storage/open-database'
 import { ConnectionProfileRepository } from './local-storage/connection-profile-repository'
 import { QueryHistoryRepository } from './local-storage/query-history-repository'
 import { SavedQueryRepository } from './local-storage/saved-query-repository'
+import { MsalTokenCacheRepository } from './local-storage/msal-token-cache-repository'
 import { PreferencesStore } from './local-storage/preferences-store'
 import { ConnectionManager } from './connection-manager/connection-manager'
 import { SafeStorageSecretStore } from './connection-manager/safe-storage-secret-store'
+import { MsalEntraIdAuthenticator } from './connection-manager/entra-id-authenticator'
+import { SqliteTokenCacheStore } from './connection-manager/sqlite-token-cache-store'
 import { registerConnectionIpcHandlers } from './ipc/connection-ipc'
 import { registerQueryExecutionIpcHandlers } from './ipc/query-execution-ipc'
 import { registerExportIpcHandlers } from './ipc/export-ipc'
@@ -30,9 +33,17 @@ function createLocalStorage(): {
 } {
   const dbPath = join(app.getPath('userData'), 'queryforge.db')
   const db = openDatabase(dbPath)
+  const secretStore = new SafeStorageSecretStore()
+  const tokenCacheRepository = new MsalTokenCacheRepository(db)
+  const authenticator = new MsalEntraIdAuthenticator(
+    (profileId) => new SqliteTokenCacheStore(tokenCacheRepository, secretStore, profileId),
+    (url) => shell.openExternal(url)
+  )
   const connectionManager = new ConnectionManager(
     new ConnectionProfileRepository(db),
-    new SafeStorageSecretStore()
+    secretStore,
+    authenticator,
+    tokenCacheRepository
   )
   const historyRepository = new QueryHistoryRepository(db)
   const savedQueryRepository = new SavedQueryRepository(db)

@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { ConnectionProfile, CosmosConnectionConfig } from '@shared/types/connection-profile'
-import { UnsupportedAuthModeError } from '@shared/types/database-provider'
 import { CosmosDbProvider } from './cosmos-db-provider'
 import type {
   CosmosClientFactory,
+  CosmosClientFactoryOptions,
   CosmosClientLike,
   CosmosContainerLike,
   CosmosDatabaseLike
@@ -119,16 +119,23 @@ describe('CosmosDbProvider', () => {
       expect(result.message).toBe('Unauthorized: key=***')
     })
 
-    it('rejects entra-id as an unsupported auth mode without attempting a connection', async () => {
+    it('tests an entra-id connection using aadCredentials, not an account key', async () => {
       const client = new FakeCosmosClient()
-      const provider = new CosmosDbProvider(makeFactory(client))
+      let capturedOptions: CosmosClientFactoryOptions | undefined
+      const factory: CosmosClientFactory = (options) => {
+        capturedOptions = options
+        return client
+      }
+      const provider = new CosmosDbProvider(factory)
       const profile = makeProfile({ ...baseConfig, authMode: 'entra-id' })
 
-      const result = await provider.testConnection(profile, undefined)
+      const result = await provider.testConnection(profile, 'aad-access-token')
 
-      expect(result.success).toBe(false)
-      expect(result.message).toContain('entra-id')
-      expect(client.databaseReads).toEqual([])
+      expect(result).toEqual({ success: true })
+      expect(capturedOptions?.key).toBeUndefined()
+      expect(await capturedOptions?.aadCredentials?.getToken([])).toMatchObject({
+        token: 'aad-access-token'
+      })
     })
   })
 
@@ -165,12 +172,22 @@ describe('CosmosDbProvider', () => {
       ])
     })
 
-    it('rejects connect() for entra-id', async () => {
+    it('connects an entra-id profile using aadCredentials wrapping the access token', async () => {
       const client = new FakeCosmosClient()
-      const provider = new CosmosDbProvider(makeFactory(client))
+      let capturedOptions: CosmosClientFactoryOptions | undefined
+      const factory: CosmosClientFactory = (options) => {
+        capturedOptions = options
+        return client
+      }
+      const provider = new CosmosDbProvider(factory)
       const profile = makeProfile({ ...baseConfig, authMode: 'entra-id' })
 
-      await expect(provider.connect(profile, undefined)).rejects.toThrow(UnsupportedAuthModeError)
+      await provider.connect(profile, 'aad-access-token')
+
+      expect(capturedOptions?.key).toBeUndefined()
+      expect(await capturedOptions?.aadCredentials?.getToken([])).toMatchObject({
+        token: 'aad-access-token'
+      })
     })
   })
 

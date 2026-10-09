@@ -53,14 +53,19 @@ export function registerQueryExecutionIpcHandlers(
   ipcMain.handle(
     'connection:test',
     async (_event, request: TestConnectionRequest): Promise<TestResult> => {
-      const { profile, secret } = resolveTestSubject(manager, request)
+      const { profile, secret } = await resolveTestSubject(manager, request)
       return client.testConnection(profile, secret)
     }
   )
 
   ipcMain.handle('connection:connect', async (_event, profileId: string): Promise<void> => {
     const profile = requireProfile(manager, profileId)
-    const secret = manager.revealSecret(profileId)
+    // Branches on the profile's authMode: decrypts the stored Secret
+    // Ciphertext for account-key/sql-credentials, or acquires a fresh
+    // Entra ID access token (silently refreshed, or interactively) for
+    // entra-id — callers here never need to know which (ConnectionManager.
+    // resolveSecret's doc).
+    const secret = await manager.resolveSecret(profile)
     await client.connect(profile, secret)
   })
 
@@ -244,20 +249,35 @@ function requireProfile(manager: ConnectionManager, profileId: string): Connecti
   return profile
 }
 
-function resolveTestSubject(
+async function resolveTestSubject(
   manager: ConnectionManager,
   request: TestConnectionRequest
-): { profile: ConnectionProfile; secret: string | undefined } {
+): Promise<{ profile: ConnectionProfile; secret: string | undefined }> {
   if ('profileId' in request) {
     const profile = requireProfile(manager, request.profileId)
-    return { profile, secret: manager.revealSecret(request.profileId) }
+    return { profile, secret: await manager.resolveSecret(profile) }
   }
 
   // Test Connection before saving (user story 6) — a profile-shaped object
   // good enough for the Database Provider Interface's `profile` parameter.
-  // Never persisted; `id: 'unsaved'` is never looked up anywhere.
+  // Never persisted as a Connection Profile row — but for an entra-id
+  // config, its id IS used as the MSAL token cache's key (msal-token-
+  // cache-plugin.ts has no FK to connection_profiles, so an unknown id is
+  // harmless there). A bare 'unsaved' would collide across every
+  // never-saved entra-id test in a row: testing a second app registration
+  // would deserialize the first's cached accounts via beforeCacheAccess,
+  // then getAllAccounts() hands acquireTokenSilent a stale account for the
+  // wrong clientId. Suffixing with clientId keeps distinct (never-saved)
+  // app registrations from sharing a cache; two tests of the *same*
+  // unsaved config still intentionally share one, so a cached token from
+  // the first test's sign-in is reused by the second, same as it would be
+  // for a saved profile.
+  const unsavedProfileId =
+    request.config.authMode === 'entra-id' && request.config.entraId
+      ? `unsaved:${request.config.entraId.clientId}`
+      : 'unsaved'
   const profile: ConnectionProfile = {
-    id: 'unsaved',
+    id: unsavedProfileId,
     name: 'Test Connection',
     readOnly: false,
     config: request.config,
@@ -265,5 +285,12 @@ function resolveTestSubject(
     createdAt: new Date(0).toISOString(),
     updatedAt: new Date(0).toISOString()
   }
-  return { profile, secret: request.secret }
+
+  // entra-id has no typed-in secret to fall back to (request.secret is
+  // only ever populated for account-key/sql-credentials' plaintext field,
+  // user story 6) — it must go through the same resolveSecret flow a
+  // saved profile does, just keyed by the synthetic 'unsaved' id above.
+  const secret =
+    request.config.authMode === 'entra-id' ? await manager.resolveSecret(profile) : request.secret
+  return { profile, secret }
 }

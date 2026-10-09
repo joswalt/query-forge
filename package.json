@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@azure/cosmos": "^4.10.1",
+    "@azure/msal-node": "^7.0.1",
     "@codemirror/autocomplete": "^6.20.3",
     "@codemirror/commands": "^6.11.1",
     "@codemirror/lang-sql": "^6.10.0",
@@ -61,17 +62,25 @@
       "output": "dist",
       "buildResources": "resources"
     },
-    "files": ["out/**/*"],
+    "files": [
+      "out/**/*"
+    ],
     "asarUnpack": [
       "**/node_modules/better-sqlite3/**/*"
     ],
     "mac": {
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "icon": "resources/icon.icns",
       "identity": null
     },
     "win": {
-      "target": ["nsis", "portable"],
+      "target": [
+        "nsis",
+        "portable"
+      ],
       "icon": "resources/icon.ico"
     }
   }

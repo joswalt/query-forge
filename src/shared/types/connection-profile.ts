@@ -4,10 +4,28 @@ export type CosmosAuthMode = 'account-key' | 'entra-id'
 /** Authentication modes available on an Azure SQL connection (product-overview.md §4.1). */
 export type AzureSqlAuthMode = 'sql-credentials' | 'entra-id'
 
+/**
+ * The app-registration parameters `acquireTokenInteractive` needs (spec.md
+ * Implementation Decisions: msal-node Authorization Code + PKCE, system
+ * browser + loopback redirect). Present only when `authMode === 'entra-id'`
+ * — a user who will never register an Entra ID app simply leaves a
+ * connection on `account-key`/`sql-credentials` and never fills these in;
+ * nothing elsewhere assumes they're populated. `redirectUri` must be a
+ * loopback address (`http://localhost:PORT`) — msal-node's loopback
+ * redirect flow, not an embedded `BrowserWindow` (spec.md Out of Scope's
+ * forbidden alternatives).
+ */
+export interface EntraIdAuthConfig {
+  clientId: string
+  tenantId: string
+  redirectUri: string
+}
+
 export interface CosmosConnectionConfig {
   kind: 'cosmos-db'
   endpoint: string
   authMode: CosmosAuthMode
+  entraId?: EntraIdAuthConfig
   database?: string
   container?: string
   connectionTimeoutMs?: number
@@ -19,6 +37,7 @@ export interface AzureSqlConnectionConfig {
   port?: number
   database: string
   authMode: AzureSqlAuthMode
+  entraId?: EntraIdAuthConfig
   username?: string
   encrypt?: boolean
   connectionTimeoutMs?: number

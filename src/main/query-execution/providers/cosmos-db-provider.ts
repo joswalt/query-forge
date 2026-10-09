@@ -10,8 +10,7 @@ import type {
   ResultChunk,
   TestResult
 } from '@shared/types/database-provider'
-import { UnsupportedAuthModeError } from '@shared/types/database-provider'
-import { toSafeErrorMessage } from '../scrub-error-message'
+import { toConnectionErrorMessage } from '../scrub-error-message'
 
 /**
  * The narrow slice of `@azure/cosmos`'s `CosmosClient` this Provider
@@ -49,10 +48,58 @@ export interface CosmosContainerLike {
   }
 }
 
-export type CosmosClientFactory = (options: { endpoint: string; key?: string }) => CosmosClientLike
+/** A minimal `@azure/core-auth` `TokenCredential` shape — just enough for
+ * `CosmosClient`'s `aadCredentials` option, not the full SDK type (depth
+ * over breadth at the seam, same rationale as `CosmosClientLike`). */
+export interface TokenCredentialLike {
+  getToken(scopes: string | string[]): Promise<{ token: string; expiresOnTimestamp: number } | null>
+}
 
-const defaultClientFactory: CosmosClientFactory = ({ endpoint, key }) =>
-  new CosmosClient({ endpoint, key }) as unknown as CosmosClientLike
+export interface CosmosClientFactoryOptions {
+  endpoint: string
+  key?: string
+  aadCredentials?: TokenCredentialLike
+}
+
+export type CosmosClientFactory = (options: CosmosClientFactoryOptions) => CosmosClientLike
+
+const defaultClientFactory: CosmosClientFactory = (options) =>
+  new CosmosClient(options) as unknown as CosmosClientLike
+
+/**
+ * Wraps an already-acquired Entra ID access token (ConnectionManager.
+ * resolveSecret, via MsalEntraIdAuthenticator) as a static `TokenCredential`
+ * — `@azure/cosmos`'s `aadCredentials` expects something `getToken()`-
+ * shaped, not a bare string. Always returns the same token for this
+ * client's lifetime rather than re-acquiring one: ADR 0001 hands a
+ * Decrypted Secret to the Query Execution Service once per `connect()`,
+ * with no mid-session refresh, the same tradeoff the Azure SQL Provider
+ * makes for its own AAD access-token auth.
+ */
+function staticTokenCredential(token: string): TokenCredentialLike {
+  return {
+    async getToken() {
+      return { token, expiresOnTimestamp: Date.now() + 60 * 60 * 1000 }
+    }
+  }
+}
+
+/**
+ * Maps a Cosmos config + Decrypted Secret to `CosmosClient`'s constructor
+ * options. For `authMode: 'entra-id'`, `secret` is an AAD access token, not
+ * an account key — `aadCredentials`, with `key` omitted entirely (sending
+ * both would be ambiguous about which auth method the SDK should actually
+ * use).
+ */
+function toCosmosClientOptions(
+  config: CosmosConnectionConfig,
+  secret: DecryptedSecret | undefined
+): CosmosClientFactoryOptions {
+  if (config.authMode === 'entra-id') {
+    return { endpoint: config.endpoint, aadCredentials: staticTokenCredential(secret ?? '') }
+  }
+  return { endpoint: config.endpoint, key: secret }
+}
 
 /** Page size for `items.query`'s continuation-token-driven iterator (user story 32). */
 const DEFAULT_PAGE_SIZE = 100
@@ -72,10 +119,12 @@ export class CosmosDbProvider implements DatabaseProvider {
 
   async connect(profile: ConnectionProfile, secret: DecryptedSecret | undefined): Promise<void> {
     const config = requireCosmosConfig(profile)
-    assertSupportedAuthMode(config.authMode)
     // CosmosClient's constructor performs no network I/O — connect() is
-    // lazy by design (unlike Azure SQL's eager pool.connect()).
-    this.client = this.clientFactory({ endpoint: config.endpoint, key: secret })
+    // lazy by design (unlike Azure SQL's eager pool.connect()). Because of
+    // that laziness, an expired/invalid Entra ID token isn't discovered
+    // here; it surfaces as a toConnectionErrorMessage-rewritten failure
+    // from the first real call (executeQuery/getMetadata) instead.
+    this.client = this.clientFactory(toCosmosClientOptions(config, secret))
     this.config = config
   }
 
@@ -84,15 +133,10 @@ export class CosmosDbProvider implements DatabaseProvider {
     secret: DecryptedSecret | undefined
   ): Promise<TestResult> {
     const config = requireCosmosConfig(profile)
-    try {
-      assertSupportedAuthMode(config.authMode)
-    } catch (err) {
-      return { success: false, message: toSafeErrorMessage(err) }
-    }
 
     // Test Connection (GLOSSARY.md) never populates the live pool — a
     // throwaway client, never assigned to `this.client`.
-    const client = this.clientFactory({ endpoint: config.endpoint, key: secret })
+    const client = this.clientFactory(toCosmosClientOptions(config, secret))
     try {
       if (config.database) {
         await client.database(config.database).read()
@@ -101,7 +145,7 @@ export class CosmosDbProvider implements DatabaseProvider {
       }
       return { success: true }
     } catch (err) {
-      return { success: false, message: toSafeErrorMessage(err) }
+      return { success: false, message: toConnectionErrorMessage(err, config.authMode) }
     } finally {
       client.dispose?.()
     }
@@ -200,10 +244,4 @@ function requireCosmosConfig(profile: ConnectionProfile): CosmosConnectionConfig
     throw new Error(`CosmosDbProvider cannot handle connection kind "${profile.config.kind}"`)
   }
   return profile.config
-}
-
-function assertSupportedAuthMode(authMode: CosmosConnectionConfig['authMode']): void {
-  if (authMode !== 'account-key') {
-    throw new UnsupportedAuthModeError(authMode)
-  }
 }

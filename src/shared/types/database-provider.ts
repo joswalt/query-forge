@@ -83,19 +83,3 @@ export interface DatabaseProvider {
   cancel(executionId: ExecutionId): void
   getMetadata(): Promise<DatabaseMetadata>
 }
-
-/**
- * Thrown by a Database Provider's `connect`/`testConnection` when asked to
- * use an auth mode it does not yet implement. Currently: `entra-id` on both
- * providers — the msal-node interactive Authorization Code + PKCE flow is a
- * separate, later Connection Manager slice (spec.md's suggested build
- * order puts providers/testing/metadata before query editing, and the full
- * Entra ID flow is tracked separately from both). Never thrown for
- * `account-key` / `sql-credentials`.
- */
-export class UnsupportedAuthModeError extends Error {
-  constructor(public readonly authMode: string) {
-    super(`Auth mode "${authMode}" is not yet supported`)
-    this.name = 'UnsupportedAuthModeError'
-  }
-}

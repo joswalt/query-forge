@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import type { AzureSqlConnectionConfig, ConnectionProfile } from '@shared/types/connection-profile'
-import { UnsupportedAuthModeError } from '@shared/types/database-provider'
 import { AzureSqlProvider } from './azure-sql-provider'
 import type { SqlConfig, SqlPoolFactory, SqlPoolLike, SqlRequestLike } from './azure-sql-provider'
 
@@ -114,26 +113,45 @@ describe('AzureSqlProvider', () => {
       expect(result.message).toBe('Login failed; password=***;server=x')
     })
 
-    it('rejects entra-id as an unsupported auth mode without attempting a connection', async () => {
+    it('tests an entra-id connection using an AAD access token, not a password', async () => {
       const pool = new FakeSqlPool()
-      const provider = new AzureSqlProvider(makeFactory(pool))
+      let capturedConfig: SqlConfig | undefined
+      const factory: SqlPoolFactory = (config) => {
+        capturedConfig = config
+        return pool
+      }
+      const provider = new AzureSqlProvider(factory)
       const profile = makeProfile({ ...baseConfig, authMode: 'entra-id' })
 
-      const result = await provider.testConnection(profile, undefined)
+      const result = await provider.testConnection(profile, 'aad-access-token')
 
-      expect(result.success).toBe(false)
-      expect(result.message).toContain('entra-id')
-      expect(pool.requests).toEqual([])
+      expect(result).toEqual({ success: true })
+      expect(capturedConfig?.authentication).toEqual({
+        type: 'azure-active-directory-access-token',
+        options: { token: 'aad-access-token' }
+      })
+      expect(capturedConfig?.user).toBeUndefined()
+      expect(capturedConfig?.password).toBeUndefined()
     })
   })
 
   describe('connect', () => {
-    it('rejects entra-id without constructing a pool connection attempt', async () => {
+    it('connects an entra-id profile using an AAD access token authentication block', async () => {
       const pool = new FakeSqlPool()
-      const provider = new AzureSqlProvider(makeFactory(pool))
+      let capturedConfig: SqlConfig | undefined
+      const factory: SqlPoolFactory = (config) => {
+        capturedConfig = config
+        return pool
+      }
+      const provider = new AzureSqlProvider(factory)
       const profile = makeProfile({ ...baseConfig, authMode: 'entra-id' })
 
-      await expect(provider.connect(profile, undefined)).rejects.toThrow(UnsupportedAuthModeError)
+      await provider.connect(profile, 'aad-access-token')
+
+      expect(capturedConfig?.authentication).toEqual({
+        type: 'azure-active-directory-access-token',
+        options: { token: 'aad-access-token' }
+      })
     })
 
     it('maps profile config + secret into mssql config shape', async () => {

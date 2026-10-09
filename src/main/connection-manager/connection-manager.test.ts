@@ -1,8 +1,10 @@
-import { describe, expect, it, beforeEach } from 'vitest'
+import { describe, expect, it, beforeEach, vi } from 'vitest'
 import { createTestDb } from '../local-storage/test-support/create-test-db'
 import { ConnectionProfileRepository } from '../local-storage/connection-profile-repository'
 import { ConnectionManager } from './connection-manager'
 import type { SecretStore } from './secret-store'
+import type { EntraIdAuthenticator } from './entra-id-authenticator'
+import type { MsalTokenCacheRepository } from '../local-storage/msal-token-cache-repository'
 import type { AzureSqlConnectionConfig } from '@shared/types/connection-profile'
 
 /** In-memory SecretStore test double — reverses the plaintext so tests can
@@ -92,5 +94,85 @@ describe('ConnectionManager', () => {
 
     expect(manager.list().map((p) => p.id)).not.toContain(profile.id)
     expect(manager.get(profile.id)).toBeUndefined()
+  })
+
+  describe('resolveSecret', () => {
+    it('decrypts the stored ciphertext for a non-entra-id profile (unchanged from revealSecret)', async () => {
+      const profile = manager.create({ name: 'Orders', config: sampleConfig, secret: 'hunter2' })
+
+      await expect(manager.resolveSecret(profile)).resolves.toBe('hunter2')
+    })
+
+    it('acquires an Entra ID access token via the authenticator for an entra-id profile', async () => {
+      const authenticator: EntraIdAuthenticator = {
+        acquireToken: vi.fn(async () => 'fresh-access-token')
+      }
+      const managerWithAuth = new ConnectionManager(
+        new ConnectionProfileRepository(createTestDb()),
+        secretStore,
+        authenticator
+      )
+      const profile = managerWithAuth.create({
+        name: 'Orders (Entra ID)',
+        config: {
+          ...sampleConfig,
+          authMode: 'entra-id',
+          entraId: { clientId: 'c', tenantId: 't', redirectUri: 'http://localhost:1234' }
+        }
+      })
+
+      const token = await managerWithAuth.resolveSecret(profile)
+
+      expect(token).toBe('fresh-access-token')
+      expect(authenticator.acquireToken).toHaveBeenCalledWith(
+        { clientId: 'c', tenantId: 't', redirectUri: 'http://localhost:1234' },
+        expect.any(Array),
+        profile.id
+      )
+    })
+
+    it('throws (rather than silently succeeding) when an entra-id profile has no authenticator configured', async () => {
+      const profile = manager.create({
+        name: 'Orders (Entra ID)',
+        config: {
+          ...sampleConfig,
+          authMode: 'entra-id',
+          entraId: { clientId: 'c', tenantId: 't', redirectUri: 'http://localhost:1234' }
+        }
+      })
+
+      await expect(manager.resolveSecret(profile)).rejects.toThrow()
+    })
+
+    it('deletes the MSAL token cache row when its connection profile is deleted', async () => {
+      const tokenCacheRepository = { get: vi.fn(), set: vi.fn(), delete: vi.fn() }
+      const managerWithCache = new ConnectionManager(
+        new ConnectionProfileRepository(createTestDb()),
+        secretStore,
+        undefined,
+        tokenCacheRepository as unknown as MsalTokenCacheRepository
+      )
+      const profile = managerWithCache.create({ name: 'Orders', config: sampleConfig })
+
+      managerWithCache.delete(profile.id)
+
+      expect(tokenCacheRepository.delete).toHaveBeenCalledWith(profile.id)
+    })
+
+    it('throws when an entra-id profile is missing its clientId/tenantId/redirectUri', async () => {
+      const authenticator: EntraIdAuthenticator = { acquireToken: vi.fn() }
+      const managerWithAuth = new ConnectionManager(
+        new ConnectionProfileRepository(createTestDb()),
+        secretStore,
+        authenticator
+      )
+      const profile = managerWithAuth.create({
+        name: 'Orders (Entra ID, unconfigured)',
+        config: { ...sampleConfig, authMode: 'entra-id' }
+      })
+
+      await expect(managerWithAuth.resolveSecret(profile)).rejects.toThrow()
+      expect(authenticator.acquireToken).not.toHaveBeenCalled()
+    })
   })
 })

@@ -10,9 +10,8 @@ import type {
   ResultChunk,
   TestResult
 } from '@shared/types/database-provider'
-import { UnsupportedAuthModeError } from '@shared/types/database-provider'
 import { AsyncQueue } from '../async-queue'
-import { toSafeErrorMessage } from '../scrub-error-message'
+import { toConnectionErrorMessage, toSafeErrorMessage } from '../scrub-error-message'
 
 /**
  * The narrow slice of `mssql`'s `ConnectionPool`/`Request` this Provider
@@ -44,6 +43,14 @@ export interface SqlConfig {
   database: string
   user?: string
   password?: string
+  /** Present only for `authMode: 'entra-id'` — mssql/tedious's AAD
+   * access-token auth block (toSqlConfig's doc has the full rationale for
+   * why `user`/`password` are omitted, not merely left undefined, in that
+   * branch). */
+  authentication?: {
+    type: 'azure-active-directory-access-token'
+    options: { token: string }
+  }
   connectionTimeout?: number
   options?: { encrypt?: boolean; trustServerCertificate?: boolean }
 }
@@ -70,11 +77,19 @@ export class AzureSqlProvider implements DatabaseProvider {
 
   async connect(profile: ConnectionProfile, secret: DecryptedSecret | undefined): Promise<void> {
     const config = requireAzureSqlConfig(profile)
-    assertSupportedAuthMode(config.authMode)
     // mssql's pool.connect() is eager — it performs real network I/O,
     // unlike Cosmos's lazy client construction.
     const pool = this.poolFactory(toSqlConfig(config, secret))
-    await pool.connect()
+    try {
+      await pool.connect()
+    } catch (err) {
+      // Rewritten (user story 62), not just scrubbed — an expired/invalid
+      // Entra ID token surfacing as a raw "Login failed" would otherwise
+      // read identically to a wrong-password failure, giving no hint that
+      // reconnecting (which re-acquires a token, ConnectionManager.
+      // resolveSecret) would actually fix it.
+      throw new Error(toConnectionErrorMessage(err, config.authMode))
+    }
     this.pool = pool
   }
 
@@ -83,11 +98,6 @@ export class AzureSqlProvider implements DatabaseProvider {
     secret: DecryptedSecret | undefined
   ): Promise<TestResult> {
     const config = requireAzureSqlConfig(profile)
-    try {
-      assertSupportedAuthMode(config.authMode)
-    } catch (err) {
-      return { success: false, message: toSafeErrorMessage(err) }
-    }
 
     // Test Connection (GLOSSARY.md) never populates the live pool — a
     // throwaway pool, never assigned to `this.pool`.
@@ -97,7 +107,7 @@ export class AzureSqlProvider implements DatabaseProvider {
       await pool.request().query('SELECT 1')
       return { success: true }
     } catch (err) {
-      return { success: false, message: toSafeErrorMessage(err) }
+      return { success: false, message: toConnectionErrorMessage(err, config.authMode) }
     } finally {
       await pool.close().catch(() => {})
     }
@@ -202,12 +212,6 @@ function requireAzureSqlConfig(profile: ConnectionProfile): AzureSqlConnectionCo
   return profile.config
 }
 
-function assertSupportedAuthMode(authMode: AzureSqlConnectionConfig['authMode']): void {
-  if (authMode !== 'sql-credentials') {
-    throw new UnsupportedAuthModeError(authMode)
-  }
-}
-
 /**
  * Maps a Connection Profile's Azure SQL config + Decrypted Secret to
  * mssql's config shape. `requestTimeout` (query-level timeout, user story
@@ -215,18 +219,39 @@ function assertSupportedAuthMode(authMode: AzureSqlConnectionConfig['authMode'])
  * `QueryOptions.timeoutMs` is not yet wired to a true per-query override,
  * since mssql only exposes timeout at pool-creation time, not per
  * `Request`. Flagged here rather than silently ignored.
+ *
+ * For `authMode: 'entra-id'`, `secret` is an AAD access token (acquired by
+ * ConnectionManager.resolveSecret via MsalEntraIdAuthenticator, ADR 0001 —
+ * this function has no idea where it came from, only what shape mssql
+ * needs it in) — tedious's `azure-active-directory-access-token`
+ * authentication type, not `user`/`password`. Both are omitted entirely in
+ * that branch (not just left as `undefined`-valued keys): `username` on an
+ * entra-id profile is cosmetic-only (the signed-in identity, decided by
+ * the token itself, not a separate credential mssql should try to use),
+ * and sending a stray `password` field alongside `authentication` risks a
+ * tedious/mssql version treating it as a second, conflicting auth method.
  */
 function toSqlConfig(config: AzureSqlConnectionConfig, secret: DecryptedSecret | undefined): SqlConfig {
-  return {
+  const base = {
     server: config.server,
     port: config.port,
     database: config.database,
-    user: config.username,
-    password: secret,
     connectionTimeout: config.connectionTimeoutMs,
     options: {
       encrypt: config.encrypt ?? true,
       trustServerCertificate: false
     }
   }
+
+  if (config.authMode === 'entra-id') {
+    return {
+      ...base,
+      authentication: {
+        type: 'azure-active-directory-access-token',
+        options: { token: secret ?? '' }
+      }
+    }
+  }
+
+  return { ...base, user: config.username, password: secret }
 }
