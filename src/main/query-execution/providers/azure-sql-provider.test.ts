@@ -60,6 +60,12 @@ class FakeSqlPool implements SqlPoolLike {
   connectError: Error | undefined
   requests: FakeSqlRequest[] = []
   nextRequest: (() => FakeSqlRequest) | undefined
+  poolErrorListeners: Array<(err: unknown) => void> = []
+
+  on(_event: 'error', listener: (err: unknown) => void): this {
+    this.poolErrorListeners.push(listener)
+    return this
+  }
 
   async connect(): Promise<unknown> {
     if (this.connectError) throw this.connectError
@@ -254,6 +260,31 @@ describe('AzureSqlProvider', () => {
 
       expect(request.canceled).toBe(true)
       await firstChunk
+    })
+  })
+
+  describe('network interruption (user story 63)', () => {
+    it('attaches a pool error listener so a dropped socket cannot crash the utility process', async () => {
+      const pool = new FakeSqlPool()
+      const provider = new AzureSqlProvider(makeFactory(pool))
+      await provider.connect(makeProfile(baseConfig), 'hunter2')
+
+      expect(pool.poolErrorListeners).toHaveLength(1)
+      expect(() => pool.poolErrorListeners[0](new Error('socket hang up'))).not.toThrow()
+    })
+
+    it('surfaces a socket error mid-query as an actionable message', async () => {
+      const pool = new FakeSqlPool()
+      const request = new FakeSqlRequest()
+      pool.nextRequest = () => request
+      const provider = new AzureSqlProvider(makeFactory(pool))
+      await provider.connect(makeProfile(baseConfig), 'hunter2')
+
+      const iterator = provider.executeQuery('SELECT * FROM orders')[Symbol.asyncIterator]()
+      const next = iterator.next()
+      request.emit('error', Object.assign(new Error('Connection lost'), { code: 'ESOCKET' }))
+
+      await expect(next).rejects.toThrow(/interrupted/)
     })
   })
 

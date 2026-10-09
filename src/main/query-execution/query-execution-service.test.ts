@@ -217,4 +217,34 @@ describe('QueryExecutionService', () => {
 
     expect(responses).toEqual([{ id: 'req-1', kind: 'error', message: 'boom', done: true }])
   })
+
+  it('rewrites a network-interrupted query into an actionable error response', async () => {
+    const provider = new FakeProvider()
+    provider.executeQuery = async function* () {
+      yield { rows: [{ id: 1 }] }
+      throw Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
+    }
+    const service = new QueryExecutionService(() => provider)
+    const { send, responses } = collectResponses()
+    await service.handle(
+      { id: 'c', method: 'connect', profile: makeProfile(), secret: undefined },
+      send
+    )
+    responses.length = 0
+
+    await service.handle(
+      {
+        id: 'req-2',
+        method: 'executeQuery',
+        profileId: 'profile-1',
+        executionId: 'exec-1',
+        query: 'SELECT 1'
+      },
+      send
+    )
+
+    expect(responses[0]).toMatchObject({ kind: 'chunk' })
+    expect(responses[1]).toMatchObject({ kind: 'error', done: true })
+    expect((responses[1] as { message: string }).message).toContain('interrupted')
+  })
 })

@@ -40,3 +40,47 @@ export function toConnectionErrorMessage(err: unknown, authMode: string): string
   }
   return safe
 }
+
+/** Node/tedious/mssql error codes meaning the socket or DNS path failed
+ * (user story 63). Deliberately excludes `ECANCEL`/`AbortError` (user
+ * cancel) and mssql's `ETIMEOUT` (a query timeout, user story 36 — not a
+ * network drop). */
+const NETWORK_ERROR_CODES = new Set([
+  'ESOCKET',
+  'ECONNCLOSED',
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'ETIMEDOUT',
+  'EPIPE'
+])
+
+/** True when `err` (or its `cause`) carries a network-level error code. */
+export function isNetworkInterruption(err: unknown): boolean {
+  let current: unknown = err
+  for (let depth = 0; depth < 3 && current && typeof current === 'object'; depth++) {
+    const code = (current as { code?: unknown }).code
+    if (typeof code === 'string' && NETWORK_ERROR_CODES.has(code)) return true
+    current = (current as { cause?: unknown }).cause
+  }
+  return false
+}
+
+/**
+ * Message for an error raised while executing a query or reading metadata
+ * on a live connection. A network interruption (user story 63) gets an
+ * explicit, actionable message rather than a raw socket error; everything
+ * else is just scrubbed. Idempotent on its own output (the rewritten Error
+ * has no `code`), so applying it in both a Provider and the service's catch
+ * is safe.
+ */
+export function toExecutionErrorMessage(err: unknown): string {
+  const safe = toSafeErrorMessage(err)
+  if (isNetworkInterruption(err)) {
+    return `Network connection to the database was interrupted — check your connectivity and retry. If it keeps failing, disconnect and reconnect. (${safe})`
+  }
+  return safe
+}

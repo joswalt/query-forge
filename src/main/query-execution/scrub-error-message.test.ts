@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { toConnectionErrorMessage, toSafeErrorMessage } from './scrub-error-message'
+import {
+  isNetworkInterruption,
+  toConnectionErrorMessage,
+  toExecutionErrorMessage,
+  toSafeErrorMessage
+} from './scrub-error-message'
 
 describe('toSafeErrorMessage', () => {
   it('scrubs a password embedded in a driver error message', () => {
@@ -39,5 +44,56 @@ describe('toConnectionErrorMessage', () => {
     const message = toConnectionErrorMessage(new Error('ENOTFOUND database.invalid'), 'entra-id')
 
     expect(message).toBe('ENOTFOUND database.invalid')
+  })
+})
+
+function coded(code: string, message = 'boom'): Error {
+  return Object.assign(new Error(message), { code })
+}
+
+describe('isNetworkInterruption', () => {
+  it.each(['ESOCKET', 'ECONNRESET', 'ECONNCLOSED', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT'])(
+    'detects %s',
+    (code) => {
+      expect(isNetworkInterruption(coded(code))).toBe(true)
+    }
+  )
+
+  it('detects a code on a nested cause', () => {
+    expect(isNetworkInterruption(new Error('fetch failed', { cause: coded('ECONNRESET') }))).toBe(
+      true
+    )
+  })
+
+  it.each(['ECANCEL', 'ETIMEOUT', 'EREQUEST'])('does not treat %s as a network drop', (code) => {
+    expect(isNetworkInterruption(coded(code))).toBe(false)
+  })
+
+  it('does not treat an AbortError or plain error as a network drop', () => {
+    expect(isNetworkInterruption(Object.assign(new Error('x'), { name: 'AbortError' }))).toBe(false)
+    expect(isNetworkInterruption(new Error('x'))).toBe(false)
+    expect(isNetworkInterruption('ECONNRESET')).toBe(false)
+  })
+})
+
+describe('toExecutionErrorMessage', () => {
+  it('rewrites a network interruption with a retry/reconnect hint and scrubs it', () => {
+    const message = toExecutionErrorMessage(coded('ECONNRESET', 'read failed; password=hunter2'))
+
+    expect(message).toContain('interrupted')
+    expect(message).toContain('reconnect')
+    expect(message).toContain('password=***')
+    expect(message).not.toContain('hunter2')
+  })
+
+  it('leaves non-network errors as the scrubbed message only', () => {
+    expect(toExecutionErrorMessage(coded('ETIMEOUT', 'Timeout: request failed to complete'))).toBe(
+      'Timeout: request failed to complete'
+    )
+  })
+
+  it('is idempotent on its own output', () => {
+    const once = toExecutionErrorMessage(coded('ESOCKET'))
+    expect(toExecutionErrorMessage(new Error(once))).toBe(once)
   })
 })

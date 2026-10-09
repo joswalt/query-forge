@@ -1,6 +1,7 @@
 import type { ConnectionConfig, ConnectionProfile } from '@shared/types/connection-profile'
 import type { DatabaseProvider } from '@shared/types/database-provider'
 import { assertReadOnlyQuery } from './read-only-guard'
+import { toExecutionErrorMessage } from './scrub-error-message'
 import type { QueryExecutionRequest, QueryExecutionResponse } from './protocol'
 
 export type ProviderFactory = (config: ConnectionConfig) => DatabaseProvider
@@ -90,7 +91,7 @@ export class QueryExecutionService {
       send({
         id: request.id,
         kind: 'error',
-        message: err instanceof Error ? err.message : String(err),
+        message: toExecutionErrorMessage(err),
         done: true
       })
     }

@@ -11,7 +11,7 @@ import type {
   TestResult
 } from '@shared/types/database-provider'
 import { AsyncQueue } from '../async-queue'
-import { toConnectionErrorMessage, toSafeErrorMessage } from '../scrub-error-message'
+import { toConnectionErrorMessage, toExecutionErrorMessage } from '../scrub-error-message'
 
 /**
  * The narrow slice of `mssql`'s `ConnectionPool`/`Request` this Provider
@@ -35,6 +35,9 @@ export interface SqlPoolLike {
   connect(): Promise<unknown>
   close(): Promise<void>
   request(): SqlRequestLike
+  /** Optional so test fakes needn't implement it; the real `ConnectionPool`
+   * is an EventEmitter and *must* have an 'error' listener (see connect()). */
+  on?(event: 'error', listener: (err: unknown) => void): unknown
 }
 
 export interface SqlConfig {
@@ -87,6 +90,12 @@ export class AzureSqlProvider implements DatabaseProvider {
     // mssql's pool.connect() is eager — it performs real network I/O,
     // unlike Cosmos's lazy client construction.
     const pool = this.poolFactory(toSqlConfig(config, secret))
+    // A dropped socket makes the pool emit 'error'; with no listener Node
+    // throws it as an uncaught exception, which would kill the shared
+    // utilityProcess (every profile, both providers). Swallow it here — the
+    // failing in-flight request reports its own error, and mssql
+    // re-establishes the connection on the next request (user story 63).
+    pool.on?.('error', () => {})
     try {
       await pool.connect()
     } catch (err) {
@@ -146,7 +155,7 @@ export class AzureSqlProvider implements DatabaseProvider {
       }
     })
     request.on('error', (err) => {
-      queue.fail(new Error(toSafeErrorMessage(err)))
+      queue.fail(new Error(toExecutionErrorMessage(err)))
     })
     request.on('done', () => {
       if (batch.length > 0) queue.push(batch)

@@ -50,7 +50,7 @@ Implemented:
 - **Resizable panels** (story 54) — sidebar width and editor/results split (drag, arrow keys, double-click to reset), both remembered across launches.
 - **Query editor/tabs** — CodeMirror 6 (no autocomplete, per ticket 04), independent tabs, streamed execution, cancel, `Cmd/Ctrl+Enter`, open/save query files via native dialogs, and unsaved-tab drafts restored after a crash (renderer `localStorage`, debounced; **only when the query-history text opt-in is enabled**, since drafts hold query text — user story 53).
 - **Results** — virtualized TanStack grid, JSON view, cell inspector, CSV/JSON export (loaded rows or all matching rows with progress/cancel).
-- **Reliability** — Cosmos 429 retry policy stated explicitly (`COSMOS_RETRY_OPTIONS`); if the utilityProcess dies, all in-flight calls reject with a "reconnect, then retry" message, connected profiles flip to `error` in the UI, and the next call forks a fresh child.
+- **Reliability** — network interruptions (`ESOCKET`/`ECONNRESET`/`ENOTFOUND`/… — not user cancels or Azure SQL's `ETIMEOUT` query timeout) surface as an actionable "connection interrupted — retry or reconnect" message (`toExecutionErrorMessage`), and the Azure SQL pool has an `'error'` listener so a dropped socket can't crash the shared utilityProcess; Cosmos 429 retry policy stated explicitly (`COSMOS_RETRY_OPTIONS`); if the utilityProcess dies, all in-flight calls reject with a "reconnect, then retry" message, connected profiles flip to `error` in the UI, and the next call forks a fresh child.
 - **History, saved queries, preferences/theme** — SQLite-backed; history text is opt-in (user story 53).
 - **Packaging/tests** — `electron-builder` unsigned config; Playwright Electron scaffolding in `electron-tests/`.
 
