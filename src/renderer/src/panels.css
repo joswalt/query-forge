@@ -122,13 +122,35 @@
 
 .query-workspace__tab {
   display: grid;
-  grid-template-columns: minmax(180px, 340px) 1fr;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: end;
   gap: 12px;
 }
 
-.query-workspace__tab > :not(.query-workspace__connection):not(.query-workspace__actions) {
+.query-workspace__tab > :not(.query-workspace__targets):not(.query-workspace__actions) {
   grid-column: 1 / -1;
+}
+
+/* Where the query runs: connection, then (Cosmos) container. */
+.query-workspace__targets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+}
+
+.query-workspace__connection {
+  width: 260px;
+}
+
+.query-workspace__container {
+  width: 300px;
+}
+
+.query-workspace__connection,
+.query-workspace__container {
+  min-width: 0;
+  flex: 0 1 auto;
 }
 
 .query-workspace__actions {

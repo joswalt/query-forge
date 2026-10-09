@@ -7,6 +7,7 @@ import { QueryWorkspace, type QueryWorkspaceHandle } from './query-tabs/QueryWor
 import { HistoryPanel } from './history/HistoryPanel'
 import { SavedQueriesPanel } from './saved-queries/SavedQueriesPanel'
 import { Collapsible } from './Collapsible'
+import { OverflowMenu } from './OverflowMenu'
 import { SidebarResizer, useSidebarWidth } from './SidebarResizer'
 import type { SavedQuery } from '@shared/types/saved-query'
 import { CosmosIcon, DatabaseIcon, LockIcon, MoonIcon, PlusIcon, SunIcon } from './icons'
@@ -218,9 +219,16 @@ export function App(): React.JSX.Element {
             {isCosmos ? <CosmosIcon /> : <DatabaseIcon />}
           </span>
           <strong className="conn__name">{connection.name}</strong>
-          <span className="conn__status">
+          {/* The dot and green border already say "connected"; the word is only
+              shown when something needs attention, and stays readable to
+              screen readers either way. */}
+          <span className="conn__status" data-status={status}>
             <span className="conn__dot" aria-hidden="true" />
-            {status}
+            <span
+              className={status === 'connecting' || status === 'error' ? undefined : 'visually-hidden'}
+            >
+              {status}
+            </span>
           </span>
         </div>
         {(connection.readOnly || connection.hasSecret) && (
@@ -263,16 +271,21 @@ export function App(): React.JSX.Element {
           >
             {metadataByConnection[connection.id] ? 'Refresh metadata' : 'Browse metadata'}
           </button>
-          <button type="button" className="btn--ghost" onClick={() => setEditingId(connection.id)}>
-            Edit
-          </button>
-          <button
-            type="button"
-            className="btn--ghost btn--danger"
-            onClick={() => handleDelete(connection.id)}
-          >
-            Delete
-          </button>
+          <OverflowMenu
+            label={`More actions for ${connection.name}`}
+            items={[
+              { label: 'Edit', onSelect: () => setEditingId(connection.id) },
+              {
+                label: 'Delete',
+                danger: true,
+                onSelect: () => {
+                  if (window.confirm(`Delete connection “${connection.name}”?`)) {
+                    void handleDelete(connection.id)
+                  }
+                }
+              }
+            ]}
+          />
         </div>
         {message && <p className="conn__message">{message}</p>}
         {metadataByConnection[connection.id] && (
@@ -422,18 +435,81 @@ function MetadataTree({
   metadata: DatabaseMetadata
   onOpen: (object: DatabaseMetadataObject) => void
 }): React.JSX.Element {
-  return <TreeList objects={metadata.objects} onOpen={onOpen} parentSchema={undefined} />
+  const [filter, setFilter] = useState('')
+  const term = filter.trim().toLowerCase()
+  const objects = term ? filterObjects(metadata.objects, term) : metadata.objects
+  return (
+    <div className="tree-panel">
+      {countObjects(metadata.objects) >= TREE_FILTER_THRESHOLD && (
+        <input
+          type="search"
+          className="tree-panel__filter"
+          placeholder="Filter by name…"
+          aria-label="Filter metadata by name"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+        />
+      )}
+      {term && objects.length === 0 ? (
+        <p className="empty">Nothing named “{filter.trim()}”.</p>
+      ) : (
+        <TreeList
+          objects={objects}
+          onOpen={onOpen}
+          parentSchema={undefined}
+          forceOpen={term.length > 0}
+          // A lone top-level database is the only thing to open — do it for them.
+          openByDefault={objects.length === 1}
+        />
+      )}
+    </div>
+  )
+}
+
+/** Below this many nodes a filter box is just chrome. */
+const TREE_FILTER_THRESHOLD = 10
+
+/** Kinds that are a flat set of named things, where A–Z is the right order.
+ * Columns and indexes keep the provider's order — ordinal position matters. */
+const SORTABLE_KINDS = new Set(['database', 'schema', 'container', 'table', 'view'])
+const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+
+function sortObjects(objects: DatabaseMetadataObject[]): DatabaseMetadataObject[] {
+  return objects.every((object) => SORTABLE_KINDS.has(object.kind))
+    ? [...objects].sort((a, b) => nameCollator.compare(a.name, b.name))
+    : objects
+}
+
+function countObjects(objects: DatabaseMetadataObject[]): number {
+  return objects.reduce((sum, object) => sum + 1 + countObjects(object.children ?? []), 0)
+}
+
+/** Keeps nodes whose name matches, plus the ancestors needed to reach them. A
+ * parent that matches by itself keeps its whole subtree. */
+function filterObjects(objects: DatabaseMetadataObject[], term: string): DatabaseMetadataObject[] {
+  return objects.flatMap((object) => {
+    const children = object.children ?? []
+    const keptChildren = filterObjects(children, term)
+    if (keptChildren.length > 0) return [{ ...object, children: keptChildren }]
+    return object.name.toLowerCase().includes(term) ? [object] : []
+  })
 }
 
 function TreeList({
-  objects,
+  objects: unsortedObjects,
   onOpen,
-  parentSchema
+  parentSchema,
+  forceOpen,
+  openByDefault
 }: {
   objects: DatabaseMetadataObject[]
   onOpen: (object: DatabaseMetadataObject) => void
   parentSchema: string | undefined
+  /** Expand every branch (while a filter is active, so matches are visible). */
+  forceOpen?: boolean
+  openByDefault?: boolean
 }): React.JSX.Element {
+  const objects = sortObjects(unsortedObjects)
   // Twenty rows that all say "container" is noise: show the kind only where
   // siblings differ (schema next to table, say); it stays in the tooltip.
   const mixedKinds = objects.some((object) => object.kind !== objects[0]?.kind)
@@ -454,12 +530,13 @@ function TreeList({
         return (
           <li key={`${object.kind}-${object.name}-${index}`}>
             {hasChildren ? (
-              <details className="tree__branch">
+              <details className="tree__branch" open={forceOpen || openByDefault || undefined}>
                 <summary onDoubleClick={() => onOpen(withSchema)}>{label}</summary>
                 <TreeList
                   objects={object.children!}
                   onOpen={onOpen}
                   parentSchema={object.kind === 'schema' ? object.name : parentSchema}
+                  forceOpen={forceOpen}
                 />
               </details>
             ) : (

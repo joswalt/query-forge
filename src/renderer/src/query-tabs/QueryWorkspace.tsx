@@ -1,6 +1,9 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import type { ConnectionProfile } from '@shared/types/connection-profile'
-import type { QueryOptions } from '@shared/types/database-provider'
+import type {
+  DatabaseMetadataObject,
+  QueryOptions
+} from '@shared/types/database-provider'
 import type { ExportFormat } from '@shared/types/export'
 import { QueryEditor, type QueryEditorHandle } from '../editor/QueryEditor'
 import { initialExportState, type ExportState } from '../results/export-state'
@@ -65,6 +68,32 @@ function createTab(index: number, seed?: OpenQuerySeed): QueryTabState {
   }
 }
 
+/** Cosmos containers a tab can target, loaded once per connection. */
+type ContainerList =
+  | { status: 'loading' }
+  | { status: 'ready'; items: { database: string; container: string }[] }
+  | { status: 'unavailable'; message: string }
+
+const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+
+function collectContainers(
+  objects: DatabaseMetadataObject[]
+): { database: string; container: string }[] {
+  const found: { database: string; container: string }[] = []
+  for (const object of objects) {
+    if (object.kind === 'container' && object.database) {
+      found.push({ database: object.database, container: object.name })
+    }
+    found.push(...collectContainers(object.children ?? []))
+  }
+  return found.sort(
+    (a, b) =>
+      nameCollator.compare(a.database, b.database) || nameCollator.compare(a.container, b.container)
+  )
+}
+
+const PICKER_SEPARATOR = '\u0001'
+
 const RUN_SHORTCUT = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ Enter' : 'Ctrl Enter'
 
 const DRAFTS_KEY = 'queryforge.drafts.v1'
@@ -124,6 +153,7 @@ export const QueryWorkspace = forwardRef<
     () => restored.tabs[restored.activeIndex].id
   )
   const [fileMessage, setFileMessage] = useState<string | null>(null)
+  const [containerLists, setContainerLists] = useState<Record<string, ContainerList>>({})
   // Non-null while the "Save query…" name field is open.
   const [saveName, setSaveName] = useState<string | null>(null)
   // Drafts hold query text, so they honor the same opt-in as history text
@@ -392,6 +422,41 @@ export const QueryWorkspace = forwardRef<
   }
 
   /** Save the active tab's text to a local file (user story 23). */
+  function loadContainers(connectionId: string): void {
+    setContainerLists((prev) => ({ ...prev, [connectionId]: { status: 'loading' } }))
+    window.api.queryExecution
+      .getMetadata(connectionId)
+      .then((metadata) =>
+        setContainerLists((prev) => ({
+          ...prev,
+          [connectionId]: { status: 'ready', items: collectContainers(metadata.objects) }
+        }))
+      )
+      .catch(() =>
+        setContainerLists((prev) => ({
+          ...prev,
+          [connectionId]: {
+            status: 'unavailable',
+            message: 'Connect to this connection to list its containers.'
+          }
+        }))
+      )
+  }
+
+  // A Cosmos profile without a fixed container needs one picked per tab.
+  const activeConnection = connections.find((c) => c.id === activeTab?.connectionId)
+  const activeCosmos = activeConnection?.config.kind === 'cosmos-db' ? activeConnection.config : undefined
+  const needsContainerPicker = Boolean(activeCosmos && !(activeCosmos.database && activeCosmos.container))
+  const activeConnectionId = activeConnection?.id
+  const hasContainerList = activeConnectionId ? activeConnectionId in containerLists : true
+
+  useEffect(() => {
+    if (activeConnectionId && needsContainerPicker && !hasContainerList) {
+      loadContainers(activeConnectionId)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeConnectionId, needsContainerPicker, hasContainerList])
+
   async function handleSaveToFile(): Promise<void> {
     if (!activeTab) return
     try {
@@ -485,22 +550,39 @@ export const QueryWorkspace = forwardRef<
 
       {activeTab && (
         <div className="query-workspace__tab">
-          <label className="query-workspace__connection">
-            Connection
-            <select
-              value={activeTab.connectionId ?? ''}
-              onChange={(e) =>
-                updateTab(activeTab.id, (t) => ({ ...t, connectionId: e.target.value || undefined }))
-              }
-            >
-              <option value="">Select a connection</option>
-              {connections.map((connection) => (
-                <option key={connection.id} value={connection.id}>
-                  {connection.name}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="query-workspace__targets">
+            <label className="query-workspace__connection">
+              Connection
+              <select
+                value={activeTab.connectionId ?? ''}
+                onChange={(e) =>
+                  // A container belongs to one connection — never carry it over.
+                  updateTab(activeTab.id, (t) => ({
+                    ...t,
+                    connectionId: e.target.value || undefined,
+                    options: undefined
+                  }))
+                }
+              >
+                <option value="">Select a connection</option>
+                {connections.map((connection) => (
+                  <option key={connection.id} value={connection.id}>
+                    {connection.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {activeCosmos && needsContainerPicker && activeConnectionId && (
+              <ContainerPicker
+                list={containerLists[activeConnectionId]}
+                fixedDatabase={activeCosmos.database}
+                value={activeTab.options}
+                onRetry={() => loadContainers(activeConnectionId)}
+                onChange={(options) => updateTab(activeTab.id, (t) => ({ ...t, options }))}
+              />
+            )}
+          </div>
 
           <div className="query-workspace__actions">
             <button
@@ -588,3 +670,76 @@ export const QueryWorkspace = forwardRef<
     </section>
   )
 })
+
+function ContainerPicker({
+  list,
+  fixedDatabase,
+  value,
+  onRetry,
+  onChange
+}: {
+  list: ContainerList | undefined
+  /** Set when the profile pins a database — only its containers are offered. */
+  fixedDatabase: string | undefined
+  value: QueryOptions | undefined
+  onRetry: () => void
+  onChange: (options: QueryOptions | undefined) => void
+}): React.JSX.Element {
+  const items =
+    list?.status === 'ready'
+      ? list.items.filter((item) => !fixedDatabase || item.database === fixedDatabase)
+      : []
+  const databases = [...new Set(items.map((item) => item.database))]
+  const selected =
+    value?.database && value.container ? `${value.database}${PICKER_SEPARATOR}${value.container}` : ''
+  const selectedListed = items.some(
+    (item) => `${item.database}${PICKER_SEPARATOR}${item.container}` === selected
+  )
+  const placeholder =
+    list?.status === 'loading' || list === undefined
+      ? 'Loading containers…'
+      : list.status === 'unavailable'
+        ? list.message
+        : items.length === 0
+          ? 'No containers found'
+          : 'Select a container'
+
+  function option(item: { database: string; container: string }): React.JSX.Element {
+    return (
+      <option
+        key={`${item.database}${PICKER_SEPARATOR}${item.container}`}
+        value={`${item.database}${PICKER_SEPARATOR}${item.container}`}
+      >
+        {item.container}
+      </option>
+    )
+  }
+
+  return (
+    <label className="query-workspace__container">
+      Container
+      <select
+        value={selected}
+        // A failed load (usually "not connected yet") is retried on demand.
+        onFocus={() => list?.status === 'unavailable' && onRetry()}
+        onChange={(e) => {
+          const [database, container] = e.target.value.split(PICKER_SEPARATOR)
+          onChange(database && container ? { database, container } : undefined)
+        }}
+      >
+        <option value="">{placeholder}</option>
+        {/* Keep a container opened from the Object Explorer visible while the list loads. */}
+        {selected && !selectedListed && (
+          <option value={selected}>{value?.container}</option>
+        )}
+        {databases.length > 1
+          ? databases.map((database) => (
+              <optgroup key={database} label={database}>
+                {items.filter((item) => item.database === database).map(option)}
+              </optgroup>
+            ))
+          : items.map(option)}
+      </select>
+    </label>
+  )
+}

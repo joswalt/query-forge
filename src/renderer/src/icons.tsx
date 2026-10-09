@@ -88,3 +88,11 @@ export const CosmosIcon = (p: IconProps): React.JSX.Element => (
     <ellipse cx="8" cy="8" rx="6.2" ry="2.8" transform="rotate(30 8 8)" />
   </Svg>
 )
+
+export const MoreIcon = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <circle cx="3.5" cy="8" r="0.6" />
+    <circle cx="8" cy="8" r="0.6" />
+    <circle cx="12.5" cy="8" r="0.6" />
+  </Svg>
+)

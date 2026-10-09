@@ -377,6 +377,53 @@
   font-size: 12px;
 }
 
+.conn__actions .overflow-menu {
+  margin-left: auto;
+}
+
+/* ---------- overflow menu ---------- */
+
+.overflow-menu {
+  position: relative;
+}
+
+.overflow-menu__trigger {
+  display: grid;
+  place-items: center;
+  padding: 4px 6px;
+}
+
+.overflow-menu__list {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 5;
+  display: grid;
+  min-width: 120px;
+  padding: 4px;
+  border: 1px solid var(--qf-border-strong);
+  border-radius: var(--qf-r-control);
+  background: var(--qf-bg-elevated);
+  box-shadow: var(--qf-pop-shadow);
+}
+
+.overflow-menu__list button {
+  width: 100%;
+  text-align: left;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .conn__connect {
   color: var(--qf-accent);
 }
@@ -388,6 +435,25 @@
 }
 
 /* ---------- object explorer ---------- */
+
+.tree-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+}
+
+.tree-panel__filter {
+  font-size: 12.5px;
+  padding: 4px 9px;
+}
+
+/* A long container list scrolls on its own so Saved queries and History
+   below it stay reachable without scrolling past the whole tree. */
+.tree-panel > .tree {
+  max-height: min(46vh, 440px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 
 .tree {
   display: grid;
