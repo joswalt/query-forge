@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { QueryHistoryEntry } from '@shared/types/query-history'
+import { Collapsible } from '../Collapsible'
 
 /**
  * Query History (user stories 50, 52, 53) — a read-only list fed by
@@ -99,9 +100,10 @@ export function HistoryPanel(): React.JSX.Element {
   }
 
   return (
-    <section className="history-panel sidebar__section">
-      <div className="section-head">
-        <h2>Query history</h2>
+    <Collapsible
+      id="history"
+      title="Query history"
+      actions={
         <button
           type="button"
           className="btn--ghost btn--danger section-head__action"
@@ -109,7 +111,8 @@ export function HistoryPanel(): React.JSX.Element {
         >
           Clear history
         </button>
-      </div>
+      }
+    >
       {error && <p role="alert">{error}</p>}
 
       <label>
@@ -189,6 +192,6 @@ export function HistoryPanel(): React.JSX.Element {
           ))}
         </ul>
       )}
-    </section>
+    </Collapsible>
   )
 }

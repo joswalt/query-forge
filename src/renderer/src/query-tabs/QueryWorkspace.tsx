@@ -2,11 +2,9 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 're
 import type { ConnectionProfile } from '@shared/types/connection-profile'
 import type { QueryOptions } from '@shared/types/database-provider'
 import type { ExportFormat } from '@shared/types/export'
-import type { SavedQuery } from '@shared/types/saved-query'
 import { QueryEditor, type QueryEditorHandle } from '../editor/QueryEditor'
 import { initialExportState, type ExportState } from '../results/export-state'
 import { CloseIcon, PlayIcon, PlusIcon } from '../icons'
-import { SavedQueriesPanel } from '../saved-queries/SavedQueriesPanel'
 import { QueryResultsView } from './QueryResultsView'
 import {
   initialQueryRunState,
@@ -112,14 +110,22 @@ function initialTabs(): { tabs: QueryTabState[]; activeIndex: number } {
  * so a slow/stuck query in one tab never blocks another. Results display is
  * intentionally minimal here — see QueryResultsView's doc comment.
  */
-export const QueryWorkspace = forwardRef<QueryWorkspaceHandle, { connections: ConnectionProfile[] }>(
-  function QueryWorkspace({ connections }, handleRef): React.JSX.Element {
+export const QueryWorkspace = forwardRef<
+  QueryWorkspaceHandle,
+  {
+    connections: ConnectionProfile[]
+    /** Called after "Save query" succeeds so the sidebar list can reload. */
+    onQuerySaved?: () => void
+  }
+>(function QueryWorkspace({ connections, onQuerySaved }, handleRef): React.JSX.Element {
   const [restored] = useState(initialTabs)
   const [tabs, setTabs] = useState<QueryTabState[]>(restored.tabs)
   const [activeTabId, setActiveTabId] = useState<string>(
     () => restored.tabs[restored.activeIndex].id
   )
   const [fileMessage, setFileMessage] = useState<string | null>(null)
+  // Non-null while the "Save query…" name field is open.
+  const [saveName, setSaveName] = useState<string | null>(null)
   // Drafts hold query text, so they honor the same opt-in as history text
   // (user story 53): off until the preference says otherwise.
   const [persistDrafts, setPersistDrafts] = useState(false)
@@ -135,6 +141,9 @@ export const QueryWorkspace = forwardRef<QueryWorkspaceHandle, { connections: Co
   const editorRef = useRef<QueryEditorHandle>(null)
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId)
+
+  // The name field belongs to the tab it was opened on.
+  useEffect(() => setSaveName(null), [activeTabId])
 
   useImperativeHandle(handleRef, () => ({
     openQuery: (seed) => {
@@ -382,22 +391,6 @@ export const QueryWorkspace = forwardRef<QueryWorkspaceHandle, { connections: Co
     execution.cancel()
   }
 
-  /** "Open in new tab" (user story 51's companion to saving) — a saved
-   * query's connection association is only honored if that profile still
-   * exists; a deleted Connection Profile (user story 5) must not leave the
-   * new tab pointing at a dangling id. */
-  function handleOpenSavedQuery(savedQuery: SavedQuery): void {
-    const connectionId = connections.some((c) => c.id === savedQuery.profileId)
-      ? savedQuery.profileId
-      : undefined
-    const tab = createTab(nextIndexRef.current++, {
-      queryText: savedQuery.queryText,
-      connectionId
-    })
-    setTabs((prev) => [...prev, tab])
-    setActiveTabId(tab.id)
-  }
-
   /** Save the active tab's text to a local file (user story 23). */
   async function handleSaveToFile(): Promise<void> {
     if (!activeTab) return
@@ -428,19 +421,28 @@ export const QueryWorkspace = forwardRef<QueryWorkspaceHandle, { connections: Co
     }
   }
 
-  /** "Save current query" — the active tab's full query text (not
+  /** "Save query…" — the active tab's full query text (not
    * `editorRef.getExecutionText()`, which returns only the selection when
    * one exists; saving a query should never silently save a sub-selection
    * instead of the whole thing the user is looking at). */
-  async function handleSaveCurrentQuery(name: string): Promise<void> {
-    if (!activeTab) return
+  async function handleSaveQuery(): Promise<void> {
+    if (!activeTab || saveName === null) return
+    const name = saveName.trim()
+    if (!name || !activeTab.queryText.trim()) return
     const databaseKind = connections.find((c) => c.id === activeTab.connectionId)?.config.kind
-    await window.api.savedQueries.create({
-      name,
-      queryText: activeTab.queryText,
-      profileId: activeTab.connectionId,
-      databaseKind
-    })
+    try {
+      await window.api.savedQueries.create({
+        name,
+        queryText: activeTab.queryText,
+        profileId: activeTab.connectionId,
+        databaseKind
+      })
+      setSaveName(null)
+      setFileMessage(`Saved query “${name}”.`)
+      onQuerySaved?.()
+    } catch (err) {
+      setFileMessage(`Save failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
   }
 
   return (
@@ -501,6 +503,15 @@ export const QueryWorkspace = forwardRef<QueryWorkspaceHandle, { connections: Co
           </label>
 
           <div className="query-workspace__actions">
+            <button
+              type="button"
+              className="btn--ghost"
+              aria-expanded={saveName !== null}
+              disabled={!activeTab.queryText.trim()}
+              onClick={() => setSaveName((current) => (current === null ? activeTab.title : null))}
+            >
+              Save query…
+            </button>
             <button type="button" className="btn--ghost" onClick={() => void handleSaveToFile()}>
               Save to file…
             </button>
@@ -528,6 +539,34 @@ export const QueryWorkspace = forwardRef<QueryWorkspaceHandle, { connections: Co
             </button>
           </div>
 
+          {saveName !== null && (
+            <form
+              className="query-workspace__savebar"
+              onSubmit={(e) => {
+                e.preventDefault()
+                void handleSaveQuery()
+              }}
+            >
+              <input
+                type="text"
+                aria-label="Saved query name"
+                placeholder="Name this query…"
+                value={saveName}
+                autoFocus
+                onChange={(e) => setSaveName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') setSaveName(null)
+                }}
+              />
+              <button type="submit" className="btn--primary" disabled={!saveName.trim()}>
+                Save query
+              </button>
+              <button type="button" className="btn--ghost" onClick={() => setSaveName(null)}>
+                Cancel
+              </button>
+            </form>
+          )}
+
           <QueryEditor
             key={activeTab.id}
             ref={editorRef}
@@ -546,12 +585,6 @@ export const QueryWorkspace = forwardRef<QueryWorkspaceHandle, { connections: Co
           />
         </div>
       )}
-
-      <SavedQueriesPanel
-        canSaveCurrent={Boolean(activeTab?.queryText.trim())}
-        onSaveCurrent={handleSaveCurrentQuery}
-        onOpen={handleOpenSavedQuery}
-      />
     </section>
   )
 })

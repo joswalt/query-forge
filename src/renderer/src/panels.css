@@ -229,27 +229,20 @@
 
 /* ---------- saved queries ---------- */
 
-.saved-queries-panel {
-  display: grid;
-  gap: 12px;
-  margin-top: 8px;
-  padding-top: 18px;
-  border-top: 1px solid var(--qf-border);
+.saved-list {
+  grid-template-columns: minmax(0, 1fr);
 }
 
-.saved-queries-panel__form {
+/* Name field opened by "Save query…", full-width above the editor. */
+.query-workspace__savebar {
   display: flex;
   gap: 8px;
   max-width: 560px;
 }
 
-.saved-queries-panel__form input {
+.query-workspace__savebar input {
   flex: 1;
   min-width: 0;
-}
-
-.saved-list {
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
 }
 
 .saved-card__actions {

@@ -1,0 +1,76 @@
+import { useId, useState } from 'react'
+import { ChevronIcon } from './icons'
+
+const STORAGE_PREFIX = 'queryforge.ui.section.'
+
+function readOpen(id: string, fallback: boolean): boolean {
+  try {
+    const stored = localStorage.getItem(STORAGE_PREFIX + id)
+    return stored === null ? fallback : stored === '1'
+  } catch {
+    return fallback
+  }
+}
+
+interface Props {
+  /** Stable key — the open/closed choice is remembered under it. */
+  id: string
+  title: string
+  /** Small muted number beside the title (e.g. how many saved queries). */
+  count?: number
+  /** Header-level actions. Rendered beside — not inside — the toggle button. */
+  actions?: React.ReactNode
+  defaultOpen?: boolean
+  children: React.ReactNode
+}
+
+/**
+ * Sidebar section with a disclosure header. The body stays mounted while
+ * collapsed (just hidden) so panels keep their state — a history search or
+ * a half-filled form survives a collapse.
+ */
+export function Collapsible({
+  id,
+  title,
+  count,
+  actions,
+  defaultOpen = true,
+  children
+}: Props): React.JSX.Element {
+  const [open, setOpen] = useState(() => readOpen(id, defaultOpen))
+  const bodyId = useId()
+
+  function toggle(): void {
+    const next = !open
+    setOpen(next)
+    try {
+      localStorage.setItem(STORAGE_PREFIX + id, next ? '1' : '0')
+    } catch {
+      // Best-effort — losing the remembered state must never break the UI.
+    }
+  }
+
+  return (
+    <section className="sidebar__section collapsible" data-open={open}>
+      <div className="section-head">
+        <h2 className="collapsible__title">
+          <button
+            type="button"
+            className="btn--ghost collapsible__toggle"
+            aria-expanded={open}
+            aria-controls={bodyId}
+            onClick={toggle}
+          >
+            <ChevronIcon size={12} />
+            {title}
+            {count !== undefined && count > 0 && <span className="collapsible__count">{count}</span>}
+          </button>
+        </h2>
+        {actions}
+      </div>
+      <div id={bodyId} className="collapsible__body" hidden={!open}>
+        {children}
+      </div>
+    </section>
+  )
+}

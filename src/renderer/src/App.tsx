@@ -5,6 +5,10 @@ import type { Theme } from '@shared/types/preferences'
 import { NewConnectionForm } from './NewConnectionForm'
 import { QueryWorkspace, type QueryWorkspaceHandle } from './query-tabs/QueryWorkspace'
 import { HistoryPanel } from './history/HistoryPanel'
+import { SavedQueriesPanel } from './saved-queries/SavedQueriesPanel'
+import { Collapsible } from './Collapsible'
+import { SidebarResizer, useSidebarWidth } from './SidebarResizer'
+import type { SavedQuery } from '@shared/types/saved-query'
 import { CosmosIcon, DatabaseIcon, LockIcon, MoonIcon, PlusIcon, SunIcon } from './icons'
 import logoOnDark from './assets/brand/queryforge-logo-dark.png'
 import logoOnLight from './assets/brand/queryforge-logo-light.png'
@@ -27,6 +31,8 @@ export function App(): React.JSX.Element {
   const [showNewForm, setShowNewForm] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const workspaceRef = useRef<QueryWorkspaceHandle>(null)
+  const sidebar = useSidebarWidth()
+  const [savedQueriesVersion, setSavedQueriesVersion] = useState(0)
 
   useEffect(() => {
     window.api.preferences
@@ -152,6 +158,20 @@ export function App(): React.JSX.Element {
       title: object.name,
       connectionId: connection.id,
       queryText: `SELECT TOP 100 * FROM ${object.schema ? `[${object.schema}].` : ''}[${object.name}]`
+    })
+  }
+
+  /** "Open in new tab" for a Saved Query — its connection association is only
+   * honored if that profile still exists; a deleted Connection Profile (user
+   * story 5) must not leave the new tab pointing at a dangling id. */
+  function handleOpenSavedQuery(savedQuery: SavedQuery): void {
+    const connectionId = connections.some((c) => c.id === savedQuery.profileId)
+      ? savedQuery.profileId
+      : undefined
+    workspaceRef.current?.openQuery({
+      title: savedQuery.name,
+      queryText: savedQuery.queryText,
+      connectionId
     })
   }
 
@@ -304,13 +324,17 @@ export function App(): React.JSX.Element {
         </div>
       </header>
 
-      <div className="app__body">
-        <aside className="sidebar" aria-label="Connections and history">
+      <div
+        className="app__body"
+        style={{ '--sidebar-w': `${sidebar.width}px` } as React.CSSProperties}
+      >
+        <aside className="sidebar" aria-label="Connections, saved queries and history">
           {error && <p role="alert">{error}</p>}
 
-          <section className="sidebar__section">
-            <div className="section-head">
-              <h2>Connections</h2>
+          <Collapsible
+            id="connections"
+            title="Connections"
+            actions={
               <button
                 type="button"
                 className="btn--ghost section-head__action"
@@ -319,7 +343,8 @@ export function App(): React.JSX.Element {
               >
                 <PlusIcon size={14} /> New connection
               </button>
-            </div>
+            }
+          >
 
             {showNewForm && (
               <div className="sidebar__form">
@@ -364,13 +389,20 @@ export function App(): React.JSX.Element {
                 </div>
               ))
             )}
-          </section>
+          </Collapsible>
+
+          <SavedQueriesPanel refreshToken={savedQueriesVersion} onOpen={handleOpenSavedQuery} />
 
           <HistoryPanel />
         </aside>
+        <SidebarResizer {...sidebar} />
 
         <main className="workspace">
-          <QueryWorkspace ref={workspaceRef} connections={connections} />
+          <QueryWorkspace
+            ref={workspaceRef}
+            connections={connections}
+            onQuerySaved={() => setSavedQueriesVersion((v) => v + 1)}
+          />
         </main>
       </div>
     </div>
@@ -402,14 +434,19 @@ function TreeList({
   onOpen: (object: DatabaseMetadataObject) => void
   parentSchema: string | undefined
 }): React.JSX.Element {
+  // Twenty rows that all say "container" is noise: show the kind only where
+  // siblings differ (schema next to table, say); it stays in the tooltip.
+  const mixedKinds = objects.some((object) => object.kind !== objects[0]?.kind)
   return (
     <ul className="tree">
       {objects.map((object, index) => {
         const withSchema = parentSchema ? { ...object, schema: parentSchema } : object
         const label = (
           <>
-            <span className="tree__name">{object.name}</span>
-            <span className="tree__kind">{object.kind}</span>
+            <span className="tree__name" title={`${object.name} (${object.kind})`}>
+              {object.name}
+            </span>
+            {mixedKinds && <span className="tree__kind">{object.kind}</span>}
             {object.detail && <span className="tree__detail">{object.detail}</span>}
           </>
         )
