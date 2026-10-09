@@ -1,0 +1,352 @@
+/* Results: status bar, export toolbar, grid, JSON tree, cell inspector. */
+
+.query-results {
+  display: grid;
+  gap: 10px;
+}
+
+.query-results__status {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  padding: 8px 12px;
+  overflow: hidden;
+  border: 1px solid var(--qf-border);
+  border-radius: var(--qf-r-control);
+  background: var(--qf-panel);
+}
+
+/* In-flight work is the second place the heat shows: the brand ring sweeps
+   along the bottom edge of the status bar until the run settles. */
+.query-results__status[data-status='running']::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0;
+  height: 2px;
+  background: var(--qf-ring);
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  animation: sweep 1.3s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+}
+
+@keyframes sweep {
+  from {
+    background-position: -45% 0;
+  }
+  to {
+    background-position: 145% 0;
+  }
+}
+
+.stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.stat__label {
+  color: var(--qf-muted);
+  font-size: 12px;
+}
+
+.stat__value {
+  font-family: var(--qf-font-mono);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.query-results__toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.segmented {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--qf-border);
+  border-radius: 9px;
+  background: var(--qf-bg);
+}
+
+.segmented button {
+  border: 0;
+  background: transparent;
+  padding: 3px 12px;
+  color: var(--qf-muted);
+}
+
+.segmented button[aria-selected='true'] {
+  background: var(--qf-bg-elevated);
+  color: var(--qf-fg);
+  box-shadow: 0 0 0 1px var(--qf-border-strong) inset;
+}
+
+.query-results__export-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 3px 2px 10px;
+  border: 1px solid var(--qf-border);
+  border-radius: 9px;
+}
+
+/* "All matching" re-runs the query — a visibly different kind of action. */
+.query-results__export-group--all {
+  border-style: dashed;
+  border-color: var(--qf-border-strong);
+}
+
+.query-results__export-label {
+  margin-right: 4px;
+  color: var(--qf-muted);
+  font-size: 12px;
+}
+
+.query-results__export-group button {
+  padding: 2px 9px;
+  font-size: 12px;
+}
+
+.query-results__export-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--qf-muted);
+}
+
+.results-empty {
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  padding: 36px 16px 44px;
+  border: 1px dashed var(--qf-border-strong);
+  border-radius: var(--qf-r-panel);
+  text-align: center;
+}
+
+.results-empty img {
+  margin-bottom: 8px;
+  opacity: 0.9;
+}
+
+.results-empty__title {
+  font-size: 15px;
+  font-weight: 620;
+}
+
+/* ---------- grid ---------- */
+
+.results-grid {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--qf-border);
+  border-radius: var(--qf-r-panel);
+  background: var(--qf-panel);
+}
+
+.results-grid__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--qf-border);
+  color: var(--qf-muted);
+  font-size: 12.5px;
+}
+
+.results-grid__scroller {
+  /* Taller windows get a taller grid (min 360px, the previous fixed size). */
+  height: clamp(360px, 46vh, 900px);
+}
+
+.results-grid [tabindex='0']:focus-visible {
+  outline-offset: -2px;
+}
+
+.results-grid__header {
+  background: var(--qf-bg-elevated);
+  box-shadow: 0 1px 0 var(--qf-border-strong);
+}
+
+/* Row height is fixed at 28px (ROW_HEIGHT_PX) — the virtualizer measures
+   nothing, so cells use no vertical padding or borders. */
+.results-grid__hcell,
+.results-grid__cell {
+  height: 100%;
+  padding: 0 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.results-grid__hcell {
+  height: 30px;
+  line-height: 30px;
+  font-weight: 620;
+  font-size: 12px;
+  color: var(--qf-muted);
+}
+
+.results-grid__cell {
+  line-height: 28px;
+  font-family: var(--qf-font-mono);
+  font-size: 12px;
+  box-shadow: inset 0 -1px 0 var(--qf-border);
+}
+
+.results-grid__row:hover {
+  background: var(--qf-hover);
+}
+
+.results-grid__row.is-selected {
+  background: var(--qf-accent-soft);
+}
+
+.results-grid__cell.is-rownum {
+  color: var(--qf-muted);
+  text-align: right;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.results-grid__cell.is-null {
+  color: var(--qf-muted);
+  font-style: italic;
+  opacity: 0.75;
+}
+
+.results-grid__cell.is-number {
+  color: var(--qf-syn-number);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.results-grid__cell.is-object {
+  color: var(--qf-syn-type);
+  cursor: zoom-in;
+}
+
+.results-grid__cell.is-active {
+  box-shadow: inset 0 0 0 1.5px var(--qf-accent);
+  background: var(--qf-accent-soft);
+}
+
+.results-grid__resize-handle:hover,
+.results-grid__resize-handle:active {
+  background: var(--qf-accent);
+}
+
+.results-grid__context-menu {
+  z-index: 20;
+  min-width: 150px;
+  padding: 4px;
+  border: 1px solid var(--qf-border-strong);
+  border-radius: 9px;
+  background: var(--qf-bg-elevated);
+  box-shadow: var(--qf-pop-shadow);
+}
+
+.results-grid__context-menu button {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+}
+
+/* ---------- JSON ---------- */
+
+.results-json-view {
+  display: grid;
+  gap: 8px;
+}
+
+.results-json-view__toolbar {
+  display: flex;
+  gap: 6px;
+}
+
+.results-json-view > p {
+  color: var(--qf-muted);
+  font-size: 12.5px;
+  max-width: 76ch;
+}
+
+.json-tree {
+  max-height: 420px;
+  overflow: auto;
+  padding: 12px 14px;
+  border: 1px solid var(--qf-border);
+  border-radius: var(--qf-r-panel);
+  background: var(--qf-panel);
+  font-family: var(--qf-font-mono);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.json-toggle {
+  width: 18px;
+  padding: 0;
+  margin-right: 2px;
+  border: 0;
+  background: transparent;
+  color: var(--qf-muted);
+  font-size: 9px;
+}
+
+.json-key {
+  color: var(--qf-syn-func);
+}
+
+.json-string {
+  color: var(--qf-syn-string);
+}
+
+.json-number {
+  color: var(--qf-syn-number);
+}
+
+.json-boolean {
+  color: var(--qf-syn-op);
+}
+
+.json-null,
+.json-undefined,
+.json-collapsed-summary {
+  color: var(--qf-muted);
+}
+
+/* ---------- cell inspector ---------- */
+
+.cell-inspector {
+  position: fixed;
+  z-index: 30;
+  top: 68px;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(480px, calc(100vw - 32px));
+  padding: 10px;
+  border: 1px solid var(--qf-border-strong);
+  border-radius: var(--qf-r-panel);
+  background: var(--qf-bg-elevated);
+  box-shadow: var(--qf-pop-shadow);
+}
+
+.cell-inspector__toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.cell-inspector .json-tree {
+  flex: 1;
+  max-height: none;
+  background: var(--qf-panel);
+}

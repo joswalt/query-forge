@@ -5,6 +5,7 @@ import type { ExportFormat } from '@shared/types/export'
 import type { SavedQuery } from '@shared/types/saved-query'
 import { QueryEditor, type QueryEditorHandle } from '../editor/QueryEditor'
 import { initialExportState, type ExportState } from '../results/export-state'
+import { CloseIcon, PlayIcon, PlusIcon } from '../icons'
 import { SavedQueriesPanel } from '../saved-queries/SavedQueriesPanel'
 import { QueryResultsView } from './QueryResultsView'
 import {
@@ -65,6 +66,8 @@ function createTab(index: number, seed?: OpenQuerySeed): QueryTabState {
     exportState: initialExportState
   }
 }
+
+const RUN_SHORTCUT = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ Enter' : 'Ctrl Enter'
 
 const DRAFTS_KEY = 'queryforge.drafts.v1'
 const DRAFT_SAVE_DEBOUNCE_MS = 500
@@ -442,35 +445,45 @@ export const QueryWorkspace = forwardRef<QueryWorkspaceHandle, { connections: Co
 
   return (
     <section className="query-workspace">
-      <h2>Queries</h2>
-      <div className="query-workspace__tabbar" role="tablist">
+      <div className="query-workspace__tabbar" role="tablist" aria-label="Query tabs">
         {tabs.map((tab) => (
-          <span key={tab.id} className={tab.id === activeTabId ? 'is-active' : ''}>
-            <button type="button" role="tab" onClick={() => setActiveTabId(tab.id)}>
+          <span
+            key={tab.id}
+            className={`query-tab${tab.id === activeTabId ? ' is-active' : ''}`}
+            data-running={tab.run.status === 'running' ? 'true' : undefined}
+          >
+            <button
+              type="button"
+              role="tab"
+              className="query-tab__title"
+              aria-selected={tab.id === activeTabId}
+              onClick={() => setActiveTabId(tab.id)}
+            >
               {tab.title}
               {tab.run.status === 'running' ? ' …' : ''}
             </button>
             <button
               type="button"
+              className="query-tab__close"
               aria-label={`Close ${tab.title}`}
               onClick={() => handleCloseTab(tab.id)}
             >
-              ×
+              <CloseIcon size={12} />
             </button>
           </span>
         ))}
-        <button type="button" onClick={handleNewTab}>
-          + New tab
+        <button type="button" className="btn--ghost query-workspace__new" onClick={handleNewTab}>
+          <PlusIcon size={13} /> New tab
         </button>
-        <button type="button" onClick={() => void handleOpenFile()}>
+        <button type="button" className="btn--ghost" onClick={() => void handleOpenFile()}>
           Open file…
         </button>
       </div>
-      {fileMessage && <p>{fileMessage}</p>}
+      {fileMessage && <p className="query-workspace__message">{fileMessage}</p>}
 
       {activeTab && (
         <div className="query-workspace__tab">
-          <label>
+          <label className="query-workspace__connection">
             Connection
             <select
               value={activeTab.connectionId ?? ''}
@@ -478,7 +491,7 @@ export const QueryWorkspace = forwardRef<QueryWorkspaceHandle, { connections: Co
                 updateTab(activeTab.id, (t) => ({ ...t, connectionId: e.target.value || undefined }))
               }
             >
-              <option value="">— select a connection —</option>
+              <option value="">Select a connection</option>
               {connections.map((connection) => (
                 <option key={connection.id} value={connection.id}>
                   {connection.name}
@@ -488,17 +501,8 @@ export const QueryWorkspace = forwardRef<QueryWorkspaceHandle, { connections: Co
           </label>
 
           <div className="query-workspace__actions">
-            <button
-              type="button"
-              disabled={activeTab.run.status === 'running'}
-              onClick={() =>
-                handleExecute(
-                  activeTab.id,
-                  editorRef.current?.getExecutionText() ?? activeTab.queryText
-                )
-              }
-            >
-              Run (⌘/Ctrl+Enter)
+            <button type="button" className="btn--ghost" onClick={() => void handleSaveToFile()}>
+              Save to file…
             </button>
             <button
               type="button"
@@ -507,8 +511,20 @@ export const QueryWorkspace = forwardRef<QueryWorkspaceHandle, { connections: Co
             >
               Cancel
             </button>
-            <button type="button" onClick={() => void handleSaveToFile()}>
-              Save to file…
+            <button
+              type="button"
+              className="btn--run"
+              disabled={activeTab.run.status === 'running'}
+              onClick={() =>
+                handleExecute(
+                  activeTab.id,
+                  editorRef.current?.getExecutionText() ?? activeTab.queryText
+                )
+              }
+            >
+              <PlayIcon size={12} />
+              Run
+              <kbd>{RUN_SHORTCUT}</kbd>
             </button>
           </div>
 

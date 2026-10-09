@@ -1,33 +1,390 @@
-/* Dark and light themes (user story 54). Variables are read by component
-   styles via `var(--qf-...)`; `[data-theme="dark"]` on `<html>` (toggled in
-   App.tsx from Preferences) is the single switch — no component needs its
-   own light/dark branch. */
+/* QueryForge design tokens.
+ *
+ * The palette is lifted from the brand mark: the deep navy of the app tile
+ * (#0D2955 → #020A21) is the ground, the cyan→blue of the database barrel is
+ * "data" (structure, focus, links), and the orange of the anvil/handle is
+ * "heat" (the one thing that does work: Run, Save, in-flight progress).
+ * Everything else stays quiet.
+ *
+ * Dark is the default. `[data-theme]` on <html> (set statically in
+ * index.html, then toggled in App.tsx from Preferences) is the single switch;
+ * components only read `var(--qf-…)`. */
+
 :root,
-:root[data-theme='light'] {
-  --qf-bg: #ffffff;
-  --qf-bg-elevated: #f5f5f5;
-  --qf-fg: #1a1a1a;
-  --qf-border: #d0d0d0;
-  --qf-accent: #0a66c2;
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --qf-bg: #050b1c;
+  --qf-panel: #09122a;
+  --qf-bg-elevated: #0f1b3b;
+  --qf-hover: #15254d;
+  --qf-border: #1b2b55;
+  --qf-border-strong: #2c4279;
+  --qf-fg: #e9effc;
+  --qf-muted: #8f9dc2;
+
+  --qf-accent: #35d6f7;
+  --qf-accent-fg: #031326;
+  --qf-accent-soft: rgb(53 214 247 / 0.13);
+  --qf-ember-1: #ffa51f;
+  --qf-ember-2: #ff5b2e;
+  --qf-ember-fg: #1d0b00;
+  --qf-ember-glow: rgb(255 106 40 / 0.42);
+
+  --qf-ok: #3ddc97;
+  --qf-err: #ff6b86;
+  --qf-warn: #ffb02e;
+
+  --qf-syn-keyword: #ff9a4d;
+  --qf-syn-string: #7be0a6;
+  --qf-syn-number: #ffc857;
+  --qf-syn-comment: #62729d;
+  --qf-syn-func: #35d6f7;
+  --qf-syn-op: #b79cff;
+  --qf-syn-type: #6aa8ff;
+
+  --qf-glow-a: rgb(22 99 247 / 0.16);
+  --qf-glow-b: rgb(255 121 30 / 0.07);
+  --qf-pop-shadow: 0 18px 48px rgb(0 0 0 / 0.6);
+  --qf-selection: rgb(53 214 247 / 0.16);
 }
 
-:root[data-theme='dark'] {
-  --qf-bg: #1e1e1e;
-  --qf-bg-elevated: #2a2a2a;
-  --qf-fg: #e4e4e4;
-  --qf-border: #444444;
-  --qf-accent: #4da3ff;
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --qf-bg: #edf1fa;
+  --qf-panel: #ffffff;
+  --qf-bg-elevated: #f3f6fc;
+  --qf-hover: #e5ebf8;
+  --qf-border: #d3dcee;
+  --qf-border-strong: #aebddd;
+  --qf-fg: #0f1b3b;
+  --qf-muted: #55648c;
+
+  --qf-accent: #0b5fdc;
+  --qf-accent-fg: #ffffff;
+  --qf-accent-soft: rgb(11 95 220 / 0.09);
+  --qf-ember-1: #ffa51f;
+  --qf-ember-2: #ff6a2e;
+  --qf-ember-fg: #1d0b00;
+  --qf-ember-glow: rgb(255 106 40 / 0.3);
+
+  --qf-ok: #0b7f53;
+  --qf-err: #c81e45;
+  --qf-warn: #a85a00;
+
+  --qf-syn-keyword: #c2410c;
+  --qf-syn-string: #0f7a4f;
+  --qf-syn-number: #94590a;
+  --qf-syn-comment: #7685a8;
+  --qf-syn-func: #0b5fdc;
+  --qf-syn-op: #6d3fd1;
+  --qf-syn-type: #1d4ed8;
+
+  --qf-glow-a: rgb(22 99 247 / 0.09);
+  --qf-glow-b: rgb(255 121 30 / 0.07);
+  --qf-pop-shadow: 0 18px 44px rgb(15 27 59 / 0.2);
+  --qf-selection: rgb(11 95 220 / 0.13);
+}
+
+:root {
+  --qf-font-ui: 'Bricolage Grotesque Variable', ui-sans-serif, system-ui, sans-serif;
+  --qf-font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  /* The brand ring, as a reusable gradient. */
+  --qf-ring: linear-gradient(90deg, #1ddbfc, #1663f7 30%, #8d35ec 55%, #fc477f 78%, #ff9a13);
+
+  /* Radius follows hierarchy: panels > controls > chips. */
+  --qf-r-panel: 12px;
+  --qf-r-control: 7px;
+  --qf-r-chip: 999px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
 }
 
 body {
+  margin: 0;
   background: var(--qf-bg);
   color: var(--qf-fg);
+  font-family: var(--qf-font-ui);
+  font-size: 13.5px;
+  line-height: 1.5;
+  font-optical-sizing: auto;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
 }
+
+h1,
+h2,
+h3,
+p,
+ul,
+pre {
+  margin: 0;
+}
+
+ul {
+  padding: 0;
+  list-style: none;
+}
+
+h2 {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+h3 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--qf-muted);
+}
+
+pre,
+code,
+kbd {
+  font-family: var(--qf-font-mono);
+  font-size: 12px;
+  /* SQL and JSON must read literally: `--` is a comment, `<>` an operator. */
+  font-variant-ligatures: none;
+}
+
+time {
+  color: var(--qf-muted);
+}
+
+::selection {
+  background: var(--qf-selection);
+}
+
+:focus-visible {
+  outline: 2px solid var(--qf-accent);
+  outline-offset: 2px;
+}
+
+/* ---------- form controls ---------- */
 
 button,
 input,
-select {
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
   background: var(--qf-bg-elevated);
-  color: var(--qf-fg);
   border: 1px solid var(--qf-border);
+  border-radius: var(--qf-r-control);
+  padding: 5px 11px;
+  line-height: 1.3;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
+}
+
+button:hover:not(:disabled) {
+  background: var(--qf-hover);
+  border-color: var(--qf-border-strong);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+input:not([type='checkbox']),
+select {
+  width: 100%;
+  background: var(--qf-bg);
+  border: 1px solid var(--qf-border);
+  border-radius: var(--qf-r-control);
+  padding: 6px 9px;
+  line-height: 1.3;
+}
+
+input::placeholder {
+  color: var(--qf-muted);
+  opacity: 0.8;
+}
+
+input:not([type='checkbox']):hover,
+select:hover {
+  border-color: var(--qf-border-strong);
+}
+
+input:not([type='checkbox']):focus-visible,
+select:focus-visible {
+  outline: none;
+  border-color: var(--qf-accent);
+  box-shadow: 0 0 0 3px var(--qf-accent-soft);
+}
+
+/* Native arrows ignore theme colour on some platforms; the CSP forbids
+   data: URIs, so the chevron is drawn from two gradients instead. */
+select {
+  appearance: none;
+  padding-right: 26px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--qf-muted) 50%),
+    linear-gradient(135deg, var(--qf-muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 15px) 52%,
+    calc(100% - 10px) 52%;
+  background-size:
+    5px 5px,
+    5px 5px;
+  background-repeat: no-repeat;
+}
+
+input[type='checkbox'] {
+  accent-color: var(--qf-accent);
+  margin: 0;
+}
+
+label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--qf-muted);
+}
+
+label:has(> input[type='checkbox']) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--qf-fg);
+}
+
+fieldset {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0 12px 12px;
+  min-width: 0;
+  border: 1px dashed var(--qf-border-strong);
+  border-radius: var(--qf-r-control);
+}
+
+/* A floated legend sits inside the box and wraps like a normal paragraph,
+   instead of straddling the border line. */
+legend {
+  float: left;
+  width: 100%;
+  padding: 10px 0 2px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--qf-muted);
+}
+
+legend + * {
+  clear: both;
+}
+
+[role='alert'] {
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--qf-err) 45%, transparent);
+  border-radius: var(--qf-r-control);
+  background: color-mix(in srgb, var(--qf-err) 10%, transparent);
+  color: var(--qf-err);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- button variants ---------- */
+
+.btn--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--qf-muted);
+  padding: 4px 8px;
+}
+
+.btn--ghost:hover:not(:disabled) {
+  background: var(--qf-hover);
+  border-color: transparent;
+  color: var(--qf-fg);
+}
+
+.btn--danger:hover:not(:disabled) {
+  color: var(--qf-err);
+}
+
+.btn--primary {
+  background: var(--qf-accent);
+  border-color: var(--qf-accent);
+  color: var(--qf-accent-fg);
+  font-weight: 600;
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--qf-accent);
+  border-color: var(--qf-accent);
+  filter: brightness(1.1);
+}
+
+/* The one hot element: Run. */
+.btn--run {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px 6px 12px;
+  border: 0;
+  color: var(--qf-ember-fg);
+  font-weight: 650;
+  background: linear-gradient(135deg, var(--qf-ember-1), var(--qf-ember-2));
+  box-shadow:
+    0 0 0 1px rgb(255 255 255 / 0.12) inset,
+    0 4px 18px -4px var(--qf-ember-glow);
+}
+
+.btn--run:hover:not(:disabled) {
+  background: linear-gradient(135deg, var(--qf-ember-1), var(--qf-ember-2));
+  filter: brightness(1.08);
+  box-shadow:
+    0 0 0 1px rgb(255 255 255 / 0.2) inset,
+    0 6px 24px -3px var(--qf-ember-glow);
+}
+
+.btn--run:disabled {
+  opacity: 0.4;
+  box-shadow: none;
+}
+
+.btn--run kbd {
+  font-family: var(--qf-font-ui);
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgb(29 11 0 / 0.16);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+/* ---------- scrollbars ---------- */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--qf-border-strong) transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

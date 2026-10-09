@@ -167,7 +167,7 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
   }
 
   return (
-    <form onSubmit={handleSubmit}>
+    <form className="conn-form" onSubmit={handleSubmit}>
       <label>
         Database type
         <select
@@ -306,19 +306,28 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
       </label>
 
       {error && <p role="alert">{error}</p>}
-      {testMessage && <p>{testMessage}</p>}
-
-      <button type="button" disabled={testing} onClick={handleTest}>
-        Test connection
-      </button>
-      <button type="submit" disabled={submitting}>
-        {editing ? 'Update connection' : 'Save connection'}
-      </button>
-      {editing && onCancel && (
-        <button type="button" onClick={onCancel}>
-          Cancel
-        </button>
+      {testMessage && (
+        <p
+          className="conn-form__test"
+          data-ok={testMessage === 'Connection OK' ? 'true' : 'false'}
+        >
+          {testMessage}
+        </p>
       )}
+
+      <div className="conn-form__actions">
+        <button type="submit" className="btn--primary" disabled={submitting}>
+          {editing ? 'Update connection' : 'Save connection'}
+        </button>
+        <button type="button" disabled={testing} onClick={handleTest}>
+          Test connection
+        </button>
+        {editing && onCancel && (
+          <button type="button" className="btn--ghost" onClick={onCancel}>
+            Cancel
+          </button>
+        )}
+      </div>
     </form>
   )
 }

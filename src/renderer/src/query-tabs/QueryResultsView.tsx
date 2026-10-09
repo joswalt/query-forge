@@ -4,6 +4,7 @@ import { CellInspector } from '../results/CellInspector'
 import type { ExportState } from '../results/export-state'
 import { ResultsGrid } from '../results/ResultsGrid'
 import { ResultsJsonView } from '../results/ResultsJsonView'
+import brandMark from '../assets/brand/queryforge-icon-transparent-1024.png'
 import type { QueryRunState } from './query-run-reducer'
 
 type ViewMode = 'table' | 'json'
@@ -42,40 +43,57 @@ export function QueryResultsView({
 
   return (
     <div className="query-results">
-      <div className="query-results__status">
-        <span>Status: {run.status}</span>
-        {run.status !== 'idle' && (
-          <span>
-            Rows: {run.rowCount}
-            {truncated ? ` (showing first ${run.rows.length})` : ''}
+      {run.status !== 'idle' && (
+        <div className="query-results__status" data-status={run.status}>
+          <span className="status-pill" data-status={run.status}>
+            {run.status}
           </span>
-        )}
-        {durationMs !== undefined && <span>Duration: {durationMs}ms</span>}
-        {run.ruTotal !== undefined && <span>RU: {run.ruTotal.toFixed(2)}</span>}
-      </div>
+          <span className="stat">
+            <span className="stat__label">Rows</span>
+            <span className="stat__value">
+              {run.rowCount}
+              {truncated ? ` (showing first ${run.rows.length})` : ''}
+            </span>
+          </span>
+          {durationMs !== undefined && (
+            <span className="stat">
+              <span className="stat__label">Duration</span>
+              <span className="stat__value">{durationMs} ms</span>
+            </span>
+          )}
+          {run.ruTotal !== undefined && (
+            <span className="stat">
+              <span className="stat__label">RU</span>
+              <span className="stat__value">{run.ruTotal.toFixed(2)}</span>
+            </span>
+          )}
+        </div>
+      )}
 
       {run.status === 'error' && run.errorMessage && <p role="alert">{run.errorMessage}</p>}
-      {run.status === 'cancelled' && <p>Query cancelled.</p>}
+      {run.status === 'cancelled' && <p className="empty">Query cancelled.</p>}
 
       {hasRows && (
         <>
-          <div className="query-results__toolbar" role="tablist">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={viewMode === 'table'}
-              onClick={() => setViewMode('table')}
-            >
-              Table
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={viewMode === 'json'}
-              onClick={() => setViewMode('json')}
-            >
-              JSON
-            </button>
+          <div className="query-results__toolbar">
+            <div className="segmented" role="tablist" aria-label="Result view">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={viewMode === 'table'}
+                onClick={() => setViewMode('table')}
+              >
+                Table
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={viewMode === 'json'}
+                onClick={() => setViewMode('json')}
+              >
+                JSON
+              </button>
+            </div>
 
             {/* "Loaded" vs "all matching" is a deliberate, visible UI
              * distinction (user story 47), not two modes of the same
@@ -87,8 +105,11 @@ export function QueryResultsView({
              * still-running query keeps appending to that same array —
              * exporting mid-run would silently write fewer rows than the
              * grid ends up showing once the run finishes. */}
-            <span className="query-results__export-group">
-              Export loaded:
+            <span
+              className="query-results__export-group"
+              title="Writes the rows already loaded in this view"
+            >
+              <span className="query-results__export-label">Export loaded</span>
               <button
                 type="button"
                 disabled={run.status === 'running'}
@@ -104,8 +125,11 @@ export function QueryResultsView({
                 JSON
               </button>
             </span>
-            <span className="query-results__export-group">
-              Export all matching:
+            <span
+              className="query-results__export-group query-results__export-group--all"
+              title="Runs the query again and writes every matching row. Cosmos DB charges request units for the second run."
+            >
+              <span className="query-results__export-label">Export all matching</span>
               <button type="button" onClick={() => onExportAll('csv')}>
                 CSV
               </button>
@@ -128,7 +152,7 @@ export function QueryResultsView({
                       ? ` ${exportState.rowsWritten} rows written`
                       : ''}
                   </span>
-                  <button type="button" onClick={onCancelExport}>
+                  <button type="button" className="btn--ghost" onClick={onCancelExport}>
                     Cancel export
                   </button>
                 </>
@@ -155,7 +179,17 @@ export function QueryResultsView({
         </>
       )}
 
-      {!hasRows && run.status === 'success' && <p>Query returned no rows.</p>}
+      {!hasRows && run.status === 'success' && (
+        <p className="empty">The query ran but returned no rows.</p>
+      )}
+
+      {run.status === 'idle' && (
+        <div className="results-empty">
+          <img src={brandMark} alt="" width={84} height={84} draggable={false} />
+          <p className="results-empty__title">Results appear here</p>
+          <p className="empty">Pick a connection, write a query, and press Run.</p>
+        </div>
+      )}
 
       {inspectorOpen && (
         <CellInspector value={inspectedCell} onClose={() => setInspectorOpen(false)} />

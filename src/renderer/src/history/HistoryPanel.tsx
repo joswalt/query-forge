@@ -99,8 +99,17 @@ export function HistoryPanel(): React.JSX.Element {
   }
 
   return (
-    <section className="history-panel">
-      <h2>Query History</h2>
+    <section className="history-panel sidebar__section">
+      <div className="section-head">
+        <h2>Query history</h2>
+        <button
+          type="button"
+          className="btn--ghost btn--danger section-head__action"
+          onClick={() => void handleClearHistory()}
+        >
+          Clear history
+        </button>
+      </div>
       {error && <p role="alert">{error}</p>}
 
       <label>
@@ -113,6 +122,7 @@ export function HistoryPanel(): React.JSX.Element {
       </label>
 
       <form
+        className="history-panel__search"
         onSubmit={(e) => {
           e.preventDefault()
           void refresh(searchTerm)
@@ -125,36 +135,53 @@ export function HistoryPanel(): React.JSX.Element {
           onChange={(e) => setSearchTerm(e.target.value)}
         />
         <button type="submit">Search</button>
-        <button
-          type="button"
-          onClick={() => {
-            setSearchTerm('')
-            void refresh('')
-          }}
-        >
-          Reset search
-        </button>
-        <button type="button" onClick={() => void handleClearHistory()}>
-          Clear history
-        </button>
+        {hasSearched && (
+          <button
+            type="button"
+            className="btn--ghost"
+            onClick={() => {
+              setSearchTerm('')
+              void refresh('')
+            }}
+          >
+            Reset search
+          </button>
+        )}
       </form>
 
       {entries.length === 0 ? (
-        <p>{hasSearched ? 'No history entries match your search.' : 'No query history yet.'}</p>
+        <p className="empty">
+          {hasSearched
+            ? 'No history entries match your search.'
+            : 'Queries you run will show up here.'}
+        </p>
       ) : (
-        <ul>
+        <ul className="history-list">
           {entries.map((entry) => (
-            <li key={entry.id}>
-              <strong>{entry.profileName}</strong> — {entry.status} — {entry.durationMs}ms
-              {entry.rowCount !== undefined ? ` — ${entry.rowCount} rows` : ''}
-              {' — '}
-              <time dateTime={entry.executedAt}>{new Date(entry.executedAt).toLocaleString()}</time>
+            <li key={entry.id} className="history-entry" data-status={entry.status}>
+              <div className="history-entry__head">
+                <strong className="history-entry__name">{entry.profileName}</strong>
+                <span className="status-pill" data-status={entry.status}>
+                  {entry.status}
+                </span>
+              </div>
+              <div className="history-entry__stats">
+                <span>{entry.durationMs} ms</span>
+                {entry.rowCount !== undefined && <span>{entry.rowCount} rows</span>}
+                <time dateTime={entry.executedAt}>
+                  {new Date(entry.executedAt).toLocaleString()}
+                </time>
+              </div>
               {entry.errorMessage && <p role="alert">{entry.errorMessage}</p>}
               {entry.queryText && (
                 <>
-                  <pre>{entry.queryText}</pre>
-                  <button type="button" onClick={() => void handleCopyQuery(entry)}>
-                    {copiedId === entry.id ? 'Copied!' : 'Copy query'}
+                  <pre className="code-snippet">{entry.queryText}</pre>
+                  <button
+                    type="button"
+                    className="btn--ghost history-entry__copy"
+                    onClick={() => void handleCopyQuery(entry)}
+                  >
+                    {copiedId === entry.id ? 'Copied' : 'Copy query'}
                   </button>
                 </>
               )}

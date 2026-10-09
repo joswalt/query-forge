@@ -11,7 +11,6 @@ import { isRecord } from '@shared/is-record'
 import { buildRowCopyText, buildRowsCopyText, formatCellValue } from './cell-format'
 
 const ROW_HEIGHT_PX = 28
-const GRID_HEIGHT_PX = 360
 
 interface ContextMenuState {
   x: number
@@ -134,7 +133,7 @@ export function ResultsGrid({
       {selectedRows.size > 0 && (
         <div className="results-grid__toolbar">
           <span>{selectedRows.size} row(s) selected</span>
-          <button type="button" onClick={copySelectedRows}>
+          <button type="button" className="btn--ghost" onClick={copySelectedRows}>
             Copy selected rows
           </button>
         </div>
@@ -143,7 +142,8 @@ export function ResultsGrid({
       <div
         ref={parentRef}
         tabIndex={0}
-        style={{ height: GRID_HEIGHT_PX, overflow: 'auto', position: 'relative' }}
+        className="results-grid__scroller"
+        style={{ overflow: 'auto', position: 'relative' }}
       >
         <div
           className="results-grid__header"
@@ -153,17 +153,18 @@ export function ResultsGrid({
             top: 0,
             zIndex: 1,
             width: table.getTotalSize(),
-            // An opaque background is load-bearing, not decorative: this
-            // header is a sticky sibling of the virtualized rows inside
-            // the *same* scroll container (see class doc), so without one
-            // rows scrolling vertically would show through it.
-            background: 'Canvas'
+            // The header needs an opaque background (set in results.css on
+            // `.results-grid__header`): it is a sticky sibling of the
+            // virtualized rows inside the *same* scroll container (see
+            // class doc), so without one rows scrolling vertically would
+            // show through it.
           }}
         >
           {table.getHeaderGroups().map((headerGroup) =>
             headerGroup.headers.map((header) => (
               <div
                 key={header.id}
+                className="results-grid__hcell"
                 style={{ width: header.getSize(), position: 'relative', flexShrink: 0 }}
               >
                 {flexRender(header.column.columnDef.header, header.getContext())}
@@ -200,6 +201,7 @@ export function ResultsGrid({
             return (
               <div
                 key={row.id}
+                className={`results-grid__row${isSelected ? ' is-selected' : ''}`}
                 style={{
                   position: 'absolute',
                   top: 0,
@@ -207,8 +209,7 @@ export function ResultsGrid({
                   width: '100%',
                   height: virtualRow.size,
                   transform: `translateY(${virtualRow.start}px)`,
-                  display: 'flex',
-                  background: isSelected ? 'rgba(0,0,0,0.08)' : undefined
+                  display: 'flex'
                 }}
               >
                 {row.getVisibleCells().map((cell) => {
@@ -223,10 +224,19 @@ export function ResultsGrid({
                   return (
                     <div
                       key={cell.id}
+                      className={[
+                        'results-grid__cell',
+                        isRowNumber ? 'is-rownum' : '',
+                        rawValue === null || rawValue === undefined ? (isRowNumber ? '' : 'is-null') : '',
+                        typeof rawValue === 'number' ? 'is-number' : '',
+                        isExpandable ? 'is-object' : '',
+                        isActive ? 'is-active' : ''
+                      ]
+                        .filter(Boolean)
+                        .join(' ')}
                       style={{
                         width: cell.column.getSize(),
-                        flexShrink: 0,
-                        outline: isActive ? '1px solid currentColor' : undefined
+                        flexShrink: 0
                       }}
                       onClick={(e) => {
                         e.stopPropagation()
@@ -267,7 +277,7 @@ export function ResultsGrid({
       {contextMenu && (
         <ul
           className="results-grid__context-menu"
-          style={{ position: 'fixed', top: contextMenu.y, left: contextMenu.x, listStyle: 'none' }}
+          style={{ position: 'fixed', top: contextMenu.y, left: contextMenu.x }}
           onClick={(e) => e.stopPropagation()}
         >
           <li>

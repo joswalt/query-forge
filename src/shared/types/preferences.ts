@@ -23,5 +23,5 @@ export interface Preferences {
 
 export const defaultPreferences: Preferences = {
   queryHistory: { persistQueryText: false },
-  theme: 'light'
+  theme: 'dark'
 }

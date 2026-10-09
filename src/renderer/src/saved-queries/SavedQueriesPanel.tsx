@@ -64,10 +64,11 @@ export function SavedQueriesPanel({ canSaveCurrent, onSaveCurrent, onOpen }: Pro
 
   return (
     <section className="saved-queries-panel">
-      <h2>Saved Queries</h2>
+      <h2>Saved queries</h2>
       {error && <p role="alert">{error}</p>}
 
       <form
+        className="saved-queries-panel__form"
         onSubmit={(e) => {
           e.preventDefault()
           void handleSave()
@@ -79,26 +80,36 @@ export function SavedQueriesPanel({ canSaveCurrent, onSaveCurrent, onOpen }: Pro
           value={name}
           onChange={(e) => setName(e.target.value)}
         />
-        <button type="submit" disabled={!canSaveCurrent || !name.trim() || saving}>
+        <button type="submit" className="btn--primary" disabled={!canSaveCurrent || !name.trim() || saving}>
           Save current query
         </button>
       </form>
 
       {savedQueries.length === 0 ? (
-        <p>No saved queries yet.</p>
+        <p className="empty">
+          Name the query in the editor above and save it to reuse it later.
+        </p>
       ) : (
-        <ul>
+        <ul className="saved-list">
           {savedQueries.map((savedQuery) => (
-            <li key={savedQuery.id}>
-              <strong>{savedQuery.name}</strong>
-              {savedQuery.databaseKind ? ` — ${savedQuery.databaseKind}` : ''}
-              <pre>{savedQuery.queryText}</pre>
-              <button type="button" onClick={() => onOpen(savedQuery)}>
-                Open in new tab
-              </button>
-              <button type="button" onClick={() => void handleDelete(savedQuery.id)}>
-                Delete
-              </button>
+            <li key={savedQuery.id} className="saved-card">
+              <div className="saved-card__head">
+                <strong className="saved-card__name">{savedQuery.name}</strong>
+                {savedQuery.databaseKind && <span className="chip">{savedQuery.databaseKind}</span>}
+              </div>
+              <pre className="code-snippet">{savedQuery.queryText}</pre>
+              <div className="saved-card__actions">
+                <button type="button" onClick={() => onOpen(savedQuery)}>
+                  Open in new tab
+                </button>
+                <button
+                  type="button"
+                  className="btn--ghost btn--danger"
+                  onClick={() => void handleDelete(savedQuery.id)}
+                >
+                  Delete
+                </button>
+              </div>
             </li>
           ))}
         </ul>

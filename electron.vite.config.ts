@@ -42,6 +42,12 @@ export default defineConfig({
         '@shared': resolve('src/shared')
       }
     },
-    plugins: [react()]
+    plugins: [react()],
+    build: {
+      // The renderer CSP is `default-src 'self'`, which blocks `data:` URIs.
+      // Vite inlines assets under 4 KB as base64 by default, so brand art
+      // and font subsets must stay real files.
+      assetsInlineLimit: 0
+    }
   }
 })

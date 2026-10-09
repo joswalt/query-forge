@@ -1,0 +1,301 @@
+/* Workspace (tabs, toolbar, editor), connection form, history, saved queries. */
+
+/* ---------- connection form ---------- */
+
+.conn-form {
+  display: grid;
+  gap: 10px;
+}
+
+.conn-form__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.conn-form__test {
+  font-size: 12.5px;
+  color: var(--qf-err);
+  overflow-wrap: anywhere;
+}
+
+.conn-form__test[data-ok='true'] {
+  color: var(--qf-ok);
+}
+
+/* ---------- query workspace ---------- */
+
+.query-workspace {
+  display: grid;
+  gap: 14px;
+}
+
+.query-workspace__tabbar {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 2px;
+  border-bottom: 1px solid var(--qf-border);
+}
+
+.query-workspace__tabbar > .btn--ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 4px;
+  font-size: 12.5px;
+}
+
+.query-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: -1px;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 9px 9px 0 0;
+  color: var(--qf-muted);
+}
+
+.query-tab:hover {
+  background: var(--qf-hover);
+}
+
+.query-tab.is-active {
+  background: var(--qf-panel);
+  border-color: var(--qf-border);
+  color: var(--qf-fg);
+}
+
+/* The active tab wears the brand ring — a single thin line. */
+.query-tab.is-active::before {
+  content: '';
+  position: absolute;
+  inset: -1px 8px auto;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--qf-ring);
+}
+
+.query-tab button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  border-radius: 0;
+}
+
+.query-tab__title {
+  padding: 7px 4px 7px 14px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 560;
+}
+
+.query-tab .query-tab__close {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin: 0 8px 0 2px;
+  padding: 0;
+  border-radius: 50%;
+  opacity: 0.6;
+}
+
+.query-tab button:hover:not(:disabled) {
+  background: transparent;
+}
+
+.query-tab .query-tab__close:hover:not(:disabled) {
+  background: var(--qf-hover);
+  opacity: 1;
+}
+
+.query-workspace__message {
+  color: var(--qf-muted);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.query-workspace__tab {
+  display: grid;
+  grid-template-columns: minmax(180px, 340px) 1fr;
+  align-items: end;
+  gap: 12px;
+}
+
+.query-workspace__tab > :not(.query-workspace__connection):not(.query-workspace__actions) {
+  grid-column: 1 / -1;
+}
+
+.query-workspace__actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+}
+
+.query-editor {
+  font-variant-ligatures: none;
+  /* Grows with the window instead of stopping at a fixed height. */
+  height: clamp(232px, 30vh, 560px);
+  overflow: hidden;
+  border: 1px solid var(--qf-border);
+  border-radius: var(--qf-r-panel);
+  background: var(--qf-panel);
+}
+
+.query-editor:focus-within {
+  border-color: var(--qf-accent);
+  box-shadow: 0 0 0 3px var(--qf-accent-soft);
+}
+
+/* ---------- history ---------- */
+
+.history-panel__search {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.history-panel__search input {
+  flex: 1;
+  min-width: 0;
+}
+
+.history-list,
+.saved-list {
+  display: grid;
+  gap: 8px;
+}
+
+.history-entry,
+.saved-card {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--qf-border);
+  border-radius: var(--qf-r-panel);
+  background: var(--qf-panel);
+}
+
+.history-entry__head,
+.saved-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.history-entry__name,
+.saved-card__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 620;
+}
+
+.history-entry__stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  color: var(--qf-muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.history-entry__copy {
+  justify-self: start;
+  font-size: 12px;
+  margin-left: -8px;
+}
+
+.code-snippet {
+  max-height: 96px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: var(--qf-r-control);
+  background: var(--qf-bg);
+  border: 1px solid var(--qf-border);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--qf-fg);
+}
+
+/* ---------- saved queries ---------- */
+
+.saved-queries-panel {
+  display: grid;
+  gap: 12px;
+  margin-top: 8px;
+  padding-top: 18px;
+  border-top: 1px solid var(--qf-border);
+}
+
+.saved-queries-panel__form {
+  display: flex;
+  gap: 8px;
+  max-width: 560px;
+}
+
+.saved-queries-panel__form input {
+  flex: 1;
+  min-width: 0;
+}
+
+.saved-list {
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+}
+
+.saved-card__actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* ---------- shared status ---------- */
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 9px;
+  border-radius: var(--qf-r-chip);
+  background: var(--qf-bg-elevated);
+  border: 1px solid var(--qf-border);
+  color: var(--qf-muted);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.status-pill::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.status-pill[data-status='success'] {
+  color: var(--qf-ok);
+}
+
+.status-pill[data-status='error'] {
+  color: var(--qf-err);
+}
+
+.status-pill[data-status='running'] {
+  color: var(--qf-ember-1);
+}
+
+.status-pill[data-status='running']::before {
+  animation: pulse 0.9s ease-in-out infinite;
+}
+
+.status-pill[data-status='cancelled'] {
+  color: var(--qf-warn);
+}

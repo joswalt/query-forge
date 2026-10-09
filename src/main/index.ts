@@ -60,10 +60,16 @@ function createQueryExecutionClient(): QueryExecutionClient {
   return new QueryExecutionClient(utilityModulePath)
 }
 
+/** Packaged builds take their icon from electron-builder (resources/icon.icns
+ * / icon.ico). Unpackaged runs (`npm run dev`) would otherwise show
+ * Electron's default icon in the Dock and the Cmd-Tab app switcher. */
+const devIconPath = join(__dirname, '../../resources/icon.png')
+
 function createMainWindow(): void {
   const window = new BrowserWindow({
     width: 1280,
     height: 800,
+    ...(app.isPackaged ? {} : { icon: devIconPath }),
     show: false,
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
@@ -91,6 +97,7 @@ function createMainWindow(): void {
 let queryExecutionClient: QueryExecutionClient | undefined
 
 app.whenReady().then(() => {
+  if (!app.isPackaged) app.dock?.setIcon(devIconPath)
   const { connectionManager, historyRepository, savedQueryRepository, preferencesStore } =
     createLocalStorage()
   queryExecutionClient = createQueryExecutionClient()

@@ -2,10 +2,11 @@ import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import {
   bracketMatching,
-  defaultHighlightStyle,
+  HighlightStyle,
   indentOnInput,
   syntaxHighlighting
 } from '@codemirror/language'
+import { tags } from '@lezer/highlight'
 import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
 import { highlightSelectionMatches, searchKeymap } from '@codemirror/search'
 import { EditorState } from '@codemirror/state'
@@ -19,6 +20,41 @@ import {
 } from '@codemirror/view'
 import type { ConnectionConfig } from '@shared/types/connection-profile'
 import { sqlLanguageFor } from './sql-dialects'
+
+/** Colours come from CSS variables, so a theme switch restyles live editors
+ * without reconfiguring them. */
+const forgeHighlight = HighlightStyle.define([
+  { tag: [tags.keyword, tags.operatorKeyword, tags.modifier], color: 'var(--qf-syn-keyword)', fontWeight: '600' },
+  { tag: [tags.string, tags.special(tags.string)], color: 'var(--qf-syn-string)' },
+  { tag: [tags.number, tags.bool, tags.null], color: 'var(--qf-syn-number)' },
+  { tag: [tags.lineComment, tags.blockComment], color: 'var(--qf-syn-comment)', fontStyle: 'italic' },
+  { tag: [tags.function(tags.variableName), tags.standard(tags.name)], color: 'var(--qf-syn-func)' },
+  { tag: [tags.typeName, tags.className], color: 'var(--qf-syn-type)' },
+  { tag: [tags.operator, tags.punctuation, tags.separator], color: 'var(--qf-syn-op)' }
+])
+
+const forgeTheme = EditorView.theme({
+  '&': { height: '100%', color: 'var(--qf-fg)', backgroundColor: 'transparent', fontSize: '13px' },
+  '&.cm-focused': { outline: 'none' },
+  '.cm-scroller': { fontFamily: 'var(--qf-font-mono)', lineHeight: '1.65' },
+  '.cm-content': { caretColor: 'var(--qf-ember-1)', padding: '10px 0' },
+  '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--qf-ember-1)', borderLeftWidth: '2px' },
+  '.cm-gutters': {
+    backgroundColor: 'transparent',
+    color: 'var(--qf-muted)',
+    border: 'none',
+    paddingLeft: '4px'
+  },
+  '.cm-activeLineGutter': { backgroundColor: 'transparent', color: 'var(--qf-fg)' },
+  '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, ::selection':
+    { backgroundColor: 'var(--qf-selection)' },
+  '.cm-selectionMatch': { backgroundColor: 'var(--qf-accent-soft)' },
+  '&.cm-focused .cm-matchingBracket': {
+    backgroundColor: 'var(--qf-accent-soft)',
+    outline: '1px solid var(--qf-accent)'
+  },
+  '.cm-searchMatch': { backgroundColor: 'var(--qf-accent-soft)' }
+})
 
 export interface QueryEditorHandle {
   /** Selection text if non-empty, else the whole document (user story 24) —
@@ -88,7 +124,8 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
         indentOnInput(),
         bracketMatching(),
         closeBrackets(),
-        syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+        forgeTheme,
+        syntaxHighlighting(forgeHighlight),
         highlightSelectionMatches(),
         sqlLanguageFor(dialect),
         keymap.of([

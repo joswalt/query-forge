@@ -5,6 +5,9 @@ import type { Theme } from '@shared/types/preferences'
 import { NewConnectionForm } from './NewConnectionForm'
 import { QueryWorkspace, type QueryWorkspaceHandle } from './query-tabs/QueryWorkspace'
 import { HistoryPanel } from './history/HistoryPanel'
+import { CosmosIcon, DatabaseIcon, LockIcon, MoonIcon, PlusIcon, SunIcon } from './icons'
+import logoOnDark from './assets/brand/queryforge-logo-dark.png'
+import logoOnLight from './assets/brand/queryforge-logo-light.png'
 
 /** Connection status (user story 10) — tracked client-side; the Query
  * Execution Service itself has no separate "status" concept, only whether
@@ -19,8 +22,10 @@ export function App(): React.JSX.Element {
   const [metadataByConnection, setMetadataByConnection] = useState<
     Record<string, DatabaseMetadata>
   >({})
-  const [theme, setTheme] = useState<Theme>('light')
+  const [theme, setTheme] = useState<Theme>('dark')
   const [editingId, setEditingId] = useState<string | null>(null)
+  const [showNewForm, setShowNewForm] = useState(false)
+  const [loaded, setLoaded] = useState(false)
   const workspaceRef = useRef<QueryWorkspaceHandle>(null)
 
   useEffect(() => {
@@ -53,7 +58,12 @@ export function App(): React.JSX.Element {
 
   async function refresh(): Promise<void> {
     try {
-      setConnections(await window.api.connections.list())
+      const list = await window.api.connections.list()
+      setConnections(list)
+      // A first-run user has nothing to connect to yet, so open the form for
+      // them once, rather than making them hunt for the "+" button.
+      if (!loaded) setShowNewForm(list.length === 0)
+      setLoaded(true)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -62,6 +72,7 @@ export function App(): React.JSX.Element {
 
   useEffect(() => {
     refresh()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   async function handleDelete(id: string): Promise<void> {
@@ -162,7 +173,7 @@ export function App(): React.JSX.Element {
     const status = statuses[connection.id] ?? 'disconnected'
     if (editingId === connection.id) {
       return (
-        <li key={connection.id}>
+        <li key={connection.id} className="sidebar__form">
           <NewConnectionForm
             editing={connection}
             onCreated={() => {
@@ -178,45 +189,72 @@ export function App(): React.JSX.Element {
         </li>
       )
     }
+    const message = testMessages[connection.id]
+    const isCosmos = connection.config.kind === 'cosmos-db'
     return (
-      <li key={connection.id}>
-        <strong>{connection.name}</strong> — {connection.config.kind}
-        {connection.readOnly ? ' (read-only)' : ''}
-        {connection.hasSecret ? ' 🔒' : ''}
-        {' — '}
-        <span>status: {status}</span>
-        <div>
-          <button type="button" onClick={() => handleTest(connection.id)}>
-            Test
-          </button>
+      <li key={connection.id} className="conn" data-status={status}>
+        <div className="conn__head">
+          <span className="conn__kind" title={isCosmos ? 'Azure Cosmos DB' : 'Azure SQL Database'}>
+            {isCosmos ? <CosmosIcon /> : <DatabaseIcon />}
+          </span>
+          <strong className="conn__name">{connection.name}</strong>
+          <span className="conn__status">
+            <span className="conn__dot" aria-hidden="true" />
+            {status}
+          </span>
+        </div>
+        {(connection.readOnly || connection.hasSecret) && (
+          <div className="conn__badges">
+            {connection.readOnly && <span className="chip">read-only</span>}
+            {connection.hasSecret && (
+              <span className="chip">
+                <LockIcon size={11} /> credentials saved
+              </span>
+            )}
+          </div>
+        )}
+        <div className="conn__actions">
           {status === 'connected' ? (
-            <button type="button" onClick={() => handleDisconnect(connection.id)}>
+            <button
+              type="button"
+              className="btn--ghost"
+              onClick={() => handleDisconnect(connection.id)}
+            >
               Disconnect
             </button>
           ) : (
             <button
               type="button"
+              className="btn--ghost conn__connect"
               disabled={status === 'connecting'}
               onClick={() => handleConnect(connection.id)}
             >
               Connect
             </button>
           )}
+          <button type="button" className="btn--ghost" onClick={() => handleTest(connection.id)}>
+            Test
+          </button>
           <button
             type="button"
+            className="btn--ghost"
             disabled={status !== 'connected'}
             onClick={() => handleBrowseMetadata(connection.id)}
           >
             {metadataByConnection[connection.id] ? 'Refresh metadata' : 'Browse metadata'}
           </button>
-          <button type="button" onClick={() => setEditingId(connection.id)}>
+          <button type="button" className="btn--ghost" onClick={() => setEditingId(connection.id)}>
             Edit
           </button>
-          <button type="button" onClick={() => handleDelete(connection.id)}>
+          <button
+            type="button"
+            className="btn--ghost btn--danger"
+            onClick={() => handleDelete(connection.id)}
+          >
             Delete
           </button>
         </div>
-        {testMessages[connection.id] && <p>{testMessages[connection.id]}</p>}
+        {message && <p className="conn__message">{message}</p>}
         {metadataByConnection[connection.id] && (
           <MetadataTree
             metadata={metadataByConnection[connection.id]}
@@ -227,54 +265,115 @@ export function App(): React.JSX.Element {
     )
   }
 
+  const connectedCount = Object.values(statuses).filter((value) => value === 'connected').length
+
   return (
-    <main>
-      <h1>
-        QueryForge
-        <button type="button" onClick={() => void handleToggleTheme()}>
-          {theme === 'light' ? '🌙 Dark mode' : '☀️ Light mode'}
-        </button>
-      </h1>
-      {error && <p role="alert">{error}</p>}
+    <div className="app">
+      <header className="topbar">
+        <h1 className="topbar__brand">
+          <img
+            className="topbar__logo topbar__logo--on-dark"
+            src={logoOnDark}
+            alt="QueryForge"
+            draggable={false}
+          />
+          <img
+            className="topbar__logo topbar__logo--on-light"
+            src={logoOnLight}
+            alt="QueryForge"
+            draggable={false}
+          />
+        </h1>
+        <div className="topbar__tools">
+          <span className="topbar__summary">
+            {connectedCount > 0
+              ? `${connectedCount} connected`
+              : connections.length > 0
+                ? 'Not connected'
+                : ''}
+          </span>
+          <button
+            type="button"
+            className="theme-toggle"
+            aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+            title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+            onClick={() => void handleToggleTheme()}
+          >
+            {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
+          </button>
+        </div>
+      </header>
 
-      <section>
-        <h2>Connections</h2>
-        {recents.length > 0 && (
-          <p>
-            Recent:{' '}
-            {recents.map((connection) => (
+      <div className="app__body">
+        <aside className="sidebar" aria-label="Connections and history">
+          {error && <p role="alert">{error}</p>}
+
+          <section className="sidebar__section">
+            <div className="section-head">
+              <h2>Connections</h2>
               <button
-                key={connection.id}
                 type="button"
-                disabled={(statuses[connection.id] ?? 'disconnected') !== 'disconnected'}
-                onClick={() => void handleConnect(connection.id)}
+                className="btn--ghost section-head__action"
+                aria-expanded={showNewForm}
+                onClick={() => setShowNewForm((open) => !open)}
               >
-                {connection.name}
+                <PlusIcon size={14} /> New connection
               </button>
-            ))}
-          </p>
-        )}
-        {connections.length === 0 ? (
-          <p>No saved connections yet.</p>
-        ) : (
-          groupKeys.map((key) => (
-            <div key={key || '(ungrouped)'}>
-              {key && <h3>{key}</h3>}
-              <ul>{groups.get(key)!.map(renderConnection)}</ul>
             </div>
-          ))
-        )}
-      </section>
 
-      <section>
-        <h2>New connection</h2>
-        <NewConnectionForm onCreated={refresh} />
-      </section>
+            {showNewForm && (
+              <div className="sidebar__form">
+                <NewConnectionForm
+                  onCreated={() => {
+                    setShowNewForm(false)
+                    void refresh()
+                  }}
+                />
+              </div>
+            )}
 
-      <QueryWorkspace ref={workspaceRef} connections={connections} />
+            {recents.length > 0 && (
+              <div className="recents">
+                <span className="recents__label">Recent</span>
+                {recents.map((connection) => (
+                  <button
+                    key={connection.id}
+                    type="button"
+                    className="chip chip--button"
+                    disabled={(statuses[connection.id] ?? 'disconnected') !== 'disconnected'}
+                    onClick={() => void handleConnect(connection.id)}
+                  >
+                    {connection.name}
+                  </button>
+                ))}
+              </div>
+            )}
 
-      <HistoryPanel />
-    </main>
+            {connections.length === 0 ? (
+              !showNewForm && (
+                <p className="empty">
+                  No saved connections yet. Add an Azure SQL Database or Cosmos DB account to start
+                  querying.
+                </p>
+              )
+            ) : (
+              groupKeys.map((key) => (
+                <div key={key || '(ungrouped)'} className="conn-group">
+                  {key && <h3>{key}</h3>}
+                  <ul className="conn-list">{groups.get(key)!.map(renderConnection)}</ul>
+                </div>
+              ))
+            )}
+          </section>
+
+          <HistoryPanel />
+        </aside>
+
+        <main className="workspace">
+          <QueryWorkspace ref={workspaceRef} connections={connections} />
+        </main>
+      </div>
+    </div>
   )
 }
 
@@ -304,15 +403,21 @@ function TreeList({
   parentSchema: string | undefined
 }): React.JSX.Element {
   return (
-    <ul>
+    <ul className="tree">
       {objects.map((object, index) => {
         const withSchema = parentSchema ? { ...object, schema: parentSchema } : object
-        const label = `${object.name} (${object.kind}${object.detail ? `: ${object.detail}` : ''})`
+        const label = (
+          <>
+            <span className="tree__name">{object.name}</span>
+            <span className="tree__kind">{object.kind}</span>
+            {object.detail && <span className="tree__detail">{object.detail}</span>}
+          </>
+        )
         const hasChildren = object.children && object.children.length > 0
         return (
           <li key={`${object.kind}-${object.name}-${index}`}>
             {hasChildren ? (
-              <details>
+              <details className="tree__branch">
                 <summary onDoubleClick={() => onOpen(withSchema)}>{label}</summary>
                 <TreeList
                   objects={object.children!}
@@ -321,7 +426,9 @@ function TreeList({
                 />
               </details>
             ) : (
-              <span onDoubleClick={() => onOpen(withSchema)}>{label}</span>
+              <span className="tree__leaf" onDoubleClick={() => onOpen(withSchema)}>
+                {label}
+              </span>
             )}
           </li>
         )

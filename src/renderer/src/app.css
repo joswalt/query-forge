@@ -1,0 +1,390 @@
+/* App shell: top bar, sidebar (connections + history), workspace. */
+
+.app {
+  display: grid;
+  grid-template-rows: 52px minmax(0, 1fr);
+  height: 100%;
+  /* Faint forge glow — blue from upper left, heat from lower right — the
+     two ends of the brand gradient, kept below the threshold of notice. */
+  background:
+    radial-gradient(900px 520px at 0% -10%, var(--qf-glow-a), transparent 70%),
+    radial-gradient(800px 480px at 105% 110%, var(--qf-glow-b), transparent 70%), var(--qf-bg);
+}
+
+/* ---------- top bar ---------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px 0 16px;
+  border-bottom: 1px solid var(--qf-border);
+  background: color-mix(in srgb, var(--qf-panel) 78%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+.topbar__brand {
+  display: flex;
+  align-items: center;
+  margin: 0;
+  line-height: 0;
+}
+
+/* The lockup PNGs carry ~14% transparent padding top/bottom and ~3% left;
+   size and pull them in so the visible glyphs sit at ~34px tall. */
+.topbar__logo {
+  height: 48px;
+  width: auto;
+  margin: -10px 0 -10px -6px;
+  user-select: none;
+}
+
+.topbar__logo--on-light,
+:root[data-theme='light'] .topbar__logo--on-dark {
+  display: none;
+}
+
+:root[data-theme='light'] .topbar__logo--on-light {
+  display: block;
+}
+
+.topbar__tools {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.topbar__summary {
+  color: var(--qf-muted);
+  font-size: 12.5px;
+}
+
+.theme-toggle {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 50%;
+  color: var(--qf-muted);
+  background: transparent;
+}
+
+.theme-toggle:hover:not(:disabled) {
+  color: var(--qf-fg);
+}
+
+/* ---------- body ---------- */
+
+.app__body {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  min-height: 0;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-height: 0;
+  padding: 16px 14px 20px;
+  overflow-y: auto;
+  border-right: 1px solid var(--qf-border);
+  background: color-mix(in srgb, var(--qf-panel) 70%, transparent);
+}
+
+.sidebar__section {
+  display: grid;
+  gap: 10px;
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.section-head__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  color: var(--qf-accent);
+}
+
+.sidebar__form {
+  padding: 12px;
+  border: 1px solid var(--qf-border);
+  border-radius: var(--qf-r-panel);
+  background: var(--qf-panel);
+}
+
+.workspace {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 20px 28px;
+}
+
+.empty {
+  color: var(--qf-muted);
+  font-size: 12.5px;
+  max-width: 34ch;
+}
+
+/* ---------- connections ---------- */
+
+.recents {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.recents__label {
+  font-size: 12px;
+  color: var(--qf-muted);
+  margin-right: 2px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border: 1px solid var(--qf-border);
+  border-radius: var(--qf-r-chip);
+  background: var(--qf-bg-elevated);
+  color: var(--qf-muted);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.chip--button {
+  cursor: pointer;
+  color: var(--qf-fg);
+  padding: 1px 9px;
+}
+
+.conn-group {
+  display: grid;
+  gap: 6px;
+}
+
+.conn-group h3 {
+  padding-left: 2px;
+}
+
+.conn-list {
+  display: grid;
+  gap: 8px;
+}
+
+.conn {
+  display: grid;
+  gap: 6px;
+  padding: 10px 10px 8px;
+  border: 1px solid var(--qf-border);
+  border-radius: var(--qf-r-panel);
+  background: var(--qf-panel);
+}
+
+.conn[data-status='connected'] {
+  border-color: color-mix(in srgb, var(--qf-ok) 40%, var(--qf-border));
+}
+
+.conn__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.conn__kind {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: var(--qf-accent-soft);
+  color: var(--qf-accent);
+}
+
+.conn__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 620;
+}
+
+.conn__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--qf-muted);
+  font-size: 11.5px;
+}
+
+.conn__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--qf-border-strong);
+}
+
+.conn[data-status='connected'] .conn__dot {
+  background: var(--qf-ok);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--qf-ok) 22%, transparent);
+}
+
+.conn[data-status='connecting'] .conn__dot {
+  background: var(--qf-warn);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.conn[data-status='error'] .conn__dot {
+  background: var(--qf-err);
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.conn__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.conn__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin: 0 -4px;
+}
+
+.conn__actions button {
+  font-size: 12px;
+}
+
+.conn__connect {
+  color: var(--qf-accent);
+}
+
+.conn__message {
+  font-size: 12px;
+  color: var(--qf-muted);
+  overflow-wrap: anywhere;
+}
+
+/* ---------- object explorer ---------- */
+
+.tree {
+  display: grid;
+  gap: 1px;
+  font-size: 12.5px;
+}
+
+.tree .tree {
+  margin-left: 11px;
+  padding-left: 8px;
+  border-left: 1px solid var(--qf-border);
+}
+
+.tree__branch > summary,
+.tree__leaf {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  cursor: default;
+  user-select: none;
+}
+
+.tree__branch > summary {
+  list-style: none;
+}
+
+.tree__branch > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tree__branch > summary::before {
+  content: '';
+  flex: none;
+  width: 5px;
+  height: 5px;
+  margin: 0 3px 1px 1px;
+  border-right: 1.5px solid var(--qf-muted);
+  border-bottom: 1.5px solid var(--qf-muted);
+  transform: rotate(-45deg);
+  transition: transform 120ms ease;
+}
+
+.tree__branch[open] > summary::before {
+  transform: rotate(45deg);
+}
+
+.tree__leaf {
+  padding-left: 17px;
+}
+
+.tree__branch > summary:hover,
+.tree__leaf:hover {
+  background: var(--qf-hover);
+}
+
+.tree__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree__kind,
+.tree__detail {
+  color: var(--qf-muted);
+  font-size: 11px;
+}
+
+.tree__detail {
+  font-family: var(--qf-font-mono);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- narrow windows ---------- */
+
+@media (max-width: 880px) {
+  body {
+    overflow: auto;
+  }
+
+  .app {
+    height: auto;
+    min-height: 100%;
+  }
+
+  .app__body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--qf-border);
+    max-height: 60vh;
+  }
+
+  .workspace {
+    overflow: visible;
+  }
+}
