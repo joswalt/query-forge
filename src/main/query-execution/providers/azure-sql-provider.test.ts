@@ -177,6 +177,26 @@ describe('AzureSqlProvider', () => {
       })
     })
 
+    it('connects a service-principal profile using the access token main minted, with no user/password', async () => {
+      const pool = new FakeSqlPool()
+      let capturedConfig: SqlConfig | undefined
+      const factory: SqlPoolFactory = (config) => {
+        capturedConfig = config
+        return pool
+      }
+      const provider = new AzureSqlProvider(factory)
+      const profile = makeProfile({ ...baseConfig, authMode: 'service-principal' })
+
+      await provider.connect(profile, 'sp-access-token')
+
+      expect(capturedConfig?.authentication).toEqual({
+        type: 'azure-active-directory-access-token',
+        options: { token: 'sp-access-token' }
+      })
+      expect(capturedConfig).not.toHaveProperty('user')
+      expect(capturedConfig).not.toHaveProperty('password')
+    })
+
     it('maps profile config + secret into mssql config shape', async () => {
       const pool = new FakeSqlPool()
       let capturedConfig: SqlConfig | undefined

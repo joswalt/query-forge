@@ -10,8 +10,11 @@ export interface ParsedSqlConnectionString {
   port?: number
   database?: string
   username?: string
+  /** Service principal only: the string's `User ID` (an app's client ID). */
+  clientId?: string
   /** Plaintext password from the string — handed to the form's secret field,
-   * never stored as part of the profile. Absent for portal placeholders. */
+   * never stored as part of the profile. Absent for portal placeholders.
+   * For a service principal this is the client secret. */
   password?: string
   encrypt?: boolean
   authMode: AzureSqlAuthMode
@@ -151,7 +154,7 @@ export function parseSqlConnectionString(input: string): ParseSqlConnectionStrin
     } else if (DATABASE_KEYS.has(key)) {
       database = value.trim()
     } else if (USER_KEYS.has(key)) {
-      if (isPlaceholder(value)) notes.push('User ID was a placeholder — enter your username.')
+      if (isPlaceholder(value)) notes.push('User ID was a placeholder — enter it yourself.')
       else username = value
     } else if (PASSWORD_KEYS.has(key)) {
       if (isPlaceholder(value)) notes.push('Password was a placeholder — enter your password.')
@@ -171,16 +174,24 @@ export function parseSqlConnectionString(input: string): ParseSqlConnectionStrin
       const normalized = value.trim().toLowerCase().replace(/\s+/g, '')
       if (normalized === 'activedirectorydefault' || normalized === 'activedirectoryinteractive') {
         authMode = 'entra-id'
+      } else if (normalized === 'activedirectoryserviceprincipal') {
+        authMode = 'service-principal'
       } else if (normalized === 'sqlpassword' || normalized === 'notspecified' || normalized === '') {
         authMode = 'sql-credentials'
-      } else if (normalized === 'activedirectorypassword') {
-        return {
-          ok: false,
-          error:
-            '"Active Directory Password" (username/password against Entra ID) is not supported — use "Active Directory Interactive" or SQL authentication.'
-        }
-      } else if (normalized === 'activedirectorydevicecode') {
-        return { ok: false, error: '"Active Directory Device Code" is not supported.' }
+      } else if (
+        normalized === 'activedirectorypassword' ||
+        normalized === 'activedirectoryintegrated' ||
+        normalized === 'activedirectorydevicecode'
+      ) {
+        // Human-user Entra flows this app deliberately doesn't implement
+        // (spec.md: no ROPC, no device code; Integrated is Windows-domain
+        // only). The user's intent is still "sign in with Entra", which the
+        // interactive browser flow serves, so fall back to it rather than
+        // refusing to import the rest of the string.
+        authMode = 'entra-id'
+        notes.push(
+          `"${value.trim()}" isn't supported — Entra ID auth was selected instead and signs in through your browser.`
+        )
       } else {
         return { ok: false, error: `Authentication "${value}" is not supported.` }
       }
@@ -197,6 +208,22 @@ export function parseSqlConnectionString(input: string): ParseSqlConnectionStrin
 
   if (!server) return { ok: false, error: 'The connection string has no Server.' }
 
+  // A service principal's `User ID` is its client ID; the tenant isn't part
+  // of an ADO.NET string, so the user has to supply it.
+  let clientId: string | undefined
+  if (authMode === 'service-principal') {
+    clientId = username
+    username = undefined
+    notes.push('Enter the Tenant ID — it isn’t part of the connection string.')
+  }
+
+  // Entra ID sign-in never uses a typed-in username/password.
+  if (authMode === 'entra-id' && (username !== undefined || password !== undefined)) {
+    username = undefined
+    password = undefined
+    notes.push('The User ID/Password in the string were ignored for Entra ID sign-in.')
+  }
+
   return {
     ok: true,
     value: {
@@ -204,6 +231,7 @@ export function parseSqlConnectionString(input: string): ParseSqlConnectionStrin
       port,
       database,
       username,
+      clientId,
       password,
       encrypt,
       authMode: authMode ?? 'sql-credentials',

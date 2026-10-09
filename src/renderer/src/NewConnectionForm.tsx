@@ -52,16 +52,20 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
     initialSql?.encrypt === undefined ? '' : initialSql.encrypt ? 'on' : 'off'
   )
   const [connectionString, setConnectionString] = useState('')
+  const [pasteOpen, setPasteOpen] = useState(false)
   const [connectionStringMessage, setConnectionStringMessage] = useState<{
     ok: boolean
-    text: string
+    lines: string[]
   } | null>(null)
   const [endpoint, setEndpoint] = useState(initialCosmos?.endpoint ?? '')
   const [cosmosDatabase, setCosmosDatabase] = useState(initialCosmos?.database ?? '')
   const [cosmosContainer, setCosmosContainer] = useState(initialCosmos?.container ?? '')
   const [secret, setSecret] = useState('')
-  const [clientId, setClientId] = useState(initial?.entraId?.clientId ?? '')
-  const [tenantId, setTenantId] = useState(initial?.entraId?.tenantId ?? '')
+  // Client/tenant IDs are shared by both Entra modes (an app registration, or
+  // a service principal) so they survive switching between the two.
+  const initialAppIdentity = initialSql?.servicePrincipal ?? initial?.entraId
+  const [clientId, setClientId] = useState(initialAppIdentity?.clientId ?? '')
+  const [tenantId, setTenantId] = useState(initialAppIdentity?.tenantId ?? '')
   const [redirectUri, setRedirectUri] = useState(initial?.entraId?.redirectUri ?? '')
   const [timeoutSeconds, setTimeoutSeconds] = useState(
     initial?.connectionTimeoutMs ? String(initial.connectionTimeoutMs / 1000) : ''
@@ -73,6 +77,10 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
   const [testMessage, setTestMessage] = useState<string | null>(null)
 
   const isEntraId = authMode === 'entra-id'
+  const isServicePrincipal = authMode === 'service-principal'
+  // A saved secret only carries over within the same auth mode (the server
+  // drops it on a mode change), so "(unchanged)" must not be offered then.
+  const keepsSavedSecret = Boolean(editing?.hasSecret && editing.config.authMode === authMode)
 
   function handleKindChange(nextKind: ConnectionConfig['kind']): void {
     setKind(nextKind)
@@ -85,7 +93,8 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
   function handleApplyConnectionString(): void {
     const result = parseSqlConnectionString(connectionString)
     if (!result.ok) {
-      setConnectionStringMessage({ ok: false, text: result.error })
+      setPasteOpen(true)
+      setConnectionStringMessage({ ok: false, lines: [result.error] })
       return
     }
     const parsed = result.value
@@ -94,26 +103,26 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
     if (parsed.database !== undefined) setDatabase(parsed.database)
     if (parsed.encrypt !== undefined) setEncrypt(parsed.encrypt ? 'on' : 'off')
     setAuthMode(parsed.authMode)
-    if (parsed.authMode === 'entra-id') {
-      setUsername('')
-      setSecret('')
-    } else {
-      if (parsed.username !== undefined) setUsername(parsed.username)
-      if (parsed.password !== undefined) setSecret(parsed.password)
-    }
+    setUsername(parsed.authMode === 'sql-credentials' ? (parsed.username ?? '') : '')
+    // A browser sign-in never uses a typed secret; the other modes take the
+    // string's password (SQL password, or the service principal's secret).
+    setSecret(parsed.authMode === 'entra-id' ? '' : (parsed.password ?? ''))
+    if (parsed.authMode === 'service-principal') setClientId(parsed.clientId ?? '')
     const followUp =
       parsed.authMode === 'entra-id'
-        ? ['Entra ID sign-in needs your app registration’s Client ID, Tenant ID and Redirect URI below.']
+        ? ['Entra ID sign-in needs your app registration’s Client ID, Tenant ID and Redirect URI.']
         : []
     setConnectionString('')
+    setPasteOpen(false)
     setConnectionStringMessage({
       ok: true,
-      text: ['Fields filled from the connection string.', ...followUp, ...parsed.notes].join(' ')
+      lines: ['Fields filled from the connection string.', ...followUp, ...parsed.notes]
     })
   }
 
   function buildConfig(): ConnectionConfig {
     const entraId = isEntraId ? { clientId, tenantId, redirectUri } : undefined
+    const servicePrincipal = isServicePrincipal ? { clientId, tenantId } : undefined
     const connectionTimeoutMs = timeoutSeconds.trim()
       ? Math.round(Number(timeoutSeconds) * 1000)
       : undefined
@@ -128,8 +137,11 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
           encrypt: encrypt === '' ? undefined : encrypt === 'on',
           database,
           authMode: authMode as AzureSqlAuthMode,
-          username: isEntraId ? undefined : username,
+          // Set explicitly (not left to the `...initialSql` spread) so
+          // switching modes never carries the old mode's fields along.
+          username: authMode === 'sql-credentials' ? username : undefined,
           entraId,
+          servicePrincipal,
           connectionTimeoutMs
         }
       : {
@@ -145,6 +157,11 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
   }
 
   async function handleTest(): Promise<void> {
+    if (isServicePrincipal && !secret) {
+      // An unsaved test can't read the stored secret back (it never leaves main).
+      setTestMessage('Enter the client secret to test this connection.')
+      return
+    }
     setTesting(true)
     setTestMessage(null)
     try {
@@ -200,6 +217,7 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
       setPort('')
       setEncrypt('')
       setConnectionStringMessage(null)
+      setPasteOpen(false)
       setEndpoint('')
       setCosmosDatabase('')
       setCosmosContainer('')
@@ -238,34 +256,26 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
         <input value={groupName} onChange={(e) => setGroupName(e.target.value)} />
       </label>
 
-      <label>
-        Authentication
-        <select
-          value={authMode}
-          onChange={(e) => setAuthMode(e.target.value as AzureSqlAuthMode | CosmosAuthMode)}
+      {kind === 'azure-sql' && (
+        <details
+          className="conn-form__paste"
+          open={pasteOpen}
+          onToggle={(e) => setPasteOpen(e.currentTarget.open)}
         >
-          {kind === 'azure-sql' ? (
-            <option value="sql-credentials">SQL username/password</option>
-          ) : (
-            <option value="account-key">Account key</option>
-          )}
-          <option value="entra-id">Microsoft Entra ID (sign in with browser)</option>
-        </select>
-      </label>
-
-      {kind === 'azure-sql' ? (
-        <>
-          <fieldset className="conn-form__connstring">
-            <legend>Paste connection string (optional)</legend>
+          <summary>Fill from a connection string</summary>
+          <div className="conn-form__paste-body">
             <textarea
               aria-label="ADO.NET connection string"
               rows={3}
               spellCheck={false}
               autoComplete="off"
-              placeholder="Azure portal → your database → Connection strings → ADO.NET"
+              placeholder="Server=tcp:…;Initial Catalog=…;"
               value={connectionString}
               onChange={(e) => setConnectionString(e.target.value)}
             />
+            <p className="conn-form__hint">
+              Paste the ADO.NET string from the Azure portal. It is cleared once applied.
+            </p>
             <button
               type="button"
               disabled={!connectionString.trim()}
@@ -273,60 +283,55 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
             >
               Fill fields
             </button>
-            {connectionStringMessage && (
-              <p
-                className="conn-form__test"
-                role={connectionStringMessage.ok ? 'status' : 'alert'}
-                data-ok={connectionStringMessage.ok ? 'true' : 'false'}
-              >
-                {connectionStringMessage.text}
-              </p>
-            )}
-          </fieldset>
+          </div>
+        </details>
+      )}
+      {kind === 'azure-sql' && connectionStringMessage && (
+        <div
+          className="conn-form__note"
+          role={connectionStringMessage.ok ? 'status' : 'alert'}
+          data-ok={connectionStringMessage.ok ? 'true' : 'false'}
+        >
+          {connectionStringMessage.lines.map((line) => (
+            <p key={line}>{line}</p>
+          ))}
+        </div>
+      )}
+
+      {kind === 'azure-sql' ? (
+        <>
           <label>
             Server hostname
             <input value={server} onChange={(e) => setServer(e.target.value)} required />
           </label>
-          <label>
-            Port (optional)
-            <input
-              type="number"
-              min="1"
-              max="65535"
-              placeholder="1433"
-              value={port}
-              onChange={(e) => setPort(e.target.value)}
-            />
-          </label>
-          <label>
-            Encryption
-            <select value={encrypt} onChange={(e) => setEncrypt(e.target.value as '' | 'on' | 'off')}>
-              <option value="">Default</option>
-              <option value="on">On</option>
-              <option value="off">Off</option>
-            </select>
-          </label>
+          <div className="conn-form__row">
+            <label>
+              Port (optional)
+              <input
+                type="number"
+                min="1"
+                max="65535"
+                placeholder="1433"
+                value={port}
+                onChange={(e) => setPort(e.target.value)}
+              />
+            </label>
+            <label>
+              Encryption
+              <select
+                value={encrypt}
+                onChange={(e) => setEncrypt(e.target.value as '' | 'on' | 'off')}
+              >
+                <option value="">Default (on)</option>
+                <option value="on">On</option>
+                <option value="off">Off</option>
+              </select>
+            </label>
+          </div>
           <label>
             Database name
             <input value={database} onChange={(e) => setDatabase(e.target.value)} required />
           </label>
-          {!isEntraId && (
-            <>
-              <label>
-                SQL username
-                <input value={username} onChange={(e) => setUsername(e.target.value)} required />
-              </label>
-              <label>
-                Password
-                <input
-                  type="password"
-                  value={secret}
-                  placeholder={editing?.hasSecret ? '(unchanged)' : ''}
-                  onChange={(e) => setSecret(e.target.value)}
-                />
-              </label>
-            </>
-          )}
         </>
       ) : (
         <>
@@ -342,25 +347,61 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
             Container (optional)
             <input value={cosmosContainer} onChange={(e) => setCosmosContainer(e.target.value)} />
           </label>
-          {!isEntraId && (
-            <label>
-              Account key
-              <input
-                type="password"
-                value={secret}
-                placeholder={editing?.hasSecret ? '(unchanged)' : ''}
-                onChange={(e) => setSecret(e.target.value)}
-              />
-            </label>
-          )}
         </>
+      )}
+
+      <label>
+        Authentication
+        <select
+          value={authMode}
+          onChange={(e) => setAuthMode(e.target.value as AzureSqlAuthMode | CosmosAuthMode)}
+        >
+          {kind === 'azure-sql' ? (
+            <option value="sql-credentials">SQL username and password</option>
+          ) : (
+            <option value="account-key">Account key</option>
+          )}
+          <option value="entra-id">Microsoft Entra ID (browser)</option>
+          {kind === 'azure-sql' && <option value="service-principal">Service principal (app secret)</option>}
+        </select>
+      </label>
+
+      {kind === 'azure-sql' && authMode === 'sql-credentials' && (
+        <label>
+          SQL username
+          <input value={username} onChange={(e) => setUsername(e.target.value)} required />
+        </label>
+      )}
+
+      {kind === 'azure-sql' && authMode === 'sql-credentials' && (
+        <label>
+          Password
+          <input
+            type="password"
+            value={secret}
+            placeholder={keepsSavedSecret ? '(unchanged)' : ''}
+            onChange={(e) => setSecret(e.target.value)}
+          />
+        </label>
+      )}
+
+      {kind === 'cosmos-db' && !isEntraId && (
+        <label>
+          Account key
+          <input
+            type="password"
+            value={secret}
+            placeholder={keepsSavedSecret ? '(unchanged)' : ''}
+            onChange={(e) => setSecret(e.target.value)}
+          />
+        </label>
       )}
 
       {isEntraId && (
         <fieldset>
           <legend>
-            Entra ID app registration — leave blank if you don&apos;t have one; account-key/SQL
-            credentials auth doesn&apos;t need these.
+            Opens your browser to sign in. Needs an Entra app registration (public client) with a
+            loopback redirect URI.
           </legend>
           <label>
             Client ID
@@ -375,8 +416,46 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
             <input
               value={redirectUri}
               onChange={(e) => setRedirectUri(e.target.value)}
-              placeholder="http://localhost:PORT"
+              placeholder="http://localhost"
               required
+            />
+          </label>
+        </fieldset>
+      )}
+
+      {isServicePrincipal && (
+        <fieldset>
+          <legend>
+            Signs in as an app, with no browser. The service principal must exist as a user in the
+            database.
+          </legend>
+          <label>
+            Tenant ID
+            <input
+              value={tenantId}
+              onChange={(e) => setTenantId(e.target.value)}
+              spellCheck={false}
+              required
+            />
+          </label>
+          <label>
+            Client ID
+            <input
+              value={clientId}
+              onChange={(e) => setClientId(e.target.value)}
+              spellCheck={false}
+              required
+            />
+          </label>
+          <label>
+            Client secret
+            <input
+              type="password"
+              value={secret}
+              autoComplete="off"
+              placeholder={keepsSavedSecret ? '(unchanged)' : ''}
+              onChange={(e) => setSecret(e.target.value)}
+              required={!keepsSavedSecret}
             />
           </label>
         </fieldset>

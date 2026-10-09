@@ -2,7 +2,7 @@
 export type CosmosAuthMode = 'account-key' | 'entra-id'
 
 /** Authentication modes available on an Azure SQL connection (product-overview.md §4.1). */
-export type AzureSqlAuthMode = 'sql-credentials' | 'entra-id'
+export type AzureSqlAuthMode = 'sql-credentials' | 'entra-id' | 'service-principal'
 
 /**
  * The app-registration parameters `acquireTokenInteractive` needs (spec.md
@@ -19,6 +19,17 @@ export interface EntraIdAuthConfig {
   clientId: string
   tenantId: string
   redirectUri: string
+}
+
+/**
+ * An Entra ID service principal (app identity) for headless sign-in via the
+ * OAuth client-credentials flow — no user, browser or redirect URI. Present
+ * only when `authMode === 'service-principal'`. The client secret is the
+ * profile's Secret Ciphertext, never part of this config.
+ */
+export interface ServicePrincipalConfig {
+  clientId: string
+  tenantId: string
 }
 
 export interface CosmosConnectionConfig {
@@ -38,6 +49,7 @@ export interface AzureSqlConnectionConfig {
   database: string
   authMode: AzureSqlAuthMode
   entraId?: EntraIdAuthConfig
+  servicePrincipal?: ServicePrincipalConfig
   username?: string
   encrypt?: boolean
   connectionTimeoutMs?: number

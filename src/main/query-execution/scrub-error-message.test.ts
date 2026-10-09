@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  describeTokenIdentity,
   isNetworkInterruption,
   toConnectionErrorMessage,
   toExecutionErrorMessage,
@@ -14,7 +15,62 @@ describe('toSafeErrorMessage', () => {
   })
 })
 
+function fakeJwt(claims: Record<string, unknown>): string {
+  const b64 = (v: unknown): string => Buffer.from(JSON.stringify(v)).toString('base64url')
+  return `${b64({ alg: 'RS256' })}.${b64(claims)}.signature-not-included-in-output`
+}
+
+describe('describeTokenIdentity', () => {
+  it('reports only the identity claims, never the token or signature', () => {
+    const token = fakeJwt({
+      appid: 'app-1',
+      oid: 'obj-1',
+      tid: 'ten-1',
+      aud: 'https://database.windows.net/',
+      secret_claim: 'nope'
+    })
+
+    const described = describeTokenIdentity(token)
+
+    expect(described).toBe(
+      'app ID app-1, object ID obj-1, tenant ten-1, audience https://database.windows.net/'
+    )
+    expect(described).not.toContain('signature')
+    expect(described).not.toContain('nope')
+  })
+
+  it('falls back to azp for v2 tokens and returns undefined for non-JWTs', () => {
+    expect(describeTokenIdentity(fakeJwt({ azp: 'app-2' }))).toContain('app ID app-2')
+    expect(describeTokenIdentity('not-a-jwt')).toBeUndefined()
+    expect(describeTokenIdentity(undefined)).toBeUndefined()
+  })
+})
+
 describe('toConnectionErrorMessage', () => {
+  it.each(['entra-id', 'service-principal'])(
+    'explains a token-identified principal rejection as missing database access, not an expired sign-in (%s)',
+    (authMode) => {
+      const message = toConnectionErrorMessage(
+        new Error("Login failed for user '<token-identified principal>'."),
+        authMode
+      )
+
+      expect(message).toMatch(/signed in successfully|token was accepted/i)
+      expect(message).toMatch(/CREATE USER .* FROM EXTERNAL PROVIDER/)
+      expect(message).not.toContain('expired')
+    }
+  )
+
+  it('appends the token’s identity claims to a rejected-principal message so they can be compared with the database user', () => {
+    const message = toConnectionErrorMessage(
+      new Error("Login failed for user '<token-identified principal>'."),
+      'service-principal',
+      fakeJwt({ appid: 'app-1', oid: 'obj-1', tid: 'ten-1', aud: 'https://database.windows.net/' })
+    )
+
+    expect(message).toContain('app ID app-1, object ID obj-1, tenant ten-1')
+  })
+
   it('rewrites an entra-id "Login failed" error into a clear re-auth message (user story 62)', () => {
     const message = toConnectionErrorMessage(new Error('Login failed for user token'), 'entra-id')
 

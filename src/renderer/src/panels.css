@@ -24,6 +24,114 @@
   color: var(--qf-ok);
 }
 
+/* Two short fields share a row (port + encryption); at narrow sidebar widths
+   they still fit because each column may shrink below its content. */
+.conn-form__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+/* "Fill from a connection string" — collapsed by default so it reads as a
+   shortcut above the fields it fills, not as a fourth auth mode. */
+.conn-form__paste {
+  border: 1px solid var(--qf-border);
+  border-radius: var(--qf-r-control);
+  background: var(--qf-bg-elevated);
+}
+
+.conn-form__paste > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12.5px;
+  color: var(--qf-muted);
+  cursor: pointer;
+  list-style: none;
+}
+
+.conn-form__paste > summary::-webkit-details-marker {
+  display: none;
+}
+
+.conn-form__paste > summary::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 120ms ease;
+}
+
+.conn-form__paste[open] > summary::before {
+  transform: rotate(45deg);
+}
+
+.conn-form__paste > summary:hover {
+  color: var(--qf-fg);
+}
+
+.conn-form__paste-body {
+  display: grid;
+  gap: 8px;
+  padding: 2px 10px 10px;
+}
+
+.conn-form__paste-body textarea {
+  width: 100%;
+  min-height: 64px;
+  resize: vertical;
+  padding: 6px 9px;
+  border: 1px solid var(--qf-border);
+  border-radius: var(--qf-r-control);
+  background: var(--qf-bg);
+  font-family: var(--qf-font-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.conn-form__paste-body textarea:focus-visible {
+  outline: none;
+  border-color: var(--qf-accent);
+  box-shadow: 0 0 0 3px var(--qf-accent-soft);
+}
+
+.conn-form__paste-body button {
+  justify-self: start;
+}
+
+.conn-form__hint {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--qf-muted);
+}
+
+/* Result of applying a connection string: what was filled, and what is left
+   for the user to do. Success mirrors the global [role='alert'] box. */
+.conn-form__note {
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--qf-ok) 40%, transparent);
+  border-radius: var(--qf-r-control);
+  background: color-mix(in srgb, var(--qf-ok) 8%, transparent);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.conn-form__note p {
+  margin: 0;
+}
+
+.conn-form__note[data-ok='false'] {
+  border-color: color-mix(in srgb, var(--qf-err) 45%, transparent);
+  background: color-mix(in srgb, var(--qf-err) 10%, transparent);
+  color: var(--qf-err);
+}
+
 /* ---------- query workspace ---------- */
 
 .query-workspace {

@@ -64,11 +64,41 @@ describe('parseSqlConnectionString', () => {
     expect(value.notes.join(' ')).toMatch(/Connection Timeout/)
   })
 
-  it('rejects Active Directory Password (ROPC) and Device Code', () => {
-    expect(parseError('Server=h;Authentication=Active Directory Password')).toMatch(/not supported/)
-    expect(parseError('Server=h;Authentication=Active Directory Device Code')).toMatch(
-      /not supported/
+  it.each([
+    'Active Directory Password',
+    'Active Directory Integrated',
+    'Active Directory Device Code'
+  ])('falls back to Entra ID browser sign-in for "%s", keeping the other fields', (mode) => {
+    const value = parseOk(
+      `Server=tcp:h.database.windows.net,1433;Initial Catalog=db;User ID=alice;Password=pw;Encrypt=True;Authentication="${mode}";`
     )
+    expect(value).toMatchObject({
+      server: 'h.database.windows.net',
+      port: 1433,
+      database: 'db',
+      encrypt: true,
+      authMode: 'entra-id'
+    })
+    expect(value.username).toBeUndefined()
+    expect(value.password).toBeUndefined()
+    expect(value.notes.join(' ')).toMatch(/browser/)
+  })
+
+  it('maps Active Directory Service Principal: User ID is the client ID, Password the secret', () => {
+    const value = parseOk(
+      'Server=tcp:h.database.windows.net,1433;Initial Catalog=db;Authentication="Active Directory Service Principal";User ID=11111111-2222-3333-4444-555555555555;Password=client-secret'
+    )
+    expect(value).toMatchObject({
+      authMode: 'service-principal',
+      clientId: '11111111-2222-3333-4444-555555555555',
+      password: 'client-secret'
+    })
+    expect(value.username).toBeUndefined()
+    expect(value.notes.join(' ')).toMatch(/Tenant ID/)
+  })
+
+  it('does not nag about Tenant ID when no service principal is involved', () => {
+    expect(parseOk('Server=h;User ID=a;Password=b').notes.join(' ')).not.toMatch(/Tenant ID/)
   })
 
   it('rejects other unsupported authentication modes', () => {

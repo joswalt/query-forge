@@ -20,6 +20,37 @@ export function toSafeErrorMessage(err: unknown): string {
 const EXPIRED_ENTRA_ID_TOKEN_PATTERN = /login failed|token.*(expired|invalid|revoked)|AADSTS|401|unauthorized/i
 
 /**
+ * The non-secret identity claims of an access token (JWT), for diagnosing a
+ * database that rejects a valid token: which app/object/tenant the database
+ * actually saw. Only these four claims are read — the token itself, its
+ * signature and every other claim stay out of the message. Unverified
+ * decoding is fine here: the string is display-only.
+ */
+export function describeTokenIdentity(token: string | undefined): string | undefined {
+  const payload = token?.split('.')[1]
+  if (!payload) return undefined
+  try {
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as Record<
+      string,
+      unknown
+    >
+    const parts = [
+      ['app ID', claims.appid ?? claims.azp],
+      ['object ID', claims.oid],
+      ['tenant', claims.tid],
+      ['audience', claims.aud]
+    ]
+      .filter(([, value]) => typeof value === 'string')
+      .map(([label, value]) => `${label} ${value as string}`)
+    return parts.length > 0 ? parts.join(', ') : undefined
+  } catch {
+    return undefined
+  }
+}
+
+const TOKEN_IDENTIFIED_PRINCIPAL_PATTERN = /login failed for user '<token-identified principal>'/i
+
+/**
  * Wraps `toSafeErrorMessage` with user story 62's "clear messaging, a path
  * to re-authenticate" for an `entra-id` connection's failure — ADR 0001
  * hands a Decrypted Secret (here, an access token) to the Query Execution
@@ -33,9 +64,17 @@ const EXPIRED_ENTRA_ID_TOKEN_PATTERN = /login failed|token.*(expired|invalid|rev
  * so no separate "re-auth" UI action is needed beyond the one that already
  * exists.
  */
-export function toConnectionErrorMessage(err: unknown, authMode: string): string {
+export function toConnectionErrorMessage(err: unknown, authMode: string, token?: string): string {
   const safe = toSafeErrorMessage(err)
-  if (authMode === 'entra-id' && EXPIRED_ENTRA_ID_TOKEN_PATTERN.test(safe)) {
+  const isEntraMode = authMode === 'entra-id' || authMode === 'service-principal'
+  // Azure SQL's answer when the Entra token is valid but its principal has no
+  // user in the database — an access problem, not an expired sign-in, so
+  // reconnecting won't help.
+  if (isEntraMode && TOKEN_IDENTIFIED_PRINCIPAL_PATTERN.test(safe)) {
+    const identity = describeTokenIdentity(token)
+    return `Entra ID sign-in worked and the token was accepted, but the database denied the login — the identity isn't a user in this database, or has no access to it. Ask a database admin to run CREATE USER [<name>] FROM EXTERNAL PROVIDER and grant it a role.${identity ? ` The token was issued to: ${identity}.` : ''} (${safe})`
+  }
+  if (isEntraMode && EXPIRED_ENTRA_ID_TOKEN_PATTERN.test(safe)) {
     return `Entra ID sign-in has expired or is no longer valid — disconnect and reconnect (or re-run Test Connection) to sign in again. (${safe})`
   }
   return safe

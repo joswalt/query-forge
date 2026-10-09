@@ -66,6 +66,28 @@ test.describe('renderer UI (no database required)', () => {
     await expect(editor()).toContainText('SELECT 1')
   })
 
+  test('fills the connection form from an Azure SQL service principal string', async () => {
+    const toggle = page.getByRole('button', { name: /New connection/ })
+    if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click()
+
+    await page.getByText('Fill from a connection string').click()
+    await page
+      .getByLabel('ADO.NET connection string')
+      .fill(
+        'Server=tcp:h.database.windows.net,1433;Initial Catalog=stg;Encrypt=True;Authentication="Active Directory Service Principal";User ID=11111111-2222-3333-4444-555555555555;Password=s3cret'
+      )
+    await page.getByRole('button', { name: 'Fill fields' }).click()
+
+    await expect(page.getByLabel('Server hostname')).toHaveValue('h.database.windows.net')
+    await expect(page.getByLabel('Database name')).toHaveValue('stg')
+    await expect(page.getByLabel('Authentication')).toHaveValue('service-principal')
+    await expect(page.getByLabel('Client ID')).toHaveValue('11111111-2222-3333-4444-555555555555')
+    await expect(page.getByLabel('Client secret')).toHaveValue('s3cret')
+    // The raw string (which held the secret) is gone, and the user is told what's left to fill.
+    await expect(page.getByLabel('ADO.NET connection string')).toBeHidden()
+    await expect(page.getByText('Enter the Tenant ID')).toBeVisible()
+  })
+
   test('toggles the theme and persists it across relaunch (story 54)', async () => {
     const html = page.locator('html')
     const before = await html.getAttribute('data-theme')

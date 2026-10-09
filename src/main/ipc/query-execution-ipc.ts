@@ -291,7 +291,14 @@ async function resolveTestSubject(
   // only ever populated for account-key/sql-credentials' plaintext field,
   // user story 6) — it must go through the same resolveSecret flow a
   // saved profile does, just keyed by the synthetic 'unsaved' id above.
+  // service-principal also goes through resolveSecret, but with the typed
+  // client secret passed in: it's exchanged for a token in main, and only
+  // that token reaches the provider.
   const secret =
-    request.config.authMode === 'entra-id' ? await manager.resolveSecret(profile) : request.secret
+    request.config.authMode === 'entra-id'
+      ? await manager.resolveSecret(profile)
+      : request.config.authMode === 'service-principal'
+        ? await manager.resolveSecret(profile, request.secret)
+        : request.secret
   return { profile, secret }
 }

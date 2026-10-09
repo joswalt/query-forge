@@ -104,7 +104,7 @@ export class AzureSqlProvider implements DatabaseProvider {
       // read identically to a wrong-password failure, giving no hint that
       // reconnecting (which re-acquires a token, ConnectionManager.
       // resolveSecret) would actually fix it.
-      throw new Error(toConnectionErrorMessage(err, config.authMode))
+      throw new Error(toConnectionErrorMessage(err, config.authMode, secret))
     }
     this.pool = pool
   }
@@ -123,7 +123,7 @@ export class AzureSqlProvider implements DatabaseProvider {
       await pool.request().query('SELECT 1')
       return { success: true }
     } catch (err) {
-      return { success: false, message: toConnectionErrorMessage(err, config.authMode) }
+      return { success: false, message: toConnectionErrorMessage(err, config.authMode, secret) }
     } finally {
       await pool.close().catch(() => {})
     }
@@ -303,7 +303,9 @@ function toSqlConfig(config: AzureSqlConnectionConfig, secret: DecryptedSecret |
     }
   }
 
-  if (config.authMode === 'entra-id') {
+  // Both Entra modes hand over an access token minted in main (interactive
+  // user sign-in, or a service principal's client-credentials exchange).
+  if (config.authMode === 'entra-id' || config.authMode === 'service-principal') {
     return {
       ...base,
       authentication: {

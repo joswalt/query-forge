@@ -8,7 +8,10 @@ import { MsalTokenCacheRepository } from './local-storage/msal-token-cache-repos
 import { PreferencesStore } from './local-storage/preferences-store'
 import { ConnectionManager } from './connection-manager/connection-manager'
 import { SafeStorageSecretStore } from './connection-manager/safe-storage-secret-store'
-import { MsalEntraIdAuthenticator } from './connection-manager/entra-id-authenticator'
+import {
+  MsalEntraIdAuthenticator,
+  MsalServicePrincipalAuthenticator
+} from './connection-manager/entra-id-authenticator'
 import { SqliteTokenCacheStore } from './connection-manager/sqlite-token-cache-store'
 import { registerConnectionIpcHandlers } from './ipc/connection-ipc'
 import { registerQueryExecutionIpcHandlers } from './ipc/query-execution-ipc'
@@ -44,7 +47,8 @@ function createLocalStorage(): {
     new ConnectionProfileRepository(db),
     secretStore,
     authenticator,
-    tokenCacheRepository
+    tokenCacheRepository,
+    new MsalServicePrincipalAuthenticator()
   )
   const historyRepository = new QueryHistoryRepository(db)
   const savedQueryRepository = new SavedQueryRepository(db)

@@ -1,6 +1,6 @@
-import { PublicClientApplication } from '@azure/msal-node'
+import { ConfidentialClientApplication, PublicClientApplication } from '@azure/msal-node'
 import type { Configuration } from '@azure/msal-node'
-import type { EntraIdAuthConfig } from '@shared/types/connection-profile'
+import type { EntraIdAuthConfig, ServicePrincipalConfig } from '@shared/types/connection-profile'
 import { MsalTokenCachePlugin, type TokenCacheStore } from './msal-token-cache-plugin'
 
 /**
@@ -110,5 +110,61 @@ export class MsalEntraIdAuthenticator implements EntraIdAuthenticator {
       openBrowser: this.openBrowser
     })
     return interactive.accessToken
+  }
+}
+
+/** The slice of msal-node's `ConfidentialClientApplication` the service
+ * principal flow uses — faked in unit tests like the public-client one. */
+export interface ConfidentialClientApplicationLike {
+  acquireTokenByClientCredential(request: {
+    scopes: string[]
+  }): Promise<{ accessToken: string } | null>
+}
+
+export type ConfidentialClientApplicationFactory = (
+  config: Configuration & { auth: { clientSecret: string } }
+) => ConfidentialClientApplicationLike
+
+const defaultConfidentialFactory: ConfidentialClientApplicationFactory = (config) =>
+  new ConfidentialClientApplication(config) as unknown as ConfidentialClientApplicationLike
+
+/**
+ * Service principal (app identity) sign-in via the OAuth client-credentials
+ * flow: main exchanges the client secret for an access token, and only that
+ * token is handed to the Query Execution Service as the Decrypted Secret
+ * (ADR 0001) — the client secret itself never leaves main. No browser, no
+ * redirect URI, and nothing to cache: a fresh token is minted per
+ * `connect()`/Test Connection.
+ */
+export interface ServicePrincipalAuthenticator {
+  acquireToken(
+    servicePrincipal: ServicePrincipalConfig,
+    clientSecret: string,
+    scopes: string[]
+  ): Promise<string>
+}
+
+export class MsalServicePrincipalAuthenticator implements ServicePrincipalAuthenticator {
+  constructor(
+    private readonly appFactory: ConfidentialClientApplicationFactory = defaultConfidentialFactory
+  ) {}
+
+  async acquireToken(
+    servicePrincipal: ServicePrincipalConfig,
+    clientSecret: string,
+    scopes: string[]
+  ): Promise<string> {
+    const app = this.appFactory({
+      auth: {
+        clientId: servicePrincipal.clientId,
+        clientSecret,
+        authority: `https://login.microsoftonline.com/${servicePrincipal.tenantId}`
+      }
+    })
+    const result = await app.acquireTokenByClientCredential({ scopes })
+    if (!result?.accessToken) {
+      throw new Error('Entra ID returned no access token for the service principal')
+    }
+    return result.accessToken
   }
 }

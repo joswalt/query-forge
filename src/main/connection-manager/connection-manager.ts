@@ -10,7 +10,7 @@ import type {
   UpdateConnectionProfileInput
 } from '../local-storage/connection-profile-repository'
 import type { SecretStore } from './secret-store'
-import type { EntraIdAuthenticator } from './entra-id-authenticator'
+import type { EntraIdAuthenticator, ServicePrincipalAuthenticator } from './entra-id-authenticator'
 import { scopesForDatabaseKind } from './entra-id-scopes'
 import type { MsalTokenCacheRepository } from '../local-storage/msal-token-cache-repository'
 
@@ -33,7 +33,8 @@ export class ConnectionManager {
     private readonly repository: ConnectionProfileRepository,
     private readonly secretStore: SecretStore,
     private readonly authenticator?: EntraIdAuthenticator,
-    private readonly tokenCacheRepository?: MsalTokenCacheRepository
+    private readonly tokenCacheRepository?: MsalTokenCacheRepository,
+    private readonly servicePrincipalAuthenticator?: ServicePrincipalAuthenticator
   ) {}
 
   list(): ConnectionProfile[] {
@@ -57,6 +58,13 @@ export class ConnectionManager {
   }
 
   update(id: string, request: UpdateConnectionProfileRequest): ConnectionProfile {
+    // A stored secret belongs to one auth mode (SQL password, Cosmos key, or a
+    // service principal's client secret). If the mode changes and no new
+    // secret comes with it, keeping the old one would send that credential to
+    // the wrong place — e.g. a SQL password to Entra as a client secret.
+    const existing = request.config ? this.repository.get(id) : undefined
+    const authModeChanged =
+      existing !== undefined && existing.config.authMode !== request.config?.authMode
     const input: UpdateConnectionProfileInput = {
       name: request.name,
       readOnly: request.readOnly,
@@ -67,7 +75,9 @@ export class ConnectionManager {
           ? null
           : request.secret !== undefined
             ? this.secretStore.encrypt(request.secret)
-            : undefined
+            : authModeChanged
+              ? null
+              : undefined
     }
     return this.repository.update(id, input)
   }
@@ -110,7 +120,15 @@ export class ConnectionManager {
    * "Connection Manager owns the Entra ID flow" (spec.md §6) means in
    * practice.
    */
-  async resolveSecret(profile: ConnectionProfile): Promise<string | undefined> {
+  async resolveSecret(
+    profile: ConnectionProfile,
+    /** A plaintext secret typed into the form for a never-saved Test
+     * Connection — there is no stored ciphertext to reveal for it yet. */
+    typedSecret?: string
+  ): Promise<string | undefined> {
+    if (profile.config.authMode === 'service-principal') {
+      return this.resolveServicePrincipalToken(profile, typedSecret)
+    }
     if (!isEntraIdAuthMode(profile.config)) {
       return this.revealSecret(profile.id)
     }
@@ -126,6 +144,33 @@ export class ConnectionManager {
       profile.config.entraId,
       scopesForDatabaseKind(profile.config.kind),
       profile.id
+    )
+  }
+
+  /** Client-credentials sign-in: the client secret is read (or typed) here in
+   * main and exchanged for an access token — only the token travels on to the
+   * Query Execution Service (ADR 0001). */
+  private async resolveServicePrincipalToken(
+    profile: ConnectionProfile,
+    typedSecret: string | undefined
+  ): Promise<string> {
+    const config = profile.config
+    if (config.kind !== 'azure-sql' || !config.servicePrincipal?.clientId || !config.servicePrincipal.tenantId) {
+      throw new Error(
+        `Connection "${profile.name}" uses service principal auth but has no client ID/tenant ID configured`
+      )
+    }
+    if (!this.servicePrincipalAuthenticator) {
+      throw new Error('Service principal authentication is not configured for this application')
+    }
+    const clientSecret = typedSecret ?? this.revealSecret(profile.id)
+    if (!clientSecret) {
+      throw new Error(`Connection "${profile.name}" has no client secret saved — edit it and enter one`)
+    }
+    return this.servicePrincipalAuthenticator.acquireToken(
+      config.servicePrincipal,
+      clientSecret,
+      scopesForDatabaseKind(config.kind)
     )
   }
 }
