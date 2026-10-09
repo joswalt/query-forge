@@ -4,7 +4,9 @@
     "src/main/**/*",
     "src/preload/**/*",
     "src/shared/**/*",
-    "vitest.config.ts"
+    "src/integration/**/*",
+    "vitest.config.ts",
+    "vitest.integration.config.ts"
   ],
   "compilerOptions": {
     "composite": true,

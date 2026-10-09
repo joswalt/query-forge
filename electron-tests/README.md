@@ -22,14 +22,10 @@ npm run test:e2e
 
 ## Known status
 
-Written against the locked spec/ADR but **not run** in the environment this
-code was authored in — launching the real Electron binary there silently
-falls back to plain Node (`require('electron')` fails inside the launched
-process), independent of sandboxing. Confirm these pass on a machine where
-`npm run dev` opens a real window before relying on them.
+All specs pass on macOS (`npm run test:e2e`, Electron 44). One environment gotcha:
+if your shell exports `ELECTRON_RUN_AS_NODE=1` (some agent/IDE shells do), the
+launched binary runs as plain Node and fails with `bad option:
+--remote-debugging-port=0`. Run `env -u ELECTRON_RUN_AS_NODE npm run test:e2e`.
 
-## Known limitations (spec.md Testing Decisions)
-
-Playwright's Electron support is labeled "experimental" by Playwright
-itself. If a test here becomes flaky, check that first before assuming a
-product regression.
+`renderer-ui.spec.ts` launches with a throwaway `--user-data-dir`, so it never
+touches your real QueryForge profile.

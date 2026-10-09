@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:integration": "vitest run -c vitest.integration.config.ts",
     "test:e2e": "playwright test -c electron-tests/playwright.config.ts",
     "typecheck:e2e": "tsc --noEmit -p electron-tests/tsconfig.json",
     "rebuild:electron": "electron-rebuild -f -w better-sqlite3",
