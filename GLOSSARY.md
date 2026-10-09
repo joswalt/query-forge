@@ -37,8 +37,12 @@ An opaque identifier the Query Execution Service assigns to one in-flight `execu
 _Avoid_: Query ID, Request ID
 
 **Result Chunk**:
-One unit of a streamed/paginated query result returned by `executeQuery`'s `AsyncIterable`. Carries rows plus an optional provider-specific `meta` field (e.g. Cosmos's RU charge) that the UI may display but must not depend on existing.
+One unit of a streamed/paginated query result returned by `executeQuery`'s `AsyncIterable`. Carries rows, the Result Set they belong to, plus an optional provider-specific `meta` field (e.g. Cosmos's RU charge) that the UI may display but must not depend on existing.
 _Avoid_: Page, Batch (both imply a pagination strategy uniform across providers, which §7 explicitly rules out)
+
+**Result Set**:
+The rows produced by one row-returning statement of a query submission. A multi-statement SQL script yields several, in statement order; a single statement (and every Cosmos DB query) yields one. Result Chunks carry a zero-based `resultSet` index (omitted means 0) and never span two Result Sets; a zero-row chunk announces a statement that returned nothing. The results view shows one tab per Result Set.
+_Avoid_: Recordset (mssql's name for it — a driver term), Statement Result
 
 **Database Metadata**:
 The shared, provider-agnostic shape `getMetadata()` returns — tables/columns for Azure SQL, containers/partition keys for Cosmos DB — consumed by the Object Explorer (§4.2). Distinct from editor-side autocomplete, which is out of scope for MVP (ticket 04).

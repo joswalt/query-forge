@@ -25,6 +25,14 @@ export interface TestResult {
  */
 export interface ResultChunk {
   rows: unknown[]
+  /**
+   * Zero-based index of the Result Set these rows belong to (GLOSSARY.md:
+   * "Result Set") — one per row-returning statement of a multi-statement
+   * submission. Omitted means 0, so single-result Providers (Cosmos DB)
+   * never need to set it. A chunk never spans two Result Sets, and a chunk
+   * with no rows announces a Result Set that exists but is (so far) empty.
+   */
+  resultSet?: number
   meta?: {
     ru?: number
   }

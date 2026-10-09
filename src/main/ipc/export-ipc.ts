@@ -77,6 +77,7 @@ interface ExportAllRequest {
   query: string
   options?: QueryOptions
   format: ExportFormat
+  resultSet?: number
   destinationPath: string
 }
 

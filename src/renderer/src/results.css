@@ -84,6 +84,12 @@
   background: var(--qf-bg);
 }
 
+.segmented--sets {
+  flex-wrap: wrap;
+  align-self: flex-start;
+  max-width: 100%;
+}
+
 .segmented button {
   border: 0;
   background: transparent;

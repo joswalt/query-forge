@@ -321,6 +321,12 @@ export const QueryWorkspace = forwardRef<
     execution.cancel()
   }
 
+  /** Suggested save-dialog name; later Result Sets of a script are numbered
+   * so exporting several in a row doesn't offer to overwrite the first. */
+  function exportFileName(format: ExportFormat, resultSet: number): string {
+    return resultSet > 0 ? `export-result-${resultSet + 1}.${format}` : `export.${format}`
+  }
+
   function dispatchExport(tabId: string, exportState: ExportState): void {
     updateTab(tabId, (t) => ({ ...t, exportState }))
   }
@@ -328,16 +334,26 @@ export const QueryWorkspace = forwardRef<
   /** "Export loaded rows" (user story 45): the rows already in `tab.run`,
    * capped at MAX_DISPLAY_ROWS — a single bounded `invoke`, no progress
    * events or cancel (see export-ipc.ts's doc for why). */
-  async function handleExportLoaded(tabId: string, format: ExportFormat): Promise<void> {
+  async function handleExportLoaded(
+    tabId: string,
+    format: ExportFormat,
+    resultSet: number
+  ): Promise<void> {
     const tab = tabs.find((t) => t.id === tabId)
     if (!tab) return
 
-    const destinationPath = await window.api.export.chooseDestination(`export.${format}`)
+    const destinationPath = await window.api.export.chooseDestination(
+      exportFileName(format, resultSet)
+    )
     if (!destinationPath) return
 
     dispatchExport(tabId, { status: 'running', kind: 'loaded' })
     try {
-      await window.api.export.exportLoaded(tab.run.rows, format, destinationPath)
+      await window.api.export.exportLoaded(
+        tab.run.resultSets[resultSet]?.rows ?? [],
+        format,
+        destinationPath
+      )
       dispatchExport(tabId, { status: 'done' })
     } catch (err) {
       dispatchExport(tabId, {
@@ -353,7 +369,7 @@ export const QueryWorkspace = forwardRef<
    * Cosmos — this is why it's a visibly distinct action from "export
    * loaded", not a toggle on the same button, per user story 47), with
    * progress and cancel (user story 48). */
-  function handleExportAll(tabId: string, format: ExportFormat): void {
+  function handleExportAll(tabId: string, format: ExportFormat, resultSet: number): void {
     const tab = tabs.find((t) => t.id === tabId)
     if (!tab) return
 
@@ -369,7 +385,7 @@ export const QueryWorkspace = forwardRef<
     const options = tab.options
 
     window.api.export
-      .chooseDestination(`export.${format}`)
+      .chooseDestination(exportFileName(format, resultSet))
       .then((destinationPath) => {
         if (!destinationPath) return
 
@@ -382,7 +398,7 @@ export const QueryWorkspace = forwardRef<
         exportExecutionsRef.current.set(tabId, handle)
 
         window.api.export
-          .exportAll(connectionId, query, options, format, destinationPath, {
+          .exportAll(connectionId, query, options, format, resultSet, destinationPath, {
             onProgress: (rowsWritten) =>
               dispatchExport(tabId, { status: 'running', kind: 'all', rowsWritten }),
             onDone: () => {
@@ -678,8 +694,10 @@ export const QueryWorkspace = forwardRef<
           <QueryResultsView
             run={activeTab.run}
             exportState={activeTab.exportState}
-            onExportLoaded={(format) => void handleExportLoaded(activeTab.id, format)}
-            onExportAll={(format) => handleExportAll(activeTab.id, format)}
+            onExportLoaded={(format, resultSet) =>
+              void handleExportLoaded(activeTab.id, format, resultSet)
+            }
+            onExportAll={(format, resultSet) => handleExportAll(activeTab.id, format, resultSet)}
             onCancelExport={() => handleCancelExport(activeTab.id)}
           />
         </div>

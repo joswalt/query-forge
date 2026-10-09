@@ -57,7 +57,7 @@ Implemented:
 Known gaps/decisions carried forward explicitly (not oversights):
 
 - **Query formatting** (story 20) uses `sql-formatter` (MIT): T-SQL for Azure SQL, BigQuery's dialect for Cosmos NoSQL (the only one that parses `@param`/`c["key"]`; `VALUE` keeps its typed case). Formats the selection or whole editor as one undoable edit; unparseable text is left unchanged.
-- **Multi-statement SQL** (story 61) streams all recordsets' rows through one result stream; per-statement result sets are not separated.
+- **Multi-statement SQL** (story 61) — each row-returning statement is its own Result Set (GLOSSARY.md), shown as a "Result N" tab and exported one set at a time (the file dialog suggests `export-result-N`). Limits: the display-row cap is shared across sets; statements that return no rows (INSERT/UPDATE) produce no tab; "export all matching" re-runs the *whole* script and keeps only the selected set (so non-read-only scripts repeat their side effects); history records the run as one entry with the total row count.
 - **Azure SQL's `QueryOptions.timeoutMs` is not a per-query override** — mssql only exposes timeout at pool creation, so the profile's timeout field sets both connect and query (`requestTimeout`) timeouts; unset defaults to 60s query timeout (mssql's own default is 15s). Cosmos maps the same field to `connectionPolicy.requestTimeout`.
 - **Editing a connected profile disconnects it** — the Query Execution Service keeps the profile as of `connect()`, so edits (including read-only) apply on reconnect.
 - **No mid-session Entra ID token refresh** — the token is handed over once per `connect()` (ADR 0001); an expired token surfaces a "disconnect and reconnect" message.

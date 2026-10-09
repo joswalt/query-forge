@@ -1,5 +1,5 @@
 import { computeColumnUnion } from '@shared/column-union'
-import type { ExecutionId, QueryOptions } from '@shared/types/database-provider'
+import type { ExecutionId, QueryOptions, ResultChunk } from '@shared/types/database-provider'
 import type { ExportFormat } from '@shared/types/export'
 import type { QueryExecutionClient } from '../query-execution/query-execution-client'
 import { csvDataRow, csvHeaderRow } from './csv-serialize'
@@ -16,6 +16,10 @@ export interface ExportAllRequest {
   query: string
   options?: QueryOptions
   format: ExportFormat
+  /** Which Result Set of a multi-statement script to write (user story 61);
+   * defaults to the first. The script is re-run in full regardless — only
+   * rows of this set are written. */
+  resultSet?: number
 }
 
 /**
@@ -95,9 +99,11 @@ export class ExportService {
     sink: ExportSink,
     onProgress?: (rowsWritten: number) => void
   ): Promise<void> {
-    const { profileId, executionId, query, options, format } = request
+    const { profileId, executionId, query, options, format, resultSet = 0 } = request
     const streamOptions: QueryOptions = { ...options, executionId }
     let rowsWritten = 0
+    const rowsOf = (chunk: ResultChunk): unknown[] =>
+      (chunk.resultSet ?? 0) === resultSet ? chunk.rows : []
 
     if (format === 'json') {
       const writer = new JsonArrayWriter(sink)
@@ -107,8 +113,9 @@ export class ExportService {
         query,
         streamOptions
       )) {
-        for (const row of chunk.rows) writer.writeRow(row)
-        rowsWritten += chunk.rows.length
+        const rows = rowsOf(chunk)
+        for (const row of rows) writer.writeRow(row)
+        rowsWritten += rows.length
         onProgress?.(rowsWritten)
       }
       writer.close()
@@ -124,8 +131,9 @@ export class ExportService {
       query,
       streamOptions
     )) {
-      buffered.push(...chunk.rows)
-      rowsWritten += chunk.rows.length
+      const rows = rowsOf(chunk)
+      buffered.push(...rows)
+      rowsWritten += rows.length
       onProgress?.(rowsWritten)
     }
 

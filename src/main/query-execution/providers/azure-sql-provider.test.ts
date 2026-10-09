@@ -40,6 +40,7 @@ class FakeSqlRequest implements SqlRequestLike {
     this.emit('done')
   }
 
+  on(event: 'recordset', listener: () => void): this
   on(event: 'row', listener: (row: Record<string, unknown>) => void): this
   on(event: 'error', listener: (err: unknown) => void): this
   on(event: 'done', listener: () => void): this
@@ -247,7 +248,73 @@ describe('AzureSqlProvider', () => {
         result = await iterator.next()
       }
 
-      expect(chunks).toEqual([{ rows: [{ id: 1 }, { id: 2 }] }])
+      expect(chunks).toEqual([{ rows: [{ id: 1 }, { id: 2 }], resultSet: 0 }])
+    })
+
+    it('keeps each statement of a multi-statement script in its own Result Set (user story 61)', async () => {
+      const pool = new FakeSqlPool()
+      const request = new FakeSqlRequest()
+      pool.nextRequest = () => request
+      const provider = new AzureSqlProvider(makeFactory(pool))
+      await provider.connect(makeProfile(baseConfig), 'hunter2')
+
+      const iterator = provider.executeQuery('SELECT 1; SELECT 2 WHERE 1=0; SELECT 3')[
+        Symbol.asyncIterator
+      ]()
+      const firstChunk = iterator.next()
+      request.emit('recordset')
+      request.emit('row', { a: 1 })
+      request.emit('recordset') // second statement returns no rows
+      request.emit('recordset')
+      request.emit('row', { c: 3 })
+      request.emit('row', { c: 4 })
+      request.emit('done')
+
+      const chunks = []
+      let result = await firstChunk
+      while (!result.done) {
+        chunks.push(result.value)
+        result = await iterator.next()
+      }
+
+      expect(chunks).toEqual([
+        { rows: [], resultSet: 0 },
+        { rows: [{ a: 1 }], resultSet: 0 },
+        { rows: [], resultSet: 1 },
+        { rows: [], resultSet: 2 },
+        { rows: [{ c: 3 }, { c: 4 }], resultSet: 2 }
+      ])
+    })
+
+    it('never puts rows from two Result Sets in one chunk, even when a batch is partly full', async () => {
+      const pool = new FakeSqlPool()
+      const request = new FakeSqlRequest()
+      pool.nextRequest = () => request
+      const provider = new AzureSqlProvider(makeFactory(pool))
+      await provider.connect(makeProfile(baseConfig), 'hunter2')
+
+      const iterator = provider.executeQuery('SELECT 1; SELECT 2')[Symbol.asyncIterator]()
+      const firstChunk = iterator.next()
+      request.emit('recordset')
+      for (let i = 0; i < 501; i++) request.emit('row', { i })
+      request.emit('recordset')
+      request.emit('row', { j: 1 })
+      request.emit('done')
+
+      const chunks: Array<{ rows: unknown[]; resultSet?: number }> = []
+      let result = await firstChunk
+      while (!result.done) {
+        chunks.push(result.value)
+        result = await iterator.next()
+      }
+
+      expect(chunks.map((c) => [c.resultSet, c.rows.length])).toEqual([
+        [0, 0],
+        [0, 500],
+        [0, 1],
+        [1, 0],
+        [1, 1]
+      ])
     })
 
     it('surfaces a scrubbed error from the error event', async () => {

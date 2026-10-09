@@ -26,6 +26,8 @@ export interface SqlRequestLike {
   stream: boolean
   query(command: string): Promise<SqlQueryResult>
   cancel(): void
+  /** Fires once per row-returning statement, before that statement's rows. */
+  on(event: 'recordset', listener: () => void): unknown
   on(event: 'row', listener: (row: Record<string, unknown>) => void): unknown
   on(event: 'error', listener: (err: unknown) => void): unknown
   on(event: 'done', listener: () => void): unknown
@@ -144,21 +146,36 @@ export class AzureSqlProvider implements DatabaseProvider {
     request.stream = true
     if (options.executionId) this.activeRequests.set(options.executionId, request)
 
-    const queue = new AsyncQueue<unknown[]>()
+    const queue = new AsyncQueue<ResultChunk>()
     let batch: Record<string, unknown>[] = []
+    // mssql announces each row-returning statement with a 'recordset' event
+    // (columns, before its rows). Indexing by that keeps a multi-statement
+    // script's Result Sets apart (user story 61); -1 until the first one, so
+    // a driver that never announces one still yields set 0.
+    let resultSet = -1
+    const flush = (): void => {
+      if (batch.length === 0) return
+      queue.push({ rows: batch, resultSet: Math.max(resultSet, 0) })
+      batch = []
+    }
 
+    request.on('recordset', () => {
+      // A chunk must not span two Result Sets, so close out the previous
+      // one's partial batch first. The empty chunk makes a statement that
+      // returns no rows still show up as a (zero-row) Result Set.
+      flush()
+      resultSet += 1
+      queue.push({ rows: [], resultSet })
+    })
     request.on('row', (row) => {
       batch.push(row)
-      if (batch.length >= CHUNK_SIZE) {
-        queue.push(batch)
-        batch = []
-      }
+      if (batch.length >= CHUNK_SIZE) flush()
     })
     request.on('error', (err) => {
       queue.fail(new Error(toExecutionErrorMessage(err)))
     })
     request.on('done', () => {
-      if (batch.length > 0) queue.push(batch)
+      flush()
       queue.close()
     })
 
@@ -168,8 +185,8 @@ export class AzureSqlProvider implements DatabaseProvider {
     void request.query(query).catch(() => {})
 
     try {
-      for await (const rows of queue) {
-        yield { rows }
+      for await (const chunk of queue) {
+        yield chunk
       }
     } finally {
       if (options.executionId) this.activeRequests.delete(options.executionId)
