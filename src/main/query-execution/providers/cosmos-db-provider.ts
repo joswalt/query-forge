@@ -59,12 +59,33 @@ export interface CosmosClientFactoryOptions {
   endpoint: string
   key?: string
   aadCredentials?: TokenCredentialLike
+  /** Per-request timeout in ms (the profile's timeout, user story 2). */
+  requestTimeoutMs?: number
 }
 
 export type CosmosClientFactory = (options: CosmosClientFactoryOptions) => CosmosClientLike
 
-const defaultClientFactory: CosmosClientFactory = (options) =>
-  new CosmosClient(options) as unknown as CosmosClientLike
+/**
+ * Throttling (HTTP 429) retry policy (user story 33). These match the
+ * `@azure/cosmos` SDK's own defaults but are stated explicitly so the
+ * behavior is a documented decision, not an invisible SDK default: the SDK
+ * honors the server's `x-ms-retry-after-ms`, retrying up to 9 times for at
+ * most 30s cumulative wait before surfacing the 429.
+ */
+export const COSMOS_RETRY_OPTIONS = {
+  maxRetryAttemptCount: 9,
+  fixedRetryIntervalInMilliseconds: 0,
+  maxWaitTimeInSeconds: 30
+} as const
+
+const defaultClientFactory: CosmosClientFactory = ({ requestTimeoutMs, ...options }) =>
+  new CosmosClient({
+    ...options,
+    connectionPolicy: {
+      retryOptions: { ...COSMOS_RETRY_OPTIONS },
+      ...(requestTimeoutMs ? { requestTimeout: requestTimeoutMs } : {})
+    }
+  } as ConstructorParameters<typeof CosmosClient>[0]) as unknown as CosmosClientLike
 
 /**
  * Wraps an already-acquired Entra ID access token (ConnectionManager.
@@ -96,9 +117,13 @@ function toCosmosClientOptions(
   secret: DecryptedSecret | undefined
 ): CosmosClientFactoryOptions {
   if (config.authMode === 'entra-id') {
-    return { endpoint: config.endpoint, aadCredentials: staticTokenCredential(secret ?? '') }
+    return {
+      endpoint: config.endpoint,
+      aadCredentials: staticTokenCredential(secret ?? ''),
+      requestTimeoutMs: config.connectionTimeoutMs
+    }
   }
-  return { endpoint: config.endpoint, key: secret }
+  return { endpoint: config.endpoint, key: secret, requestTimeoutMs: config.connectionTimeoutMs }
 }
 
 /** Page size for `items.query`'s continuation-token-driven iterator (user story 32). */
@@ -159,7 +184,7 @@ export class CosmosDbProvider implements DatabaseProvider {
   }
 
   async *executeQuery(query: string, options: QueryOptions = {}): AsyncIterable<ResultChunk> {
-    const container = this.requireContainer()
+    const container = this.requireContainer(options)
 
     const controller = new AbortController()
     if (options.executionId) this.abortControllers.set(options.executionId, controller)
@@ -198,15 +223,39 @@ export class CosmosDbProvider implements DatabaseProvider {
     }
 
     if (!this.config?.database) {
+      // Account-scoped profile: list every database with its containers so
+      // the Object Explorer can open any of them (user story 14).
       const { resources } = await this.client.databases.readAll().fetchAll()
-      return { objects: resources.map((d): DatabaseMetadataObject => ({ name: d.id, kind: 'database' })) }
+      const objects: DatabaseMetadataObject[] = []
+      for (const d of resources) {
+        const { resources: containers } = await this.client
+          .database(d.id)
+          .containers.readAll()
+          .fetchAll()
+        objects.push({
+          name: d.id,
+          kind: 'database',
+          children: containers.map(
+            (c): DatabaseMetadataObject => ({ name: c.id, kind: 'container', database: d.id })
+          )
+        })
+      }
+      return { objects }
     }
 
     const database = this.client.database(this.config.database)
 
     if (!this.config.container) {
       const { resources } = await database.containers.readAll().fetchAll()
-      return { objects: resources.map((c): DatabaseMetadataObject => ({ name: c.id, kind: 'container' })) }
+      return {
+        objects: resources.map(
+          (c): DatabaseMetadataObject => ({
+            name: c.id,
+            kind: 'container',
+            database: this.config?.database
+          })
+        )
+      }
     }
 
     const container = this.requireContainer()
@@ -218,6 +267,7 @@ export class CosmosDbProvider implements DatabaseProvider {
         {
           name: this.config.container,
           kind: 'container',
+          database: this.config.database,
           children: partitionKeyPaths.map((path): DatabaseMetadataObject => ({
             name: path,
             kind: 'partition-key'
@@ -231,11 +281,15 @@ export class CosmosDbProvider implements DatabaseProvider {
    * precondition that both `executeQuery` and `getMetadata`'s fully-scoped
    * branch need, rather than repeating the `client.database(...).container(...)`
    * chain at each call site. */
-  private requireContainer(): CosmosContainerLike {
-    if (!this.client || !this.config?.database || !this.config.container) {
-      throw new Error('Cosmos DB Provider requires a connected database and container')
+  private requireContainer(options?: QueryOptions): CosmosContainerLike {
+    const database = options?.database ?? this.config?.database
+    const container = options?.container ?? this.config?.container
+    if (!this.client || !database || !container) {
+      throw new Error(
+        'Cosmos DB queries need a database and container — set them on the connection, or open a container from the Object Explorer.'
+      )
     }
-    return this.client.database(this.config.database).container(this.config.container)
+    return this.client.database(database).container(container)
   }
 }
 

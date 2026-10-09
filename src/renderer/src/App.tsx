@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ConnectionProfile } from '@shared/types/connection-profile'
-import type { DatabaseMetadata } from '@shared/types/database-provider'
+import type { DatabaseMetadata, DatabaseMetadataObject } from '@shared/types/database-provider'
 import type { Theme } from '@shared/types/preferences'
 import { NewConnectionForm } from './NewConnectionForm'
-import { QueryWorkspace } from './query-tabs/QueryWorkspace'
+import { QueryWorkspace, type QueryWorkspaceHandle } from './query-tabs/QueryWorkspace'
 import { HistoryPanel } from './history/HistoryPanel'
 
 /** Connection status (user story 10) — tracked client-side; the Query
@@ -20,6 +20,8 @@ export function App(): React.JSX.Element {
     Record<string, DatabaseMetadata>
   >({})
   const [theme, setTheme] = useState<Theme>('light')
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const workspaceRef = useRef<QueryWorkspaceHandle>(null)
 
   useEffect(() => {
     window.api.preferences
@@ -88,6 +90,8 @@ export function App(): React.JSX.Element {
     try {
       await window.api.queryExecution.connect(id)
       setStatuses((prev) => ({ ...prev, [id]: 'connected' }))
+      // lastConnectedAt changed on the main side (recent connections, story 11).
+      await refresh()
     } catch (err) {
       setStatuses((prev) => ({ ...prev, [id]: 'error' }))
       setTestMessages((prev) => ({
@@ -119,6 +123,110 @@ export function App(): React.JSX.Element {
     }
   }
 
+  /** Double-click in the Object Explorer (user story 17): open a new query
+   * tab prefilled with a sample-records query for the object. */
+  function handleOpenObject(connection: ConnectionProfile, object: DatabaseMetadataObject): void {
+    if (connection.config.kind === 'cosmos-db') {
+      if (object.kind !== 'container') return
+      workspaceRef.current?.openQuery({
+        title: object.name,
+        connectionId: connection.id,
+        queryText: 'SELECT TOP 100 * FROM c',
+        options: { database: object.database, container: object.name }
+      })
+      return
+    }
+    if (object.kind !== 'table' && object.kind !== 'view') return
+    workspaceRef.current?.openQuery({
+      title: object.name,
+      connectionId: connection.id,
+      queryText: `SELECT TOP 100 * FROM ${object.schema ? `[${object.schema}].` : ''}[${object.name}]`
+    })
+  }
+
+  const recents = [...connections]
+    .filter((c) => c.lastConnectedAt)
+    .sort((a, b) => (b.lastConnectedAt ?? '').localeCompare(a.lastConnectedAt ?? ''))
+    .slice(0, 5)
+
+  const groups = new Map<string, ConnectionProfile[]>()
+  for (const connection of connections) {
+    const key = connection.groupName ?? ''
+    groups.set(key, [...(groups.get(key) ?? []), connection])
+  }
+  const groupKeys = [...groups.keys()].sort((a, b) =>
+    a === '' ? 1 : b === '' ? -1 : a.localeCompare(b)
+  )
+
+  function renderConnection(connection: ConnectionProfile): React.JSX.Element {
+    const status = statuses[connection.id] ?? 'disconnected'
+    if (editingId === connection.id) {
+      return (
+        <li key={connection.id}>
+          <NewConnectionForm
+            editing={connection}
+            onCreated={() => {
+              setEditingId(null)
+              // The Query Execution Service keeps the profile as it was at
+              // connect() time (including readOnly and credentials), so an
+              // edited, still-connected profile must reconnect to take effect.
+              if (status === 'connected') void handleDisconnect(connection.id)
+              void refresh()
+            }}
+            onCancel={() => setEditingId(null)}
+          />
+        </li>
+      )
+    }
+    return (
+      <li key={connection.id}>
+        <strong>{connection.name}</strong> — {connection.config.kind}
+        {connection.readOnly ? ' (read-only)' : ''}
+        {connection.hasSecret ? ' 🔒' : ''}
+        {' — '}
+        <span>status: {status}</span>
+        <div>
+          <button type="button" onClick={() => handleTest(connection.id)}>
+            Test
+          </button>
+          {status === 'connected' ? (
+            <button type="button" onClick={() => handleDisconnect(connection.id)}>
+              Disconnect
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={status === 'connecting'}
+              onClick={() => handleConnect(connection.id)}
+            >
+              Connect
+            </button>
+          )}
+          <button
+            type="button"
+            disabled={status !== 'connected'}
+            onClick={() => handleBrowseMetadata(connection.id)}
+          >
+            {metadataByConnection[connection.id] ? 'Refresh metadata' : 'Browse metadata'}
+          </button>
+          <button type="button" onClick={() => setEditingId(connection.id)}>
+            Edit
+          </button>
+          <button type="button" onClick={() => handleDelete(connection.id)}>
+            Delete
+          </button>
+        </div>
+        {testMessages[connection.id] && <p>{testMessages[connection.id]}</p>}
+        {metadataByConnection[connection.id] && (
+          <MetadataTree
+            metadata={metadataByConnection[connection.id]}
+            onOpen={(object) => handleOpenObject(connection, object)}
+          />
+        )}
+      </li>
+    )
+  }
+
   return (
     <main>
       <h1>
@@ -131,55 +239,30 @@ export function App(): React.JSX.Element {
 
       <section>
         <h2>Connections</h2>
+        {recents.length > 0 && (
+          <p>
+            Recent:{' '}
+            {recents.map((connection) => (
+              <button
+                key={connection.id}
+                type="button"
+                disabled={(statuses[connection.id] ?? 'disconnected') !== 'disconnected'}
+                onClick={() => void handleConnect(connection.id)}
+              >
+                {connection.name}
+              </button>
+            ))}
+          </p>
+        )}
         {connections.length === 0 ? (
           <p>No saved connections yet.</p>
         ) : (
-          <ul>
-            {connections.map((connection) => {
-              const status = statuses[connection.id] ?? 'disconnected'
-              return (
-                <li key={connection.id}>
-                  <strong>{connection.name}</strong> — {connection.config.kind}
-                  {connection.readOnly ? ' (read-only)' : ''}
-                  {connection.hasSecret ? ' 🔒' : ''}
-                  {' — '}
-                  <span>status: {status}</span>
-                  <div>
-                    <button type="button" onClick={() => handleTest(connection.id)}>
-                      Test
-                    </button>
-                    {status === 'connected' ? (
-                      <button type="button" onClick={() => handleDisconnect(connection.id)}>
-                        Disconnect
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        disabled={status === 'connecting'}
-                        onClick={() => handleConnect(connection.id)}
-                      >
-                        Connect
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      disabled={status !== 'connected'}
-                      onClick={() => handleBrowseMetadata(connection.id)}
-                    >
-                      Browse metadata
-                    </button>
-                    <button type="button" onClick={() => handleDelete(connection.id)}>
-                      Delete
-                    </button>
-                  </div>
-                  {testMessages[connection.id] && <p>{testMessages[connection.id]}</p>}
-                  {metadataByConnection[connection.id] && (
-                    <MetadataTree metadata={metadataByConnection[connection.id]} />
-                  )}
-                </li>
-              )
-            })}
-          </ul>
+          groupKeys.map((key) => (
+            <div key={key || '(ungrouped)'}>
+              {key && <h3>{key}</h3>}
+              <ul>{groups.get(key)!.map(renderConnection)}</ul>
+            </div>
+          ))
         )}
       </section>
 
@@ -188,7 +271,7 @@ export function App(): React.JSX.Element {
         <NewConnectionForm onCreated={refresh} />
       </section>
 
-      <QueryWorkspace connections={connections} />
+      <QueryWorkspace ref={workspaceRef} connections={connections} />
 
       <HistoryPanel />
     </main>
@@ -196,28 +279,53 @@ export function App(): React.JSX.Element {
 }
 
 /**
- * Minimal, initial metadata rendering (product-overview.md §11 Phase 2:
- * "Implement initial metadata discovery") — a plain nested list proving
- * `getMetadata()`'s result end-to-end. The real Object Explorer tree
- * widget (user stories 14-17) is later UI-polish work, not this slice.
+ * Object Explorer tree (user stories 14-17): nested, collapsible via native
+ * <details>, showing column types/primary keys/indexes (`detail`) and
+ * partition keys. Double-clicking a table/view/container opens a sample
+ * query for it.
  */
-function MetadataTree({ metadata }: { metadata: DatabaseMetadata }): React.JSX.Element {
+function MetadataTree({
+  metadata,
+  onOpen
+}: {
+  metadata: DatabaseMetadata
+  onOpen: (object: DatabaseMetadataObject) => void
+}): React.JSX.Element {
+  return <TreeList objects={metadata.objects} onOpen={onOpen} parentSchema={undefined} />
+}
+
+function TreeList({
+  objects,
+  onOpen,
+  parentSchema
+}: {
+  objects: DatabaseMetadataObject[]
+  onOpen: (object: DatabaseMetadataObject) => void
+  parentSchema: string | undefined
+}): React.JSX.Element {
   return (
     <ul>
-      {metadata.objects.map((object, index) => (
-        <li key={`${object.kind}-${object.name}-${index}`}>
-          {object.name} ({object.kind})
-          {object.children && object.children.length > 0 && (
-            <ul>
-              {object.children.map((child, childIndex) => (
-                <li key={`${child.kind}-${child.name}-${childIndex}`}>
-                  {child.name} ({child.kind})
-                </li>
-              ))}
-            </ul>
-          )}
-        </li>
-      ))}
+      {objects.map((object, index) => {
+        const withSchema = parentSchema ? { ...object, schema: parentSchema } : object
+        const label = `${object.name} (${object.kind}${object.detail ? `: ${object.detail}` : ''})`
+        const hasChildren = object.children && object.children.length > 0
+        return (
+          <li key={`${object.kind}-${object.name}-${index}`}>
+            {hasChildren ? (
+              <details>
+                <summary onDoubleClick={() => onOpen(withSchema)}>{label}</summary>
+                <TreeList
+                  objects={object.children!}
+                  onOpen={onOpen}
+                  parentSchema={object.kind === 'schema' ? object.name : parentSchema}
+                />
+              </details>
+            ) : (
+              <span onDoubleClick={() => onOpen(withSchema)}>{label}</span>
+            )}
+          </li>
+        )
+      })}
     </ul>
   )
 }

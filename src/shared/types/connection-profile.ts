@@ -57,6 +57,10 @@ export interface ConnectionProfile {
   readOnly: boolean
   config: ConnectionConfig
   hasSecret: boolean
+  /** Optional folder/group label (user story 9). */
+  groupName?: string
+  /** ISO timestamp of the last successful connect (user story 11). */
+  lastConnectedAt?: string
   createdAt: string
   updatedAt: string
 }
@@ -72,6 +76,7 @@ export interface CreateConnectionProfileRequest {
   name: string
   readOnly?: boolean
   config: ConnectionConfig
+  groupName?: string
   secret?: string
 }
 
@@ -79,6 +84,8 @@ export interface UpdateConnectionProfileRequest {
   name?: string
   readOnly?: boolean
   config?: ConnectionConfig
+  /** `null` clears the group; `undefined` leaves it untouched. */
+  groupName?: string | null
   /** `null` clears the stored secret; `undefined` (or omitted) leaves it untouched. */
   secret?: string | null
 }

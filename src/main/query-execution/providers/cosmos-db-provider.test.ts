@@ -32,6 +32,7 @@ class FakeCosmosClient implements CosmosClientLike {
   containerPartitionKeyPaths: string[] = ['/partitionKey']
   queryPages: Array<{ resources: unknown[]; requestCharge: number }> = []
   lastQuery: { query: string; abortSignal?: AbortSignal } | undefined
+  lastTarget: { database: string; container: string } | undefined
 
   readonly databases = {
     readAll: () => ({
@@ -53,13 +54,14 @@ class FakeCosmosClient implements CosmosClientLike {
           fetchAll: async () => ({ resources: this.readAllContainers })
         })
       },
-      container: (_containerId: string): CosmosContainerLike => ({
+      container: (containerId: string): CosmosContainerLike => ({
         read: async () => ({
           resource: { partitionKey: { paths: this.containerPartitionKeyPaths } }
         }),
         items: {
           query: (query: string, options?: { abortSignal?: AbortSignal }) => {
             this.lastQuery = { query, abortSignal: options?.abortSignal }
+            this.lastTarget = { database: id, container: containerId }
             const pages = this.queryPages
             return {
               getAsyncIterator: async function* () {
@@ -150,8 +152,27 @@ describe('CosmosDbProvider', () => {
       const metadata = await provider.getMetadata()
 
       expect(metadata.objects).toEqual([
-        { name: 'orders', kind: 'container' },
-        { name: 'customers', kind: 'container' }
+        { name: 'orders', kind: 'container', database: 'orders-db' },
+        { name: 'customers', kind: 'container', database: 'orders-db' }
+      ])
+    })
+
+    it('lists every database with its containers when the profile is account-scoped', async () => {
+      const client = new FakeCosmosClient()
+      client.readAllDatabases = [{ id: 'orders-db' }]
+      client.readAllContainers = [{ id: 'orders' }]
+      const provider = new CosmosDbProvider(makeFactory(client))
+      const profile = makeProfile({ ...baseConfig, database: undefined, container: undefined })
+
+      await provider.connect(profile, 'secret')
+      const metadata = await provider.getMetadata()
+
+      expect(metadata.objects).toEqual([
+        {
+          name: 'orders-db',
+          kind: 'database',
+          children: [{ name: 'orders', kind: 'container', database: 'orders-db' }]
+        }
       ])
     })
 
@@ -167,6 +188,7 @@ describe('CosmosDbProvider', () => {
         {
           name: 'orders',
           kind: 'container',
+          database: 'orders-db',
           children: [{ name: '/customerId', kind: 'partition-key' }]
         }
       ])
@@ -192,6 +214,25 @@ describe('CosmosDbProvider', () => {
   })
 
   describe('executeQuery', () => {
+    it('lets QueryOptions override the profile\'s database and container', async () => {
+      const client = new FakeCosmosClient()
+      client.queryPages = [{ resources: [], requestCharge: 1 }]
+      const provider = new CosmosDbProvider(makeFactory(client))
+      await provider.connect(
+        makeProfile({ ...baseConfig, database: undefined, container: undefined }),
+        'secret'
+      )
+
+      for await (const _chunk of provider.executeQuery('SELECT * FROM c', {
+        database: 'other-db',
+        container: 'other'
+      })) {
+        // drain
+      }
+
+      expect(client.lastTarget).toEqual({ database: 'other-db', container: 'other' })
+    })
+
     it('streams each page as a Result Chunk carrying the RU charge', async () => {
       const client = new FakeCosmosClient()
       client.queryPages = [

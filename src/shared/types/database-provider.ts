@@ -41,6 +41,12 @@ export interface DatabaseMetadataObject {
   /** Optional supplementary display info (e.g. a SQL column's data type)
    * that belongs alongside the name, not folded into it. */
   detail?: string
+  /** Owning database, set on Cosmos DB containers so the Object Explorer
+   * can target one (`QueryOptions.database`/`container`) without
+   * provider-specific tree-walking. */
+  database?: string
+  /** Owning schema, filled in client-side while walking a SQL tree. */
+  schema?: string
   children?: DatabaseMetadataObject[]
 }
 
@@ -50,6 +56,11 @@ export interface DatabaseMetadata {
 
 export interface QueryOptions {
   timeoutMs?: number
+  /** Cosmos DB only: overrides the Connection Profile's database/container
+   * for this one query (e.g. opening a container from the Object Explorer).
+   * Ignored by the Azure SQL Provider. */
+  database?: string
+  container?: string
   /**
    * Assigned by the caller (the Query Execution Service) before invoking
    * `executeQuery`, not by the Database Provider. The locked interface

@@ -91,4 +91,28 @@ describe('ConnectionProfileRepository', () => {
 
     expect(repository.get(created.id)).toBeUndefined()
   })
+  it('stores, updates, and clears a group name (trimmed; blank means none)', () => {
+    const created = repository.create({
+      name: 'Orders',
+      readOnly: false,
+      config: sampleConfig,
+      groupName: '  Prod  '
+    })
+    expect(created.groupName).toBe('Prod')
+
+    expect(repository.update(created.id, { name: 'Orders 2' }).groupName).toBe('Prod')
+    expect(repository.update(created.id, { groupName: 'Staging' }).groupName).toBe('Staging')
+    expect(repository.update(created.id, { groupName: null }).groupName).toBeUndefined()
+  })
+
+  it('markConnected records lastConnectedAt without touching updatedAt', () => {
+    const created = repository.create({ name: 'Orders', readOnly: false, config: sampleConfig })
+    expect(created.lastConnectedAt).toBeUndefined()
+
+    repository.markConnected(created.id, '2026-02-03T04:05:06.000Z')
+
+    const fetched = repository.get(created.id)
+    expect(fetched?.lastConnectedAt).toBe('2026-02-03T04:05:06.000Z')
+    expect(fetched?.updatedAt).toBe(created.updatedAt)
+  })
 })

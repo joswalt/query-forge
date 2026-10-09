@@ -67,6 +67,7 @@ export function registerQueryExecutionIpcHandlers(
     // resolveSecret's doc).
     const secret = await manager.resolveSecret(profile)
     await client.connect(profile, secret)
+    manager.markConnected(profileId)
   })
 
   ipcMain.handle('connection:disconnect', async (_event, profileId: string): Promise<void> => {

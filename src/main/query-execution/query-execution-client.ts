@@ -95,8 +95,9 @@ export class QueryExecutionClient {
 
   /** Terminates the shared utilityProcess. Call on app quit. */
   shutdown(): void {
-    this.child?.kill()
+    const child = this.child
     this.child = undefined
+    child?.kill()
   }
 
   private ensureChild(): UtilityProcess {
@@ -105,8 +106,27 @@ export class QueryExecutionClient {
       serviceName: 'QueryForge Query Execution Service'
     })
     child.on('message', (message: QueryExecutionResponse) => this.onMessage(message))
+    // User story 63: if the utilityProcess dies (crash, OOM), every in-flight
+    // call would otherwise hang forever. Reject them with an actionable
+    // message and drop the dead handle so the next call forks a fresh child.
+    // The new child has no live providers, so connections must be re-established.
+    child.on('exit', () => {
+      if (this.child === child) this.child = undefined
+      this.failAllPending(
+        new Error(
+          'The query execution service stopped unexpectedly. Disconnect and reconnect, then retry.'
+        )
+      )
+    })
     this.child = child
     return child
+  }
+
+  private failAllPending(error: Error): void {
+    for (const pending of this.pendingResults.values()) pending.reject(error)
+    this.pendingResults.clear()
+    for (const stream of this.pendingStreams.values()) stream.fail(error)
+    this.pendingStreams.clear()
   }
 
   private sendForResult<T>(request: QueryExecutionRequest): Promise<T> {

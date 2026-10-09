@@ -49,6 +49,7 @@ export class ConnectionManager {
       name: request.name,
       readOnly: request.readOnly ?? false,
       config: request.config,
+      groupName: request.groupName,
       secretCiphertext:
         request.secret !== undefined ? this.secretStore.encrypt(request.secret) : undefined
     }
@@ -60,6 +61,7 @@ export class ConnectionManager {
       name: request.name,
       readOnly: request.readOnly,
       config: request.config,
+      groupName: request.groupName,
       secretCiphertext:
         request.secret === null
           ? null
@@ -68,6 +70,11 @@ export class ConnectionManager {
             : undefined
     }
     return this.repository.update(id, input)
+  }
+
+  /** Records a successful connect for the recent-connections list (user story 11). */
+  markConnected(id: string): void {
+    this.repository.markConnected(id)
   }
 
   /**

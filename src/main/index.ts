@@ -13,6 +13,7 @@ import { SqliteTokenCacheStore } from './connection-manager/sqlite-token-cache-s
 import { registerConnectionIpcHandlers } from './ipc/connection-ipc'
 import { registerQueryExecutionIpcHandlers } from './ipc/query-execution-ipc'
 import { registerExportIpcHandlers } from './ipc/export-ipc'
+import { registerFileIpcHandlers } from './ipc/file-ipc'
 import { registerHistoryIpcHandlers } from './ipc/history-ipc'
 import { registerPreferencesIpcHandlers } from './ipc/preferences-ipc'
 import { registerSavedQueryIpcHandlers } from './ipc/saved-query-ipc'
@@ -104,6 +105,7 @@ app.whenReady().then(() => {
   registerHistoryIpcHandlers(historyRepository)
   registerPreferencesIpcHandlers(preferencesStore)
   registerSavedQueryIpcHandlers(savedQueryRepository)
+  registerFileIpcHandlers()
   createMainWindow()
 
   app.on('activate', () => {

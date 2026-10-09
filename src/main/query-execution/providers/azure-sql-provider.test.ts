@@ -135,6 +135,23 @@ describe('AzureSqlProvider', () => {
     })
   })
 
+  describe('timeouts', () => {
+    it('sets requestTimeout from the profile, defaulting to 60s instead of mssql\'s 15s', async () => {
+      const captured: SqlConfig[] = []
+      const factory: SqlPoolFactory = (config) => {
+        captured.push(config)
+        return new FakeSqlPool()
+      }
+      const provider = new AzureSqlProvider(factory)
+
+      await provider.connect(makeProfile(baseConfig), 'x')
+      await provider.connect(makeProfile({ ...baseConfig, connectionTimeoutMs: 5000 }), 'x')
+
+      expect(captured[0].requestTimeout).toBe(60_000)
+      expect(captured[1].requestTimeout).toBe(5000)
+    })
+  })
+
   describe('connect', () => {
     it('connects an entra-id profile using an AAD access token authentication block', async () => {
       const pool = new FakeSqlPool()
@@ -241,6 +258,52 @@ describe('AzureSqlProvider', () => {
   })
 
   describe('getMetadata', () => {
+    it('marks views, primary-key columns, and lists indexes', async () => {
+      const pool = new FakeSqlPool()
+      const request = new FakeSqlRequest()
+      request.fixedRecordset = [
+        {
+          schemaName: 'dbo',
+          tableName: 'orders',
+          tableType: 'BASE TABLE',
+          columnName: 'id',
+          dataType: 'int',
+          isPrimaryKey: 1,
+          indexName: 'PK_orders',
+          isUnique: 1
+        },
+        {
+          schemaName: 'dbo',
+          tableName: 'v_orders',
+          tableType: 'VIEW',
+          columnName: 'id',
+          dataType: 'int',
+          isPrimaryKey: 0
+        }
+      ]
+      pool.nextRequest = () => request
+      const provider = new AzureSqlProvider(makeFactory(pool))
+      await provider.connect(makeProfile(baseConfig), 'hunter2')
+
+      const metadata = await provider.getMetadata()
+
+      expect(metadata.objects[0].children).toEqual([
+        {
+          name: 'orders',
+          kind: 'table',
+          children: [
+            { name: 'id', kind: 'column', detail: 'int, primary key' },
+            { name: 'PK_orders', kind: 'index', detail: 'unique' }
+          ]
+        },
+        {
+          name: 'v_orders',
+          kind: 'view',
+          children: [{ name: 'id', kind: 'column', detail: 'int' }]
+        }
+      ])
+    })
+
     it('groups columns into schema -> table -> column', async () => {
       const pool = new FakeSqlPool()
       const request = new FakeSqlRequest()

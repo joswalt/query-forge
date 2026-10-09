@@ -170,6 +170,38 @@ describe('QueryExecutionService', () => {
     expect(responses).toEqual([{ id: 'req-1', kind: 'result', value: undefined, done: true }])
   })
 
+  it('executeQuery: refuses a mutating query on a read-only profile without reaching the provider', async () => {
+    const provider = new FakeProvider()
+    const executeQuerySpy = vi.spyOn(provider, 'executeQuery')
+    const service = new QueryExecutionService(() => provider)
+    await service.handle(
+      {
+        id: 'c',
+        method: 'connect',
+        profile: { ...makeProfile(), readOnly: true },
+        secret: undefined
+      },
+      () => {}
+    )
+
+    const { send, responses } = collectResponses()
+    await service.handle(
+      {
+        id: 'req-1',
+        method: 'executeQuery',
+        profileId: 'profile-1',
+        executionId: 'exec-1',
+        query: 'DELETE FROM t'
+      },
+      send
+    )
+
+    expect(executeQuerySpy).not.toHaveBeenCalled()
+    expect(responses).toHaveLength(1)
+    expect(responses[0]).toMatchObject({ kind: 'error', done: true })
+    expect((responses[0] as { message: string }).message).toContain('read-only')
+  })
+
   it('reports a thrown provider error as an error response rather than rejecting', async () => {
     const provider = new FakeProvider()
     provider.connect = async () => {

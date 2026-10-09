@@ -1,5 +1,6 @@
-import { useRef, useState } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import type { ConnectionProfile } from '@shared/types/connection-profile'
+import type { QueryOptions } from '@shared/types/database-provider'
 import type { ExportFormat } from '@shared/types/export'
 import type { SavedQuery } from '@shared/types/saved-query'
 import { QueryEditor, type QueryEditorHandle } from '../editor/QueryEditor'
@@ -18,6 +19,9 @@ interface QueryTabState {
   title: string
   connectionId: string | undefined
   queryText: string
+  /** Per-tab execution context, e.g. the Cosmos DB database/container opened
+   * from the Object Explorer. */
+  options: QueryOptions | undefined
   /** The exact text last sent to `queryStream.execute` — distinct from
    * `queryText` (the editor's *current* contents, which may have since
    * changed). "Export all matching rows" re-runs this, not whatever is
@@ -37,18 +41,65 @@ interface ExecutionHandle {
   cancelRequested: boolean
 }
 
-function createTab(
-  index: number,
-  seed?: { queryText: string; connectionId: string | undefined }
-): QueryTabState {
+export interface OpenQuerySeed {
+  queryText: string
+  connectionId: string | undefined
+  title?: string
+  options?: QueryOptions
+}
+
+export interface QueryWorkspaceHandle {
+  /** Opens a new tab prefilled with `seed` (Object Explorer double-click, user story 17). */
+  openQuery: (seed: OpenQuerySeed) => void
+}
+
+function createTab(index: number, seed?: OpenQuerySeed): QueryTabState {
   return {
     id: crypto.randomUUID(),
-    title: `Query ${index}`,
+    title: seed?.title ?? `Query ${index}`,
     connectionId: seed?.connectionId,
     queryText: seed?.queryText ?? '',
+    options: seed?.options,
     lastExecutedQuery: undefined,
     run: initialQueryRunState,
     exportState: initialExportState
+  }
+}
+
+const DRAFTS_KEY = 'queryforge.drafts.v1'
+const DRAFT_SAVE_DEBOUNCE_MS = 500
+
+interface DraftTab {
+  title: string
+  connectionId: string | undefined
+  queryText: string
+  options: QueryOptions | undefined
+}
+
+/** Unsaved tab contents survive a crash or unexpected shutdown (user story
+ * 55). Stored in the renderer's own localStorage (Electron userData) rather
+ * than SQLite — a draft is transient scratch state, not a Saved Query. */
+function loadDrafts(): { tabs: DraftTab[]; activeIndex: number } | undefined {
+  try {
+    const raw = localStorage.getItem(DRAFTS_KEY)
+    if (!raw) return undefined
+    const parsed = JSON.parse(raw) as { tabs?: DraftTab[]; activeIndex?: number }
+    if (!Array.isArray(parsed.tabs) || parsed.tabs.length === 0) return undefined
+    return { tabs: parsed.tabs, activeIndex: parsed.activeIndex ?? 0 }
+  } catch {
+    return undefined
+  }
+}
+
+function initialTabs(): { tabs: QueryTabState[]; activeIndex: number } {
+  const drafts = loadDrafts()
+  if (!drafts) return { tabs: [createTab(1)], activeIndex: 0 }
+  return {
+    tabs: drafts.tabs.map((draft) => ({
+      ...createTab(1, { ...draft }),
+      title: draft.title
+    })),
+    activeIndex: Math.min(drafts.activeIndex, drafts.tabs.length - 1)
   }
 }
 
@@ -58,19 +109,65 @@ function createTab(
  * so a slow/stuck query in one tab never blocks another. Results display is
  * intentionally minimal here — see QueryResultsView's doc comment.
  */
-export function QueryWorkspace({
-  connections
-}: {
-  connections: ConnectionProfile[]
-}): React.JSX.Element {
-  const [tabs, setTabs] = useState<QueryTabState[]>(() => [createTab(1)])
-  const [activeTabId, setActiveTabId] = useState<string>(() => tabs[0].id)
-  const nextIndexRef = useRef(2)
+export const QueryWorkspace = forwardRef<QueryWorkspaceHandle, { connections: ConnectionProfile[] }>(
+  function QueryWorkspace({ connections }, handleRef): React.JSX.Element {
+  const [restored] = useState(initialTabs)
+  const [tabs, setTabs] = useState<QueryTabState[]>(restored.tabs)
+  const [activeTabId, setActiveTabId] = useState<string>(
+    () => restored.tabs[restored.activeIndex].id
+  )
+  const [fileMessage, setFileMessage] = useState<string | null>(null)
+  // Drafts hold query text, so they honor the same opt-in as history text
+  // (user story 53): off until the preference says otherwise.
+  const [persistDrafts, setPersistDrafts] = useState(false)
+  useEffect(() => {
+    window.api.preferences
+      .get()
+      .then((prefs) => setPersistDrafts(prefs.queryHistory.persistQueryText))
+      .catch(() => {})
+  }, [])
+  const nextIndexRef = useRef(restored.tabs.length + 1)
   const executionsRef = useRef(new Map<string, ExecutionHandle>())
   const exportExecutionsRef = useRef(new Map<string, ExecutionHandle>())
   const editorRef = useRef<QueryEditorHandle>(null)
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId)
+
+  useImperativeHandle(handleRef, () => ({
+    openQuery: (seed) => {
+      const tab = createTab(nextIndexRef.current++, seed)
+      setTabs((prev) => [...prev, tab])
+      setActiveTabId(tab.id)
+    }
+  }))
+
+  useEffect(() => {
+    if (!persistDrafts) {
+      try {
+        localStorage.removeItem(DRAFTS_KEY)
+      } catch {
+        // ignore
+      }
+      return
+    }
+    const timer = setTimeout(() => {
+      try {
+        const drafts: DraftTab[] = tabs.map((t) => ({
+          title: t.title,
+          connectionId: t.connectionId,
+          queryText: t.queryText,
+          options: t.options
+        }))
+        localStorage.setItem(
+          DRAFTS_KEY,
+          JSON.stringify({ tabs: drafts, activeIndex: Math.max(0, tabs.findIndex((t) => t.id === activeTabId)) })
+        )
+      } catch {
+        // Best-effort only — a full/disabled localStorage must never break editing.
+      }
+    }, DRAFT_SAVE_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [tabs, activeTabId, persistDrafts])
 
   function updateTab(id: string, updater: (tab: QueryTabState) => QueryTabState): void {
     setTabs((prev) => prev.map((tab) => (tab.id === id ? updater(tab) : tab)))
@@ -139,7 +236,7 @@ export function QueryWorkspace({
     executionsRef.current.set(tabId, handle)
 
     window.api.queryStream
-      .execute(tab.connectionId, queryText, undefined, {
+      .execute(tab.connectionId, queryText, tab.options, {
         onChunk: (chunk) => dispatchRun(tabId, { type: 'chunk', chunk }),
         onDone: () => {
           executionsRef.current.delete(tabId)
@@ -225,6 +322,7 @@ export function QueryWorkspace({
     }
     const connectionId = tab.connectionId
     const query = tab.lastExecutedQuery
+    const options = tab.options
 
     window.api.export
       .chooseDestination(`export.${format}`)
@@ -240,7 +338,7 @@ export function QueryWorkspace({
         exportExecutionsRef.current.set(tabId, handle)
 
         window.api.export
-          .exportAll(connectionId, query, undefined, format, destinationPath, {
+          .exportAll(connectionId, query, options, format, destinationPath, {
             onProgress: (rowsWritten) =>
               dispatchExport(tabId, { status: 'running', kind: 'all', rowsWritten }),
             onDone: () => {
@@ -297,6 +395,36 @@ export function QueryWorkspace({
     setActiveTabId(tab.id)
   }
 
+  /** Save the active tab's text to a local file (user story 23). */
+  async function handleSaveToFile(): Promise<void> {
+    if (!activeTab) return
+    try {
+      const path = await window.api.files.saveQuery(`${activeTab.title}.sql`, activeTab.queryText)
+      setFileMessage(path ? `Saved to ${path}` : null)
+    } catch (err) {
+      setFileMessage(`Save failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  /** Open a local query file in a new tab, inheriting the active tab's connection. */
+  async function handleOpenFile(): Promise<void> {
+    try {
+      const file = await window.api.files.openQuery()
+      if (!file) return
+      const tab = createTab(nextIndexRef.current++, {
+        title: file.name,
+        queryText: file.content,
+        connectionId: activeTab?.connectionId,
+        options: activeTab?.options
+      })
+      setTabs((prev) => [...prev, tab])
+      setActiveTabId(tab.id)
+      setFileMessage(null)
+    } catch (err) {
+      setFileMessage(`Open failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
   /** "Save current query" — the active tab's full query text (not
    * `editorRef.getExecutionText()`, which returns only the selection when
    * one exists; saving a query should never silently save a sub-selection
@@ -334,7 +462,11 @@ export function QueryWorkspace({
         <button type="button" onClick={handleNewTab}>
           + New tab
         </button>
+        <button type="button" onClick={() => void handleOpenFile()}>
+          Open file…
+        </button>
       </div>
+      {fileMessage && <p>{fileMessage}</p>}
 
       {activeTab && (
         <div className="query-workspace__tab">
@@ -375,6 +507,9 @@ export function QueryWorkspace({
             >
               Cancel
             </button>
+            <button type="button" onClick={() => void handleSaveToFile()}>
+              Save to file…
+            </button>
           </div>
 
           <QueryEditor
@@ -403,4 +538,4 @@ export function QueryWorkspace({
       />
     </section>
   )
-}
+})

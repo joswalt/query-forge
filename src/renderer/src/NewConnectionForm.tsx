@@ -2,11 +2,17 @@ import { useState } from 'react'
 import type {
   AzureSqlAuthMode,
   ConnectionConfig,
+  ConnectionProfile,
   CosmosAuthMode
 } from '@shared/types/connection-profile'
 
 interface Props {
   onCreated: () => void
+  /** When set, the form edits this saved profile instead of creating one
+   * (user story 4). The stored secret is never sent back to the renderer,
+   * so a blank secret field means "leave the stored secret untouched". */
+  editing?: ConnectionProfile
+  onCancel?: () => void
 }
 
 /** Each database kind's default auth mode — what `kind`'s <select> resets
@@ -26,19 +32,30 @@ function defaultAuthModeFor(kind: ConnectionConfig['kind']): AzureSqlAuthMode | 
  * simply never fills them in and uses account-key/sql-credentials instead
  * (spec.md Implementation Decisions).
  */
-export function NewConnectionForm({ onCreated }: Props): React.JSX.Element {
-  const [kind, setKind] = useState<ConnectionConfig['kind']>('azure-sql')
-  const [authMode, setAuthMode] = useState<AzureSqlAuthMode | CosmosAuthMode>('sql-credentials')
-  const [name, setName] = useState('')
-  const [server, setServer] = useState('')
-  const [database, setDatabase] = useState('')
-  const [username, setUsername] = useState('')
-  const [endpoint, setEndpoint] = useState('')
+export function NewConnectionForm({ onCreated, editing, onCancel }: Props): React.JSX.Element {
+  const initial = editing?.config
+  const initialSql = initial?.kind === 'azure-sql' ? initial : undefined
+  const initialCosmos = initial?.kind === 'cosmos-db' ? initial : undefined
+  const [kind, setKind] = useState<ConnectionConfig['kind']>(initial?.kind ?? 'azure-sql')
+  const [authMode, setAuthMode] = useState<AzureSqlAuthMode | CosmosAuthMode>(
+    initial?.authMode ?? 'sql-credentials'
+  )
+  const [name, setName] = useState(editing?.name ?? '')
+  const [groupName, setGroupName] = useState(editing?.groupName ?? '')
+  const [server, setServer] = useState(initialSql?.server ?? '')
+  const [database, setDatabase] = useState(initialSql?.database ?? '')
+  const [username, setUsername] = useState(initialSql?.username ?? '')
+  const [endpoint, setEndpoint] = useState(initialCosmos?.endpoint ?? '')
+  const [cosmosDatabase, setCosmosDatabase] = useState(initialCosmos?.database ?? '')
+  const [cosmosContainer, setCosmosContainer] = useState(initialCosmos?.container ?? '')
   const [secret, setSecret] = useState('')
-  const [clientId, setClientId] = useState('')
-  const [tenantId, setTenantId] = useState('')
-  const [redirectUri, setRedirectUri] = useState('')
-  const [readOnly, setReadOnly] = useState(false)
+  const [clientId, setClientId] = useState(initial?.entraId?.clientId ?? '')
+  const [tenantId, setTenantId] = useState(initial?.entraId?.tenantId ?? '')
+  const [redirectUri, setRedirectUri] = useState(initial?.entraId?.redirectUri ?? '')
+  const [timeoutSeconds, setTimeoutSeconds] = useState(
+    initial?.connectionTimeoutMs ? String(initial.connectionTimeoutMs / 1000) : ''
+  )
+  const [readOnly, setReadOnly] = useState(editing?.readOnly ?? false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [testing, setTesting] = useState(false)
@@ -53,16 +70,32 @@ export function NewConnectionForm({ onCreated }: Props): React.JSX.Element {
 
   function buildConfig(): ConnectionConfig {
     const entraId = isEntraId ? { clientId, tenantId, redirectUri } : undefined
+    const connectionTimeoutMs = timeoutSeconds.trim()
+      ? Math.round(Number(timeoutSeconds) * 1000)
+      : undefined
+    // Spread the existing config first so fields this form doesn't expose
+    // (port, encrypt, Cosmos database/container) survive an edit.
     return kind === 'azure-sql'
       ? {
+          ...initialSql,
           kind: 'azure-sql',
           server,
           database,
           authMode: authMode as AzureSqlAuthMode,
           username: isEntraId ? undefined : username,
-          entraId
+          entraId,
+          connectionTimeoutMs
         }
-      : { kind: 'cosmos-db', endpoint, authMode: authMode as CosmosAuthMode, entraId }
+      : {
+          ...initialCosmos,
+          kind: 'cosmos-db',
+          endpoint,
+          database: cosmosDatabase.trim() || undefined,
+          container: cosmosContainer.trim() || undefined,
+          authMode: authMode as CosmosAuthMode,
+          entraId,
+          connectionTimeoutMs
+        }
   }
 
   async function handleTest(): Promise<void> {
@@ -93,17 +126,34 @@ export function NewConnectionForm({ onCreated }: Props): React.JSX.Element {
     const config = buildConfig()
 
     try {
+      if (editing) {
+        await window.api.connections.update(editing.id, {
+          name,
+          readOnly,
+          config,
+          groupName: groupName.trim() || null,
+          // Switching to Entra ID drops any stored password/key; otherwise a
+          // blank field keeps the existing secret (it's never sent back here).
+          secret: isEntraId ? null : secret || undefined
+        })
+        onCreated()
+        return
+      }
       await window.api.connections.create({
         name,
         readOnly,
         config,
+        groupName: groupName.trim() || undefined,
         secret: isEntraId ? undefined : secret || undefined
       })
       setName('')
+      setGroupName('')
       setServer('')
       setDatabase('')
       setUsername('')
       setEndpoint('')
+      setCosmosDatabase('')
+      setCosmosContainer('')
       setSecret('')
       setClientId('')
       setTenantId('')
@@ -132,6 +182,11 @@ export function NewConnectionForm({ onCreated }: Props): React.JSX.Element {
       <label>
         Connection name
         <input value={name} onChange={(e) => setName(e.target.value)} required />
+      </label>
+
+      <label>
+        Group (optional)
+        <input value={groupName} onChange={(e) => setGroupName(e.target.value)} />
       </label>
 
       <label>
@@ -167,7 +222,12 @@ export function NewConnectionForm({ onCreated }: Props): React.JSX.Element {
               </label>
               <label>
                 Password
-                <input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} />
+                <input
+                  type="password"
+                  value={secret}
+                  placeholder={editing?.hasSecret ? '(unchanged)' : ''}
+                  onChange={(e) => setSecret(e.target.value)}
+                />
               </label>
             </>
           )}
@@ -178,10 +238,23 @@ export function NewConnectionForm({ onCreated }: Props): React.JSX.Element {
             Cosmos DB endpoint
             <input value={endpoint} onChange={(e) => setEndpoint(e.target.value)} required />
           </label>
+          <label>
+            Database (optional — leave blank to browse the whole account)
+            <input value={cosmosDatabase} onChange={(e) => setCosmosDatabase(e.target.value)} />
+          </label>
+          <label>
+            Container (optional)
+            <input value={cosmosContainer} onChange={(e) => setCosmosContainer(e.target.value)} />
+          </label>
           {!isEntraId && (
             <label>
               Account key
-              <input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} />
+              <input
+                type="password"
+                value={secret}
+                placeholder={editing?.hasSecret ? '(unchanged)' : ''}
+                onChange={(e) => setSecret(e.target.value)}
+              />
             </label>
           )}
         </>
@@ -214,6 +287,16 @@ export function NewConnectionForm({ onCreated }: Props): React.JSX.Element {
       )}
 
       <label>
+        Timeout in seconds (optional)
+        <input
+          type="number"
+          min="1"
+          value={timeoutSeconds}
+          onChange={(e) => setTimeoutSeconds(e.target.value)}
+        />
+      </label>
+
+      <label>
         <input
           type="checkbox"
           checked={readOnly}
@@ -229,8 +312,13 @@ export function NewConnectionForm({ onCreated }: Props): React.JSX.Element {
         Test connection
       </button>
       <button type="submit" disabled={submitting}>
-        Save connection
+        {editing ? 'Update connection' : 'Save connection'}
       </button>
+      {editing && onCancel && (
+        <button type="button" onClick={onCancel}>
+          Cancel
+        </button>
+      )}
     </form>
   )
 }

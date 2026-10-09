@@ -52,6 +52,9 @@ export interface SqlConfig {
     options: { token: string }
   }
   connectionTimeout?: number
+  /** Query timeout in ms (user story 36). mssql's own default is 15s, which
+   * would silently kill any longer query. */
+  requestTimeout?: number
   options?: { encrypt?: boolean; trustServerCertificate?: boolean }
 }
 
@@ -59,6 +62,10 @@ export type SqlPoolFactory = (config: SqlConfig) => SqlPoolLike
 
 const defaultPoolFactory: SqlPoolFactory = (config) =>
   new sql.ConnectionPool(config) as unknown as SqlPoolLike
+
+/** Used when a profile sets no timeout: long enough for real analytic queries,
+ * short enough that a runaway query doesn't hang indefinitely (user story 36). */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 60_000
 
 /** Row batch size for the streamed `AsyncIterable<ResultChunk>` bridge (user story 31). */
 const CHUNK_SIZE = 500
@@ -172,34 +179,76 @@ export class AzureSqlProvider implements DatabaseProvider {
       throw new Error('Azure SQL Provider is not connected')
     }
 
-    // "Initial metadata discovery" (product-overview.md §11 Phase 2):
-    // schemas/tables/columns via INFORMATION_SCHEMA. Primary keys and
-    // indexes (user story 15) are deferred to the later Object Explorer
-    // UI-polish phase, not part of this slice.
+    // Schemas, tables/views, columns (with data type and primary-key flag),
+    // and indexes (user story 15).
     const { recordset = [] } = await this.pool.request().query(
-      `SELECT TABLE_SCHEMA AS schemaName, TABLE_NAME AS tableName, COLUMN_NAME AS columnName, DATA_TYPE AS dataType
-       FROM INFORMATION_SCHEMA.COLUMNS
-       ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION`
+      `SELECT c.TABLE_SCHEMA AS schemaName, c.TABLE_NAME AS tableName, t.TABLE_TYPE AS tableType,
+              c.COLUMN_NAME AS columnName, c.DATA_TYPE AS dataType,
+              CASE WHEN pk.COLUMN_NAME IS NULL THEN 0 ELSE 1 END AS isPrimaryKey
+       FROM INFORMATION_SCHEMA.COLUMNS c
+       JOIN INFORMATION_SCHEMA.TABLES t
+         ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
+       LEFT JOIN (
+         SELECT kcu.TABLE_SCHEMA, kcu.TABLE_NAME, kcu.COLUMN_NAME
+         FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+         JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+           ON kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME AND kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
+         WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+       ) pk ON pk.TABLE_SCHEMA = c.TABLE_SCHEMA AND pk.TABLE_NAME = c.TABLE_NAME AND pk.COLUMN_NAME = c.COLUMN_NAME
+       ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION`
     )
 
-    const schemas = new Map<string, Map<string, DatabaseMetadataObject[]>>()
+    // Indexes are best-effort: a login lacking VIEW DEFINITION shouldn't
+    // make the whole Object Explorer fail to load.
+    let indexRows: Array<Record<string, unknown>> = []
+    try {
+      const result = await this.pool.request().query(
+        `SELECT s.name AS schemaName, o.name AS tableName, i.name AS indexName, i.is_unique AS isUnique
+         FROM sys.indexes i
+         JOIN sys.objects o ON o.object_id = i.object_id AND o.type IN ('U', 'V')
+         JOIN sys.schemas s ON s.schema_id = o.schema_id
+         WHERE i.name IS NOT NULL
+         ORDER BY s.name, o.name, i.name`
+      )
+      indexRows = result.recordset ?? []
+    } catch {
+      indexRows = []
+    }
+
+    const schemas = new Map<string, Map<string, DatabaseMetadataObject>>()
     for (const row of recordset) {
       const schemaName = String(row.schemaName)
       const tableName = String(row.tableName)
-      const tables = schemas.get(schemaName) ?? new Map<string, DatabaseMetadataObject[]>()
+      const tables = schemas.get(schemaName) ?? new Map<string, DatabaseMetadataObject>()
       schemas.set(schemaName, tables)
-      const columns = tables.get(tableName) ?? []
-      tables.set(tableName, columns)
-      columns.push({ name: String(row.columnName), kind: 'column', detail: String(row.dataType) })
+      let table = tables.get(tableName)
+      if (!table) {
+        table = { name: tableName, kind: row.tableType === 'VIEW' ? 'view' : 'table', children: [] }
+        tables.set(tableName, table)
+      }
+      const isPrimaryKey = row.isPrimaryKey === 1 || row.isPrimaryKey === true
+      table.children!.push({
+        name: String(row.columnName),
+        kind: 'column',
+        detail: isPrimaryKey ? `${String(row.dataType)}, primary key` : String(row.dataType)
+      })
+    }
+
+    for (const row of indexRows) {
+      if (row.indexName === undefined) continue
+      const table = schemas.get(String(row.schemaName))?.get(String(row.tableName))
+      if (!table) continue
+      const unique = row.isUnique === 1 || row.isUnique === true
+      table.children!.push({
+        name: String(row.indexName),
+        kind: 'index',
+        detail: unique ? 'unique' : undefined
+      })
     }
 
     const objects: DatabaseMetadataObject[] = []
     for (const [schemaName, tables] of schemas) {
-      const tableObjects: DatabaseMetadataObject[] = []
-      for (const [tableName, columns] of tables) {
-        tableObjects.push({ name: tableName, kind: 'table', children: columns })
-      }
-      objects.push({ name: schemaName, kind: 'schema', children: tableObjects })
+      objects.push({ name: schemaName, kind: 'schema', children: [...tables.values()] })
     }
     return { objects }
   }
@@ -215,7 +264,8 @@ function requireAzureSqlConfig(profile: ConnectionProfile): AzureSqlConnectionCo
 /**
  * Maps a Connection Profile's Azure SQL config + Decrypted Secret to
  * mssql's config shape. `requestTimeout` (query-level timeout, user story
- * 36) is set pool-wide from the same `connectionTimeoutMs` field —
+ * 36) is set pool-wide from the same `connectionTimeoutMs` field (default
+ * `DEFAULT_REQUEST_TIMEOUT_MS`, not mssql's 15s) —
  * `QueryOptions.timeoutMs` is not yet wired to a true per-query override,
  * since mssql only exposes timeout at pool-creation time, not per
  * `Request`. Flagged here rather than silently ignored.
@@ -237,6 +287,7 @@ function toSqlConfig(config: AzureSqlConnectionConfig, secret: DecryptedSecret |
     port: config.port,
     database: config.database,
     connectionTimeout: config.connectionTimeoutMs,
+    requestTimeout: config.connectionTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
     options: {
       encrypt: config.encrypt ?? true,
       trustServerCertificate: false

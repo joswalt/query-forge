@@ -6,6 +6,7 @@ export interface CreateConnectionProfileInput {
   name: string
   readOnly: boolean
   config: ConnectionConfig
+  groupName?: string
   secretCiphertext?: Buffer
 }
 
@@ -13,6 +14,8 @@ export interface UpdateConnectionProfileInput {
   name?: string
   readOnly?: boolean
   config?: ConnectionConfig
+  /** `null` clears the group; `undefined` leaves it untouched. */
+  groupName?: string | null
   /** `null` clears the stored secret; `undefined` leaves it untouched. */
   secretCiphertext?: Buffer | null
 }
@@ -23,6 +26,8 @@ interface ConnectionProfileRow {
   read_only: number
   config_json: string
   secret_ciphertext: Buffer | null
+  group_name: string | null
+  last_connected_at: string | null
   created_at: string
   updated_at: string
 }
@@ -42,8 +47,8 @@ export class ConnectionProfileRepository {
     const now = new Date().toISOString()
     this.db
       .prepare(
-        `INSERT INTO connection_profiles (id, name, read_only, config_json, secret_ciphertext, created_at, updated_at)
-         VALUES (@id, @name, @readOnly, @configJson, @secretCiphertext, @createdAt, @updatedAt)`
+        `INSERT INTO connection_profiles (id, name, read_only, config_json, secret_ciphertext, group_name, created_at, updated_at)
+         VALUES (@id, @name, @readOnly, @configJson, @secretCiphertext, @groupName, @createdAt, @updatedAt)`
       )
       .run({
         id,
@@ -51,6 +56,7 @@ export class ConnectionProfileRepository {
         readOnly: input.readOnly ? 1 : 0,
         configJson: JSON.stringify(input.config),
         secretCiphertext: input.secretCiphertext ?? null,
+        groupName: input.groupName?.trim() || null,
         createdAt: now,
         updatedAt: now
       })
@@ -80,17 +86,33 @@ export class ConnectionProfileRepository {
     const configJson = input.config ? JSON.stringify(input.config) : existing.config_json
     const secretCiphertext =
       input.secretCiphertext === undefined ? existing.secret_ciphertext : input.secretCiphertext
+    const groupName =
+      input.groupName === undefined ? existing.group_name : input.groupName?.trim() || null
     const updatedAt = new Date().toISOString()
 
     this.db
       .prepare(
         `UPDATE connection_profiles
-         SET name = @name, read_only = @readOnly, config_json = @configJson, secret_ciphertext = @secretCiphertext, updated_at = @updatedAt
+         SET name = @name, read_only = @readOnly, config_json = @configJson, secret_ciphertext = @secretCiphertext, group_name = @groupName, updated_at = @updatedAt
          WHERE id = @id`
       )
-      .run({ id, name, readOnly: readOnly ? 1 : 0, configJson, secretCiphertext, updatedAt })
+      .run({
+        id,
+        name,
+        readOnly: readOnly ? 1 : 0,
+        configJson,
+        secretCiphertext,
+        groupName,
+        updatedAt
+      })
 
     return this.get(id)!
+  }
+
+  /** Records a successful connect (user story 11). Deliberately leaves
+   * `updated_at` alone — connecting isn't an edit of the profile. */
+  markConnected(id: string, at: string = new Date().toISOString()): void {
+    this.db.prepare('UPDATE connection_profiles SET last_connected_at = ? WHERE id = ?').run(at, id)
   }
 
   delete(id: string): void {
@@ -115,6 +137,8 @@ function toConnectionProfile(row: ConnectionProfileRow): ConnectionProfile {
     readOnly: Boolean(row.read_only),
     config: JSON.parse(row.config_json) as ConnectionConfig,
     hasSecret: row.secret_ciphertext !== null,
+    groupName: row.group_name ?? undefined,
+    lastConnectedAt: row.last_connected_at ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   }

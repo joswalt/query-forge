@@ -1,5 +1,6 @@
-import type { ConnectionConfig } from '@shared/types/connection-profile'
+import type { ConnectionConfig, ConnectionProfile } from '@shared/types/connection-profile'
 import type { DatabaseProvider } from '@shared/types/database-provider'
+import { assertReadOnlyQuery } from './read-only-guard'
 import type { QueryExecutionRequest, QueryExecutionResponse } from './protocol'
 
 export type ProviderFactory = (config: ConnectionConfig) => DatabaseProvider
@@ -18,6 +19,7 @@ export type ProviderFactory = (config: ConnectionConfig) => DatabaseProvider
  */
 export class QueryExecutionService {
   private readonly providers = new Map<string, DatabaseProvider>()
+  private readonly profiles = new Map<string, ConnectionProfile>()
 
   constructor(private readonly providerFactory: ProviderFactory) {}
 
@@ -31,6 +33,7 @@ export class QueryExecutionService {
           const provider = this.providerFactory(request.profile.config)
           await provider.connect(request.profile, request.secret)
           this.providers.set(request.profile.id, provider)
+          this.profiles.set(request.profile.id, request.profile)
           send({ id: request.id, kind: 'result', value: undefined, done: true })
           return
         }
@@ -50,6 +53,7 @@ export class QueryExecutionService {
             await provider.disconnect()
             this.providers.delete(request.profileId)
           }
+          this.profiles.delete(request.profileId)
           send({ id: request.id, kind: 'result', value: undefined, done: true })
           return
         }
@@ -68,6 +72,10 @@ export class QueryExecutionService {
 
         case 'executeQuery': {
           const provider = this.requireProvider(request.profileId)
+          // Read-only enforcement lives here, in the process that owns the
+          // live connection, not in the renderer (user story 59).
+          const profile = this.profiles.get(request.profileId)
+          if (profile?.readOnly) assertReadOnlyQuery(profile.config, request.query)
           for await (const chunk of provider.executeQuery(request.query, {
             ...request.options,
             executionId: request.executionId

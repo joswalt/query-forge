@@ -260,6 +260,16 @@ const savedQueriesApi = {
 
 export type SavedQueriesApi = typeof savedQueriesApi
 
+/** Save/open query files through native dialogs (user story 23). */
+const filesApi = {
+  saveQuery: (defaultName: string, content: string): Promise<string | undefined> =>
+    ipcRenderer.invoke('file:saveQuery', defaultName, content),
+  openQuery: (): Promise<{ path: string; name: string; content: string } | undefined> =>
+    ipcRenderer.invoke('file:openQuery')
+}
+
+export type FilesApi = typeof filesApi
+
 const api = {
   connections: connectionsApi,
   queryExecution: queryExecutionApi,
@@ -267,7 +277,8 @@ const api = {
   export: exportApi,
   history: historyApi,
   preferences: preferencesApi,
-  savedQueries: savedQueriesApi
+  savedQueries: savedQueriesApi,
+  files: filesApi
 }
 
 export type QueryForgeApi = typeof api
