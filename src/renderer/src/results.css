@@ -1,8 +1,20 @@
 /* Results: status bar, export toolbar, grid, JSON tree, cell inspector. */
 
 .query-results {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
+  min-height: 0;
+}
+
+.query-results > * {
+  flex: none;
+}
+
+/* Whichever view is showing rows grows to the bottom of the pane. */
+.query-results > .results-grid,
+.query-results > .results-json-view {
+  flex: 1 1 auto;
 }
 
 .query-results__status {
@@ -143,6 +155,9 @@
 
 .results-grid {
   position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 300px;
   overflow: hidden;
   border: 1px solid var(--qf-border);
   border-radius: var(--qf-r-panel);
@@ -160,8 +175,10 @@
 }
 
 .results-grid__scroller {
-  /* Taller windows get a taller grid (min 360px, the previous fixed size). */
-  height: clamp(360px, 46vh, 900px);
+  /* Fills the grid panel, which fills the window; the panel's min-height
+     keeps short windows scrolling the page instead of crushing the rows. */
+  flex: 1 1 0;
+  min-height: 0;
 }
 
 .results-grid [tabindex='0']:focus-visible {
@@ -261,8 +278,20 @@
 /* ---------- JSON ---------- */
 
 .results-json-view {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
+  min-height: 300px;
+}
+
+.results-json-view > .json-tree {
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none;
+}
+
+.results-json-view > :not(.json-tree) {
+  flex: none;
 }
 
 .results-json-view__toolbar {

@@ -27,7 +27,9 @@
 /* ---------- query workspace ---------- */
 
 .query-workspace {
-  display: grid;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
   gap: 14px;
 }
 
@@ -120,15 +122,29 @@
   overflow-wrap: anywhere;
 }
 
+/* The tab is a column: toolbar and editor keep their size, results take
+   whatever height is left, so the grid reaches the bottom of the window. */
 .query-workspace__tab {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: end;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
   gap: 12px;
 }
 
-.query-workspace__tab > :not(.query-workspace__targets):not(.query-workspace__actions) {
-  grid-column: 1 / -1;
+.query-workspace__tab > * {
+  flex: none;
+}
+
+.query-workspace__tab > .query-results {
+  flex: 1 1 auto;
+}
+
+.query-workspace__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 /* Where the query runs: connection, then (Cosmos) container. */
@@ -155,6 +171,7 @@
 
 .query-workspace__actions {
   display: flex;
+  margin-left: auto;
   justify-content: flex-end;
   align-items: center;
   gap: 6px;

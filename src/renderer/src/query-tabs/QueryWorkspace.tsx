@@ -550,75 +550,77 @@ export const QueryWorkspace = forwardRef<
 
       {activeTab && (
         <div className="query-workspace__tab">
-          <div className="query-workspace__targets">
-            <label className="query-workspace__connection">
-              Connection
-              <select
-                value={activeTab.connectionId ?? ''}
-                onChange={(e) =>
-                  // A container belongs to one connection — never carry it over.
-                  updateTab(activeTab.id, (t) => ({
-                    ...t,
-                    connectionId: e.target.value || undefined,
-                    options: undefined
-                  }))
+          <div className="query-workspace__toolbar">
+            <div className="query-workspace__targets">
+              <label className="query-workspace__connection">
+                Connection
+                <select
+                  value={activeTab.connectionId ?? ''}
+                  onChange={(e) =>
+                    // A container belongs to one connection — never carry it over.
+                    updateTab(activeTab.id, (t) => ({
+                      ...t,
+                      connectionId: e.target.value || undefined,
+                      options: undefined
+                    }))
+                  }
+                >
+                  <option value="">Select a connection</option>
+                  {connections.map((connection) => (
+                    <option key={connection.id} value={connection.id}>
+                      {connection.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              {activeCosmos && needsContainerPicker && activeConnectionId && (
+                <ContainerPicker
+                  list={containerLists[activeConnectionId]}
+                  fixedDatabase={activeCosmos.database}
+                  value={activeTab.options}
+                  onRetry={() => loadContainers(activeConnectionId)}
+                  onChange={(options) => updateTab(activeTab.id, (t) => ({ ...t, options }))}
+                />
+              )}
+            </div>
+
+            <div className="query-workspace__actions">
+              <button
+                type="button"
+                className="btn--ghost"
+                aria-expanded={saveName !== null}
+                disabled={!activeTab.queryText.trim()}
+                onClick={() => setSaveName((current) => (current === null ? activeTab.title : null))}
+              >
+                Save query…
+              </button>
+              <button type="button" className="btn--ghost" onClick={() => void handleSaveToFile()}>
+                Save to file…
+              </button>
+              <button
+                type="button"
+                disabled={activeTab.run.status !== 'running'}
+                onClick={() => handleCancel(activeTab.id)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn--run"
+                disabled={activeTab.run.status === 'running'}
+                onClick={() =>
+                  handleExecute(
+                    activeTab.id,
+                    editorRef.current?.getExecutionText() ?? activeTab.queryText
+                  )
                 }
               >
-                <option value="">Select a connection</option>
-                {connections.map((connection) => (
-                  <option key={connection.id} value={connection.id}>
-                    {connection.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            {activeCosmos && needsContainerPicker && activeConnectionId && (
-              <ContainerPicker
-                list={containerLists[activeConnectionId]}
-                fixedDatabase={activeCosmos.database}
-                value={activeTab.options}
-                onRetry={() => loadContainers(activeConnectionId)}
-                onChange={(options) => updateTab(activeTab.id, (t) => ({ ...t, options }))}
-              />
-            )}
-          </div>
-
-          <div className="query-workspace__actions">
-            <button
-              type="button"
-              className="btn--ghost"
-              aria-expanded={saveName !== null}
-              disabled={!activeTab.queryText.trim()}
-              onClick={() => setSaveName((current) => (current === null ? activeTab.title : null))}
-            >
-              Save query…
-            </button>
-            <button type="button" className="btn--ghost" onClick={() => void handleSaveToFile()}>
-              Save to file…
-            </button>
-            <button
-              type="button"
-              disabled={activeTab.run.status !== 'running'}
-              onClick={() => handleCancel(activeTab.id)}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="btn--run"
-              disabled={activeTab.run.status === 'running'}
-              onClick={() =>
-                handleExecute(
-                  activeTab.id,
-                  editorRef.current?.getExecutionText() ?? activeTab.queryText
-                )
-              }
-            >
-              <PlayIcon size={12} />
-              Run
-              <kbd>{RUN_SHORTCUT}</kbd>
-            </button>
+                <PlayIcon size={12} />
+                Run
+                <kbd>{RUN_SHORTCUT}</kbd>
+              </button>
+            </div>
           </div>
 
           {saveName !== null && (
