@@ -5,6 +5,7 @@ export interface OverflowMenuItem {
   label: string
   onSelect: () => void
   danger?: boolean
+  disabled?: boolean
 }
 
 /** "⋯" button opening a small action menu. Closes on outside click, Escape,
@@ -24,7 +25,7 @@ export function OverflowMenu({
 
   useEffect(() => {
     if (!open) return
-    rootRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus()
+    rootRef.current?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus()
     function onPointerDown(event: PointerEvent): void {
       if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
     }
@@ -39,7 +40,7 @@ export function OverflowMenu({
       return
     }
     if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
-    const entries = [...(rootRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])]
+    const entries = [...(rootRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? [])]
     const index = entries.indexOf(document.activeElement as HTMLElement)
     const next = event.key === 'ArrowDown' ? index + 1 : index - 1
     entries[(next + entries.length) % entries.length]?.focus()
@@ -68,6 +69,7 @@ export function OverflowMenu({
               <button
                 type="button"
                 role="menuitem"
+                disabled={item.disabled}
                 className={`btn--ghost${item.danger ? ' btn--danger' : ''}`}
                 onClick={() => {
                   setOpen(false)

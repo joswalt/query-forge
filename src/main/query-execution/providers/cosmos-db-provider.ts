@@ -8,8 +8,10 @@ import type {
   ExecutionId,
   QueryOptions,
   ResultChunk,
+  SecretRefresher,
   TestResult
 } from '@shared/types/database-provider'
+import { RefreshingTokenSource } from '../refreshing-token-source'
 import { toConnectionErrorMessage } from '../scrub-error-message'
 
 /**
@@ -36,6 +38,8 @@ export interface CosmosDatabaseLike {
 export interface CosmosFeedResponseLike {
   resources: unknown[]
   requestCharge: number
+  /** `FeedResponse.hasMoreResults` — true while a continuation token remains. */
+  hasMoreResults?: boolean
 }
 
 export interface CosmosContainerLike {
@@ -113,19 +117,22 @@ const defaultClientFactory: CosmosClientFactory = ({ requestTimeoutMs, ...option
   } as ConstructorParameters<typeof CosmosClient>[0]) as unknown as CosmosClientLike
 
 /**
- * Wraps an already-acquired Entra ID access token (ConnectionManager.
- * resolveSecret, via MsalEntraIdAuthenticator) as a static `TokenCredential`
- * — `@azure/cosmos`'s `aadCredentials` expects something `getToken()`-
- * shaped, not a bare string. Always returns the same token for this
- * client's lifetime rather than re-acquiring one: ADR 0001 hands a
- * Decrypted Secret to the Query Execution Service once per `connect()`,
- * with no mid-session refresh, the same tradeoff the Azure SQL Provider
- * makes for its own AAD access-token auth.
+ * Wraps an Entra ID access token (ConnectionManager.resolveSecret, via
+ * MsalEntraIdAuthenticator) as a `TokenCredential` — `@azure/cosmos`'s
+ * `aadCredentials` expects something `getToken()`-shaped, not a bare string.
+ * With a `refreshSecret`, the token is renewed through main shortly before it
+ * expires (docs/adr/0002-refresh-entra-tokens-over-the-message-port.md) and
+ * the real expiry is reported so the SDK's own token cache refreshes on time;
+ * without one (Test Connection's throwaway client) the single token is reused.
  */
-function staticTokenCredential(token: string): TokenCredentialLike {
+function tokenCredential(
+  token: string,
+  refreshSecret: SecretRefresher | undefined
+): TokenCredentialLike {
+  const source = new RefreshingTokenSource(token, refreshSecret)
   return {
     async getToken() {
-      return { token, expiresOnTimestamp: Date.now() + 60 * 60 * 1000 }
+      return source.getToken()
     }
   }
 }
@@ -139,12 +146,13 @@ function staticTokenCredential(token: string): TokenCredentialLike {
  */
 function toCosmosClientOptions(
   config: CosmosConnectionConfig,
-  secret: DecryptedSecret | undefined
+  secret: DecryptedSecret | undefined,
+  refreshSecret?: SecretRefresher
 ): CosmosClientFactoryOptions {
   if (config.authMode === 'entra-id') {
     return {
       endpoint: config.endpoint,
-      aadCredentials: staticTokenCredential(secret ?? ''),
+      aadCredentials: tokenCredential(secret ?? '', refreshSecret),
       requestTimeoutMs: config.connectionTimeoutMs
     }
   }
@@ -167,14 +175,18 @@ export class CosmosDbProvider implements DatabaseProvider {
 
   constructor(private readonly clientFactory: CosmosClientFactory = defaultClientFactory) {}
 
-  async connect(profile: ConnectionProfile, secret: DecryptedSecret | undefined): Promise<void> {
+  async connect(
+    profile: ConnectionProfile,
+    secret: DecryptedSecret | undefined,
+    refreshSecret?: SecretRefresher
+  ): Promise<void> {
     const config = requireCosmosConfig(profile)
     // CosmosClient's constructor performs no network I/O — connect() is
     // lazy by design (unlike Azure SQL's eager pool.connect()). Because of
     // that laziness, an expired/invalid Entra ID token isn't discovered
     // here; it surfaces as a toConnectionErrorMessage-rewritten failure
     // from the first real call (executeQuery/getMetadata) instead.
-    this.client = this.clientFactory(toCosmosClientOptions(config, secret))
+    this.client = this.clientFactory(toCosmosClientOptions(config, secret, refreshSecret))
     this.config = config
   }
 
@@ -226,8 +238,29 @@ export class CosmosDbProvider implements DatabaseProvider {
         .query(query, { maxItemCount: DEFAULT_PAGE_SIZE, abortSignal: controller.signal })
         .getAsyncIterator()
 
+      const maxRows = options.maxRows
+      let returned = 0
       for await (const page of iterator) {
-        yield { rows: page.resources, meta: { ru: page.requestCharge } }
+        const remaining = maxRows === undefined ? Infinity : maxRows - returned
+        const rows =
+          page.resources.length > remaining ? page.resources.slice(0, remaining) : page.resources
+        returned += rows.length
+
+        const capped = maxRows !== undefined && returned >= maxRows
+        // Truncated only if rows were actually left behind: this page was
+        // sliced, or the server still holds a continuation. A query with
+        // exactly `maxRows` results is therefore not flagged.
+        const truncated = capped && (rows.length < page.resources.length || !!page.hasMoreResults)
+        yield {
+          rows,
+          meta: { ru: page.requestCharge, ...(truncated ? { truncated: true } : {}) }
+        }
+
+        // Leaving the loop calls the SDK iterator's `return()`; it fetches
+        // one page per `next()`, so nothing further is requested or charged.
+        // Deliberately no `controller.abort()`: with nothing in flight it
+        // buys nothing, and an abort can reject an SDK promise nobody awaits.
+        if (capped) break
       }
     } finally {
       if (options.executionId) this.abortControllers.delete(options.executionId)

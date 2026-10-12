@@ -13,7 +13,7 @@ The `safeStorage`-encrypted form of a credential (SQL password, Cosmos account k
 _Avoid_: Secret, Credential (both too ambiguous about encryption state — always say which state you mean)
 
 **Decrypted Secret**:
-The plaintext form of a credential, produced by decrypting a Secret Ciphertext in main at connect-time. Exists only transiently: handed once to the Query Execution Service over the main↔utility `MessagePort` and never persisted or re-transmitted beyond that. Never logged, never written to disk, never passed to the renderer.
+The plaintext form of a credential, produced by decrypting a Secret Ciphertext in main at connect-time. Exists only transiently: handed once to the Query Execution Service over the main↔utility `MessagePort` and never persisted or re-transmitted beyond that — with one exception: an Entra ID / service principal *access token* is renewed in main and sent again when the Query Execution Service asks (ADR 0002). Never logged, never written to disk, never passed to the renderer.
 _Avoid_: Secret (ambiguous — see Secret Ciphertext)
 
 **Connection Manager**:
@@ -37,8 +37,16 @@ An opaque identifier the Query Execution Service assigns to one in-flight `execu
 _Avoid_: Query ID, Request ID
 
 **Result Chunk**:
-One unit of a streamed/paginated query result returned by `executeQuery`'s `AsyncIterable`. Carries rows plus an optional provider-specific `meta` field (e.g. Cosmos's RU charge) that the UI may display but must not depend on existing.
+One unit of a streamed/paginated query result returned by `executeQuery`'s `AsyncIterable`. Carries rows, the Result Set they belong to, plus an optional provider-specific `meta` field (e.g. Cosmos's RU charge) that the UI may display but must not depend on existing.
 _Avoid_: Page, Batch (both imply a pagination strategy uniform across providers, which §7 explicitly rules out)
+
+**Row Limit**:
+Cosmos DB only. `QueryOptions.maxRows` — the editor's Run sets it from the per-tab Row Limit dropdown (100 / 1,000 / 10,000 / 50,000 = `MAX_DISPLAY_ROWS`, the default / All rows) so a query like `SELECT * FROM c` stops paging (and stops spending request units) once that many rows are returned; the last Result Chunk then carries `meta.truncated` and the true row total is unknown (shown as "50,000+"). "All rows" omits it. Rows are fetched in SDK pages of 100, so a limit below 100 still reads one full page. "Export all matching rows" never sets it. The Azure SQL Provider ignores it.
+_Avoid_: Page size (that is the SDK's `maxItemCount`, a fetch granularity, not a stop condition), Cap (the renderer's display-memory bound is a separate concern)
+
+**Result Set**:
+The rows produced by one row-returning statement of a query submission. A multi-statement SQL script yields several, in statement order; a single statement (and every Cosmos DB query) yields one. Result Chunks carry a zero-based `resultSet` index (omitted means 0) and never span two Result Sets; a zero-row chunk announces a statement that returned nothing. The results view shows one tab per Result Set.
+_Avoid_: Recordset (mssql's name for it — a driver term), Statement Result
 
 **Database Metadata**:
 The shared, provider-agnostic shape `getMetadata()` returns — tables/columns for Azure SQL, containers/partition keys for Cosmos DB — consumed by the Object Explorer (§4.2). Distinct from editor-side autocomplete, which is out of scope for MVP (ticket 04).

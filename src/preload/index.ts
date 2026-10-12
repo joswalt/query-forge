@@ -182,6 +182,7 @@ const exportApi = {
     query: string,
     options: QueryOptions | undefined,
     format: ExportFormat,
+    resultSet: number,
     destinationPath: string,
     handlers: ExportAllStreamHandlers
   ): Promise<ExportHandle> => {
@@ -209,7 +210,15 @@ const exportApi = {
     ipcRenderer.on(progressChannel, onProgress)
     ipcRenderer.on(doneChannel, onDone)
     ipcRenderer.on(errorChannel, onError)
-    ipcRenderer.send('export:all', { profileId, executionId, query, options, format, destinationPath })
+    ipcRenderer.send('export:all', {
+      profileId,
+      executionId,
+      query,
+      options,
+      format,
+      resultSet,
+      destinationPath
+    })
 
     return {
       executionId,

@@ -112,6 +112,13 @@ app.whenReady().then(() => {
       if (!window.isDestroyed()) window.webContents.send('query-execution:service-exited')
     }
   })
+  // ADR 0002: a connected Entra ID / service principal profile's access token
+  // is renewed in main on the utilityProcess's request.
+  queryExecutionClient.onSecretRefreshRequested(async (profileId) => {
+    const profile = connectionManager.get(profileId)
+    if (!profile) throw new Error('This connection no longer exists — reconnect.')
+    return connectionManager.refreshSecret(profile)
+  })
   registerConnectionIpcHandlers(connectionManager)
   registerQueryExecutionIpcHandlers(
     connectionManager,

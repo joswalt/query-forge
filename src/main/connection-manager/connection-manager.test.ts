@@ -258,6 +258,67 @@ describe('ConnectionManager', () => {
       })
     })
 
+    describe('refreshSecret (mid-session renewal)', () => {
+      const entraConfig = {
+        ...sampleConfig,
+        authMode: 'entra-id' as const,
+        entraId: { clientId: 'c', tenantId: 't', redirectUri: 'http://localhost:1234' }
+      }
+
+      it('renews an entra-id token silently — never interactively', async () => {
+        const authenticator: EntraIdAuthenticator = { acquireToken: vi.fn(async () => 'renewed') }
+        const m = new ConnectionManager(
+          new ConnectionProfileRepository(createTestDb()),
+          secretStore,
+          authenticator
+        )
+        const profile = m.create({ name: 'Entra', config: entraConfig })
+
+        await expect(m.refreshSecret(profile)).resolves.toBe('renewed')
+        expect(authenticator.acquireToken).toHaveBeenCalledWith(
+          entraConfig.entraId,
+          expect.any(Array),
+          profile.id,
+          { allowInteractive: false }
+        )
+      })
+
+      it('re-runs the client-credentials exchange for a service principal', async () => {
+        const spAuthenticator: ServicePrincipalAuthenticator = {
+          acquireToken: vi.fn(async () => 'sp-renewed')
+        }
+        const m = new ConnectionManager(
+          new ConnectionProfileRepository(createTestDb()),
+          secretStore,
+          undefined,
+          undefined,
+          spAuthenticator
+        )
+        const profile = m.create({
+          name: 'SP',
+          config: {
+            ...sampleConfig,
+            authMode: 'service-principal',
+            servicePrincipal: { clientId: 'sp-client', tenantId: 'sp-tenant' }
+          },
+          secret: 'client-secret'
+        })
+
+        await expect(m.refreshSecret(profile)).resolves.toBe('sp-renewed')
+        expect(spAuthenticator.acquireToken).toHaveBeenCalledWith(
+          { clientId: 'sp-client', tenantId: 'sp-tenant' },
+          'client-secret',
+          expect.any(Array)
+        )
+      })
+
+      it('rejects for an auth mode that has no renewable token', async () => {
+        const profile = manager.create({ name: 'Orders', config: sampleConfig, secret: 'hunter2' })
+
+        await expect(manager.refreshSecret(profile)).rejects.toThrow(/no renewable/)
+      })
+    })
+
     it('deletes the MSAL token cache row when its connection profile is deleted', async () => {
       const tokenCacheRepository = { get: vi.fn(), set: vi.fn(), delete: vi.fn() }
       const managerWithCache = new ConnectionManager(

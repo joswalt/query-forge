@@ -8,8 +8,10 @@ import type {
   ExecutionId,
   QueryOptions,
   ResultChunk,
+  SecretRefresher,
   TestResult
 } from '@shared/types/database-provider'
+import { RefreshingTokenSource, type AccessToken } from '../refreshing-token-source'
 import { AsyncQueue } from '../async-queue'
 import { toConnectionErrorMessage, toExecutionErrorMessage } from '../scrub-error-message'
 
@@ -26,6 +28,8 @@ export interface SqlRequestLike {
   stream: boolean
   query(command: string): Promise<SqlQueryResult>
   cancel(): void
+  /** Fires once per row-returning statement, before that statement's rows. */
+  on(event: 'recordset', listener: () => void): unknown
   on(event: 'row', listener: (row: Record<string, unknown>) => void): unknown
   on(event: 'error', listener: (err: unknown) => void): unknown
   on(event: 'done', listener: () => void): unknown
@@ -50,10 +54,15 @@ export interface SqlConfig {
    * access-token auth block (toSqlConfig's doc has the full rationale for
    * why `user`/`password` are omitted, not merely left undefined, in that
    * branch). */
-  authentication?: {
-    type: 'azure-active-directory-access-token'
-    options: { token: string }
-  }
+  authentication?:
+    | { type: 'azure-active-directory-access-token'; options: { token: string } }
+    // tedious asks the credential for a token on every new login, so a
+    // pool that reconnects after the first token expired gets a fresh one
+    // (docs/adr/0002-refresh-entra-tokens-over-the-message-port.md).
+    | {
+        type: 'token-credential'
+        options: { credential: { getToken(): Promise<AccessToken> } }
+      }
   connectionTimeout?: number
   /** Query timeout in ms (user story 36). mssql's own default is 15s, which
    * would silently kill any longer query. */
@@ -85,11 +94,15 @@ export class AzureSqlProvider implements DatabaseProvider {
 
   constructor(private readonly poolFactory: SqlPoolFactory = defaultPoolFactory) {}
 
-  async connect(profile: ConnectionProfile, secret: DecryptedSecret | undefined): Promise<void> {
+  async connect(
+    profile: ConnectionProfile,
+    secret: DecryptedSecret | undefined,
+    refreshSecret?: SecretRefresher
+  ): Promise<void> {
     const config = requireAzureSqlConfig(profile)
     // mssql's pool.connect() is eager — it performs real network I/O,
     // unlike Cosmos's lazy client construction.
-    const pool = this.poolFactory(toSqlConfig(config, secret))
+    const pool = this.poolFactory(toSqlConfig(config, secret, refreshSecret))
     // A dropped socket makes the pool emit 'error'; with no listener Node
     // throws it as an uncaught exception, which would kill the shared
     // utilityProcess (every profile, both providers). Swallow it here — the
@@ -144,21 +157,36 @@ export class AzureSqlProvider implements DatabaseProvider {
     request.stream = true
     if (options.executionId) this.activeRequests.set(options.executionId, request)
 
-    const queue = new AsyncQueue<unknown[]>()
+    const queue = new AsyncQueue<ResultChunk>()
     let batch: Record<string, unknown>[] = []
+    // mssql announces each row-returning statement with a 'recordset' event
+    // (columns, before its rows). Indexing by that keeps a multi-statement
+    // script's Result Sets apart (user story 61); -1 until the first one, so
+    // a driver that never announces one still yields set 0.
+    let resultSet = -1
+    const flush = (): void => {
+      if (batch.length === 0) return
+      queue.push({ rows: batch, resultSet: Math.max(resultSet, 0) })
+      batch = []
+    }
 
+    request.on('recordset', () => {
+      // A chunk must not span two Result Sets, so close out the previous
+      // one's partial batch first. The empty chunk makes a statement that
+      // returns no rows still show up as a (zero-row) Result Set.
+      flush()
+      resultSet += 1
+      queue.push({ rows: [], resultSet })
+    })
     request.on('row', (row) => {
       batch.push(row)
-      if (batch.length >= CHUNK_SIZE) {
-        queue.push(batch)
-        batch = []
-      }
+      if (batch.length >= CHUNK_SIZE) flush()
     })
     request.on('error', (err) => {
       queue.fail(new Error(toExecutionErrorMessage(err)))
     })
     request.on('done', () => {
-      if (batch.length > 0) queue.push(batch)
+      flush()
       queue.close()
     })
 
@@ -168,8 +196,8 @@ export class AzureSqlProvider implements DatabaseProvider {
     void request.query(query).catch(() => {})
 
     try {
-      for await (const rows of queue) {
-        yield { rows }
+      for await (const chunk of queue) {
+        yield chunk
       }
     } finally {
       if (options.executionId) this.activeRequests.delete(options.executionId)
@@ -290,7 +318,11 @@ function requireAzureSqlConfig(profile: ConnectionProfile): AzureSqlConnectionCo
  * and sending a stray `password` field alongside `authentication` risks a
  * tedious/mssql version treating it as a second, conflicting auth method.
  */
-function toSqlConfig(config: AzureSqlConnectionConfig, secret: DecryptedSecret | undefined): SqlConfig {
+function toSqlConfig(
+  config: AzureSqlConnectionConfig,
+  secret: DecryptedSecret | undefined,
+  refreshSecret?: SecretRefresher
+): SqlConfig {
   const base = {
     server: config.server,
     port: config.port,
@@ -306,6 +338,19 @@ function toSqlConfig(config: AzureSqlConnectionConfig, secret: DecryptedSecret |
   // Both Entra modes hand over an access token minted in main (interactive
   // user sign-in, or a service principal's client-credentials exchange).
   if (config.authMode === 'entra-id' || config.authMode === 'service-principal') {
+    // A live connection gets a token-credential so each pool login can use a
+    // renewed token. Without a refresher (Test Connection's throwaway pool)
+    // the single token is passed straight through, as before.
+    if (refreshSecret) {
+      const source = new RefreshingTokenSource(secret, refreshSecret)
+      return {
+        ...base,
+        authentication: {
+          type: 'token-credential',
+          options: { credential: { getToken: () => source.getToken() } }
+        }
+      }
+    }
     return {
       ...base,
       authentication: {

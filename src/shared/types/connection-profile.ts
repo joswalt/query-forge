@@ -55,6 +55,12 @@ export interface AzureSqlConnectionConfig {
   connectionTimeoutMs?: number
 }
 
+/** Which tier a Connection Profile points at. Drives the environment marker so
+ * a prod connection stays recognisable when the sidebar is collapsed. */
+export type ConnectionEnvironment = 'prod' | 'stg' | 'dev'
+
+export const CONNECTION_ENVIRONMENTS: readonly ConnectionEnvironment[] = ['prod', 'stg', 'dev']
+
 export type ConnectionConfig = CosmosConnectionConfig | AzureSqlConnectionConfig
 
 /**
@@ -71,6 +77,8 @@ export interface ConnectionProfile {
   hasSecret: boolean
   /** Optional folder/group label (user story 9). */
   groupName?: string
+  /** Optional tier label; unset on profiles created before it existed. */
+  environment?: ConnectionEnvironment
   /** ISO timestamp of the last successful connect (user story 11). */
   lastConnectedAt?: string
   createdAt: string
@@ -89,6 +97,7 @@ export interface CreateConnectionProfileRequest {
   readOnly?: boolean
   config: ConnectionConfig
   groupName?: string
+  environment?: ConnectionEnvironment
   secret?: string
 }
 
@@ -98,6 +107,8 @@ export interface UpdateConnectionProfileRequest {
   config?: ConnectionConfig
   /** `null` clears the group; `undefined` leaves it untouched. */
   groupName?: string | null
+  /** `null` clears the environment; `undefined` leaves it untouched. */
+  environment?: ConnectionEnvironment | null
   /** `null` clears the stored secret; `undefined` (or omitted) leaves it untouched. */
   secret?: string | null
 }

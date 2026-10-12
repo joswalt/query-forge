@@ -8,6 +8,16 @@ import type { ConnectionProfile } from './connection-profile'
 export type DecryptedSecret = string
 
 /**
+ * Asks main for a fresh Decrypted Secret for the profile a Provider is
+ * connected with (docs/adr/0002-refresh-entra-tokens-over-the-message-port.md).
+ * Only supplied for token-based auth modes (Entra ID, service principal),
+ * whose secret is a short-lived access token; a Provider calls it when a
+ * mid-session login needs a token newer than the one handed over at
+ * `connect()`. Rejects when main can't renew it without user interaction.
+ */
+export type SecretRefresher = () => Promise<DecryptedSecret>
+
+/**
  * Opaque identifier for one in-flight `executeQuery` call (GLOSSARY.md:
  * "Execution ID"), used to address it for `cancel()`.
  */
@@ -25,8 +35,19 @@ export interface TestResult {
  */
 export interface ResultChunk {
   rows: unknown[]
+  /**
+   * Zero-based index of the Result Set these rows belong to (GLOSSARY.md:
+   * "Result Set") — one per row-returning statement of a multi-statement
+   * submission. Omitted means 0, so single-result Providers (Cosmos DB)
+   * never need to set it. A chunk never spans two Result Sets, and a chunk
+   * with no rows announces a Result Set that exists but is (so far) empty.
+   */
+  resultSet?: number
   meta?: {
     ru?: number
+    /** Cosmos DB only: set on the final chunk of a run that stopped at
+     * `QueryOptions.maxRows` with more rows still available server-side. */
+    truncated?: boolean
   }
 }
 
@@ -62,6 +83,15 @@ export interface QueryOptions {
   database?: string
   container?: string
   /**
+   * Cosmos DB only: stop fetching once this many rows have been returned,
+   * so a query like `SELECT * FROM c` doesn't burn RUs paging a huge
+   * container to the end. The last chunk carries `meta.truncated` when rows
+   * were left behind. Omitted means run to completion. Ignored by the Azure
+   * SQL Provider. Callers that must be uncapped (Export Service's "export
+   * all matching rows") simply leave it unset.
+   */
+  maxRows?: number
+  /**
    * Assigned by the caller (the Query Execution Service) before invoking
    * `executeQuery`, not by the Database Provider. The locked interface
    * (spec.md) leaves how a caller obtains an Execution ID for `cancel()`
@@ -84,7 +114,11 @@ export interface QueryOptions {
  * is client-side abandonment only (RU charges already incurred stand).
  */
 export interface DatabaseProvider {
-  connect(profile: ConnectionProfile, secret: DecryptedSecret | undefined): Promise<void>
+  connect(
+    profile: ConnectionProfile,
+    secret: DecryptedSecret | undefined,
+    refreshSecret?: SecretRefresher
+  ): Promise<void>
   testConnection(
     profile: ConnectionProfile,
     secret: DecryptedSecret | undefined

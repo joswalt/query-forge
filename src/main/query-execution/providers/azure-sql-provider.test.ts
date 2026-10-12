@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { AzureSqlConnectionConfig, ConnectionProfile } from '@shared/types/connection-profile'
 import { AzureSqlProvider } from './azure-sql-provider'
 import type { SqlConfig, SqlPoolFactory, SqlPoolLike, SqlRequestLike } from './azure-sql-provider'
@@ -40,6 +40,7 @@ class FakeSqlRequest implements SqlRequestLike {
     this.emit('done')
   }
 
+  on(event: 'recordset', listener: () => void): this
   on(event: 'row', listener: (row: Record<string, unknown>) => void): this
   on(event: 'error', listener: (err: unknown) => void): this
   on(event: 'done', listener: () => void): this
@@ -197,6 +198,43 @@ describe('AzureSqlProvider', () => {
       expect(capturedConfig).not.toHaveProperty('password')
     })
 
+    it('uses a token-credential for a live entra-id connection so each pool login can renew the token', async () => {
+      let capturedConfig: SqlConfig | undefined
+      const provider = new AzureSqlProvider((config) => {
+        capturedConfig = config
+        return new FakeSqlPool()
+      })
+      const refresh = vi.fn(async () => 'renewed-token')
+      // An expired JWT, so the very next login must renew.
+      const expired = `h.${Buffer.from(JSON.stringify({ exp: 1 })).toString('base64url')}.s`
+
+      await provider.connect(makeProfile({ ...baseConfig, authMode: 'entra-id' }), expired, refresh)
+
+      const authentication = capturedConfig?.authentication
+      expect(authentication?.type).toBe('token-credential')
+      if (authentication?.type !== 'token-credential') throw new Error('unreachable')
+      expect((await authentication.options.credential.getToken()).token).toBe('renewed-token')
+      expect(refresh).toHaveBeenCalledTimes(1)
+      expect(capturedConfig).not.toHaveProperty('password')
+    })
+
+    it('reuses the token from connect() while it is still fresh', async () => {
+      let capturedConfig: SqlConfig | undefined
+      const provider = new AzureSqlProvider((config) => {
+        capturedConfig = config
+        return new FakeSqlPool()
+      })
+      const refresh = vi.fn(async () => 'renewed-token')
+      const fresh = `h.${Buffer.from(JSON.stringify({ exp: Date.now() / 1000 + 3600 })).toString('base64url')}.s`
+
+      await provider.connect(makeProfile({ ...baseConfig, authMode: 'service-principal' }), fresh, refresh)
+
+      const authentication = capturedConfig?.authentication
+      if (authentication?.type !== 'token-credential') throw new Error('expected token-credential')
+      expect((await authentication.options.credential.getToken()).token).toBe(fresh)
+      expect(refresh).not.toHaveBeenCalled()
+    })
+
     it('maps profile config + secret into mssql config shape', async () => {
       const pool = new FakeSqlPool()
       let capturedConfig: SqlConfig | undefined
@@ -247,7 +285,73 @@ describe('AzureSqlProvider', () => {
         result = await iterator.next()
       }
 
-      expect(chunks).toEqual([{ rows: [{ id: 1 }, { id: 2 }] }])
+      expect(chunks).toEqual([{ rows: [{ id: 1 }, { id: 2 }], resultSet: 0 }])
+    })
+
+    it('keeps each statement of a multi-statement script in its own Result Set (user story 61)', async () => {
+      const pool = new FakeSqlPool()
+      const request = new FakeSqlRequest()
+      pool.nextRequest = () => request
+      const provider = new AzureSqlProvider(makeFactory(pool))
+      await provider.connect(makeProfile(baseConfig), 'hunter2')
+
+      const iterator = provider.executeQuery('SELECT 1; SELECT 2 WHERE 1=0; SELECT 3')[
+        Symbol.asyncIterator
+      ]()
+      const firstChunk = iterator.next()
+      request.emit('recordset')
+      request.emit('row', { a: 1 })
+      request.emit('recordset') // second statement returns no rows
+      request.emit('recordset')
+      request.emit('row', { c: 3 })
+      request.emit('row', { c: 4 })
+      request.emit('done')
+
+      const chunks = []
+      let result = await firstChunk
+      while (!result.done) {
+        chunks.push(result.value)
+        result = await iterator.next()
+      }
+
+      expect(chunks).toEqual([
+        { rows: [], resultSet: 0 },
+        { rows: [{ a: 1 }], resultSet: 0 },
+        { rows: [], resultSet: 1 },
+        { rows: [], resultSet: 2 },
+        { rows: [{ c: 3 }, { c: 4 }], resultSet: 2 }
+      ])
+    })
+
+    it('never puts rows from two Result Sets in one chunk, even when a batch is partly full', async () => {
+      const pool = new FakeSqlPool()
+      const request = new FakeSqlRequest()
+      pool.nextRequest = () => request
+      const provider = new AzureSqlProvider(makeFactory(pool))
+      await provider.connect(makeProfile(baseConfig), 'hunter2')
+
+      const iterator = provider.executeQuery('SELECT 1; SELECT 2')[Symbol.asyncIterator]()
+      const firstChunk = iterator.next()
+      request.emit('recordset')
+      for (let i = 0; i < 501; i++) request.emit('row', { i })
+      request.emit('recordset')
+      request.emit('row', { j: 1 })
+      request.emit('done')
+
+      const chunks: Array<{ rows: unknown[]; resultSet?: number }> = []
+      let result = await firstChunk
+      while (!result.done) {
+        chunks.push(result.value)
+        result = await iterator.next()
+      }
+
+      expect(chunks.map((c) => [c.resultSet, c.rows.length])).toEqual([
+        [0, 0],
+        [0, 500],
+        [0, 1],
+        [1, 0],
+        [1, 1]
+      ])
     })
 
     it('surfaces a scrubbed error from the error event', async () => {

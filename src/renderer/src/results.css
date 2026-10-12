@@ -1,6 +1,10 @@
 /* Results: status bar, export toolbar, grid, JSON tree, cell inspector. */
 
 .query-results {
+  /* One measure for every sentence-length note in the results pane (the
+   * "stopped at row limit" notice and the JSON view's truncation note), so
+   * their right edges line up when they stack. */
+  --qf-note-measure: 100ch;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -32,6 +36,16 @@
 
 /* In-flight work is the second place the heat shows: the brand ring sweeps
    along the bottom edge of the status bar until the run settles. */
+/* Measure comes from `--qf-note-measure` on `.query-results`. `.empty` is
+ * capped at 34ch for the idle placeholder, which is why this doesn't reuse it. */
+.query-results__notice {
+  margin: 0;
+  color: var(--qf-muted);
+  font-size: 12.5px;
+  max-width: var(--qf-note-measure);
+  text-wrap: pretty;
+}
+
 .query-results__status[data-status='running']::after {
   content: '';
   position: absolute;
@@ -82,6 +96,12 @@
   border: 1px solid var(--qf-border);
   border-radius: 9px;
   background: var(--qf-bg);
+}
+
+.segmented--sets {
+  flex-wrap: wrap;
+  align-self: flex-start;
+  max-width: 100%;
 }
 
 .segmented button {
@@ -302,7 +322,8 @@
 .results-json-view > p {
   color: var(--qf-muted);
   font-size: 12.5px;
-  max-width: 76ch;
+  max-width: var(--qf-note-measure);
+  text-wrap: pretty;
 }
 
 .json-tree {

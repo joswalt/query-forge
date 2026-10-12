@@ -51,6 +51,7 @@ export class ConnectionManager {
       readOnly: request.readOnly ?? false,
       config: request.config,
       groupName: request.groupName,
+      environment: request.environment,
       secretCiphertext:
         request.secret !== undefined ? this.secretStore.encrypt(request.secret) : undefined
     }
@@ -70,6 +71,7 @@ export class ConnectionManager {
       readOnly: request.readOnly,
       config: request.config,
       groupName: request.groupName,
+      environment: request.environment,
       secretCiphertext:
         request.secret === null
           ? null
@@ -144,6 +146,29 @@ export class ConnectionManager {
       profile.config.entraId,
       scopesForDatabaseKind(profile.config.kind),
       profile.id
+    )
+  }
+
+  /**
+   * Renews the access token of a *connected* Entra ID / service principal
+   * profile when the Query Execution Service asks for one mid-session
+   * (docs/adr/0002-...). Silent only: a service principal re-runs its
+   * client-credentials exchange, an interactive sign-in uses its cached
+   * refresh token — and if that no longer works this rejects rather than
+   * opening a browser behind the user's back, leaving "reconnect" as the path.
+   */
+  async refreshSecret(profile: ConnectionProfile): Promise<string> {
+    if (profile.config.authMode === 'service-principal') {
+      return this.resolveServicePrincipalToken(profile, undefined)
+    }
+    if (!isEntraIdAuthMode(profile.config) || !profile.config.entraId || !this.authenticator) {
+      throw new Error(`Connection "${profile.name}" has no renewable access token`)
+    }
+    return this.authenticator.acquireToken(
+      profile.config.entraId,
+      scopesForDatabaseKind(profile.config.kind),
+      profile.id,
+      { allowInteractive: false }
     )
   }
 

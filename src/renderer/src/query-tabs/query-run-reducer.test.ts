@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { initialQueryRunState, MAX_DISPLAY_ROWS, queryRunReducer } from './query-run-reducer'
+import {
+  initialQueryRunState,
+  MAX_DISPLAY_ROWS,
+  queryRunReducer,
+  retainedRowCount
+} from './query-run-reducer'
 
 describe('queryRunReducer', () => {
   it('starts a fresh run, clearing any previous result', () => {
@@ -12,9 +17,10 @@ describe('queryRunReducer', () => {
 
     expect(next).toEqual({
       status: 'running',
-      rows: [],
+      resultSets: [],
       rowCount: 0,
       ruTotal: undefined,
+      stoppedAtRowLimit: false,
       startedAt: 100,
       finishedAt: undefined,
       errorMessage: undefined
@@ -32,7 +38,9 @@ describe('queryRunReducer', () => {
       chunk: { rows: [{ a: 3 }] }
     })
 
-    expect(afterSecond.rows).toEqual([{ a: 1 }, { a: 2 }, { a: 3 }])
+    expect(afterSecond.resultSets).toEqual([
+      { rows: [{ a: 1 }, { a: 2 }, { a: 3 }], rowCount: 3 }
+    ])
     expect(afterSecond.rowCount).toBe(3)
   })
 
@@ -55,19 +63,76 @@ describe('queryRunReducer', () => {
     expect(sqlChunkOnly.ruTotal).toBeUndefined()
   })
 
+  it('flags stoppedAtRowLimit when a chunk reports truncated, and clears it on the next run', () => {
+    const afterStart = queryRunReducer(initialQueryRunState, { type: 'started', startedAt: 0 })
+    expect(afterStart.stoppedAtRowLimit).toBe(false)
+
+    const afterTruncated = queryRunReducer(afterStart, {
+      type: 'chunk',
+      chunk: { rows: [{ a: 1 }], meta: { ru: 1, truncated: true } }
+    })
+    expect(afterTruncated.stoppedAtRowLimit).toBe(true)
+
+    const restarted = queryRunReducer(afterTruncated, { type: 'started', startedAt: 5 })
+    expect(restarted.stoppedAtRowLimit).toBe(false)
+  })
+
   it('caps displayed rows at MAX_DISPLAY_ROWS while rowCount keeps the true total', () => {
     const afterStart = queryRunReducer(initialQueryRunState, { type: 'started', startedAt: 0 })
     const bigChunk = { rows: Array.from({ length: MAX_DISPLAY_ROWS + 50 }, (_, i) => ({ i })) }
 
     const next = queryRunReducer(afterStart, { type: 'chunk', chunk: bigChunk })
 
-    expect(next.rows).toHaveLength(MAX_DISPLAY_ROWS)
+    expect(next.resultSets[0].rows).toHaveLength(MAX_DISPLAY_ROWS)
     expect(next.rowCount).toBe(MAX_DISPLAY_ROWS + 50)
 
     // Further chunks stop growing `rows` but keep counting.
     const afterMore = queryRunReducer(next, { type: 'chunk', chunk: { rows: [{ i: 'extra' }] } })
-    expect(afterMore.rows).toHaveLength(MAX_DISPLAY_ROWS)
+    expect(afterMore.resultSets[0].rows).toHaveLength(MAX_DISPLAY_ROWS)
     expect(afterMore.rowCount).toBe(MAX_DISPLAY_ROWS + 51)
+  })
+
+  describe('multiple Result Sets (user story 61)', () => {
+    const started = queryRunReducer(initialQueryRunState, { type: 'started', startedAt: 0 })
+
+    it('routes chunks to their Result Set, treating a missing index as set 0', () => {
+      let state = started
+      for (const chunk of [
+        { rows: [{ a: 1 }] },
+        { rows: [{ b: 1 }], resultSet: 1 },
+        { rows: [{ a: 2 }], resultSet: 0 }
+      ]) {
+        state = queryRunReducer(state, { type: 'chunk', chunk })
+      }
+
+      expect(state.resultSets).toEqual([
+        { rows: [{ a: 1 }, { a: 2 }], rowCount: 2 },
+        { rows: [{ b: 1 }], rowCount: 1 }
+      ])
+      expect(state.rowCount).toBe(3)
+    })
+
+    it('keeps an empty Result Set that was announced with a zero-row chunk', () => {
+      const state = queryRunReducer(started, { type: 'chunk', chunk: { rows: [], resultSet: 1 } })
+
+      expect(state.resultSets).toEqual([
+        { rows: [], rowCount: 0 },
+        { rows: [], rowCount: 0 }
+      ])
+    })
+
+    it('shares the MAX_DISPLAY_ROWS cap across sets while each set keeps its true rowCount', () => {
+      const big = { rows: Array.from({ length: MAX_DISPLAY_ROWS - 1 }, (_, i) => ({ i })) }
+      let state = queryRunReducer(started, { type: 'chunk', chunk: big })
+      state = queryRunReducer(state, {
+        type: 'chunk',
+        chunk: { rows: [{ k: 1 }, { k: 2 }, { k: 3 }], resultSet: 1 }
+      })
+
+      expect(state.resultSets[1].rows).toEqual([{ k: 1 }])
+      expect(state.resultSets[1].rowCount).toBe(3)
+      expect(retainedRowCount(state)).toBe(MAX_DISPLAY_ROWS)
+    })
   })
 
   it('transitions to success on done, preserving accumulated rows', () => {
@@ -78,7 +143,7 @@ describe('queryRunReducer', () => {
 
     expect(done.status).toBe('success')
     expect(done.finishedAt).toBe(42)
-    expect(done.rows).toEqual([{ a: 1 }])
+    expect(done.resultSets[0].rows).toEqual([{ a: 1 }])
   })
 
   it('reports a genuine failure with its error message (user story 30, 37)', () => {

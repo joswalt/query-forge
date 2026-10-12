@@ -105,6 +105,23 @@ describe('ConnectionProfileRepository', () => {
     expect(repository.update(created.id, { groupName: null }).groupName).toBeUndefined()
   })
 
+  it('stores, updates, and clears an environment (unset on legacy profiles)', () => {
+    const legacy = repository.create({ name: 'Orders', readOnly: false, config: sampleConfig })
+    expect(legacy.environment).toBeUndefined()
+
+    const created = repository.create({
+      name: 'Orders (prod)',
+      readOnly: false,
+      config: sampleConfig,
+      environment: 'prod'
+    })
+    expect(created.environment).toBe('prod')
+
+    expect(repository.update(created.id, { name: 'Orders 2' }).environment).toBe('prod')
+    expect(repository.update(created.id, { environment: 'stg' }).environment).toBe('stg')
+    expect(repository.update(created.id, { environment: null }).environment).toBeUndefined()
+  })
+
   it('markConnected records lastConnectedAt without touching updatedAt', () => {
     const created = repository.create({ name: 'Orders', readOnly: false, config: sampleConfig })
     expect(created.lastConnectedAt).toBeUndefined()

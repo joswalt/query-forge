@@ -56,6 +56,30 @@ describe('ExportService.exportAll', () => {
     expect(progress).toEqual([1, 2])
   })
 
+  it('writes only the selected Result Set of a multi-statement script (user story 61)', async () => {
+    const chunks: ResultChunk[] = [
+      { rows: [], resultSet: 0 },
+      { rows: [{ a: 1 }], resultSet: 0 },
+      { rows: [{ b: 1 }, { b: 2 }], resultSet: 1 },
+      { rows: [{ b: 3 }], resultSet: 1 }
+    ]
+    const request = { profileId: 'p', executionId: 'e', query: 'q' }
+
+    const json = new RecordingExportSink()
+    const progress: number[] = []
+    await new ExportService(fakeClient(chunks)).exportAll(
+      { ...request, format: 'json', resultSet: 1 },
+      json,
+      (n) => progress.push(n)
+    )
+    expect(JSON.parse(json.toString())).toEqual([{ b: 1 }, { b: 2 }, { b: 3 }])
+    expect(progress.at(-1)).toBe(3)
+
+    const csv = new RecordingExportSink()
+    await new ExportService(fakeClient(chunks)).exportAll({ ...request, format: 'csv' }, csv)
+    expect(csv.toString()).toBe('a\n1')
+  })
+
   it('buffers rows to compute a complete CSV header across all streamed chunks', async () => {
     const chunks: ResultChunk[] = [
       { rows: [{ id: '1', name: 'a' }] },
