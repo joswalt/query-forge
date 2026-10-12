@@ -40,6 +40,10 @@ _Avoid_: Query ID, Request ID
 One unit of a streamed/paginated query result returned by `executeQuery`'s `AsyncIterable`. Carries rows, the Result Set they belong to, plus an optional provider-specific `meta` field (e.g. Cosmos's RU charge) that the UI may display but must not depend on existing.
 _Avoid_: Page, Batch (both imply a pagination strategy uniform across providers, which §7 explicitly rules out)
 
+**Row Limit**:
+Cosmos DB only. `QueryOptions.maxRows` — the editor's Run sets it from the per-tab Row Limit dropdown (100 / 1,000 / 10,000 / 50,000 = `MAX_DISPLAY_ROWS`, the default / All rows) so a query like `SELECT * FROM c` stops paging (and stops spending request units) once that many rows are returned; the last Result Chunk then carries `meta.truncated` and the true row total is unknown (shown as "50,000+"). "All rows" omits it. Rows are fetched in SDK pages of 100, so a limit below 100 still reads one full page. "Export all matching rows" never sets it. The Azure SQL Provider ignores it.
+_Avoid_: Page size (that is the SDK's `maxItemCount`, a fetch granularity, not a stop condition), Cap (the renderer's display-memory bound is a separate concern)
+
 **Result Set**:
 The rows produced by one row-returning statement of a query submission. A multi-statement SQL script yields several, in statement order; a single statement (and every Cosmos DB query) yields one. Result Chunks carry a zero-based `resultSet` index (omitted means 0) and never span two Result Sets; a zero-row chunk announces a statement that returned nothing. The results view shows one tab per Result Set.
 _Avoid_: Recordset (mssql's name for it — a driver term), Statement Result

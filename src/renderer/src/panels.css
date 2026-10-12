@@ -285,6 +285,14 @@
   gap: 6px;
 }
 
+.query-workspace__row-limit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 6px;
+  white-space: nowrap;
+}
+
 .query-editor {
   font-variant-ligatures: none;
   /* Grows with the window instead of stopping at a fixed height. */

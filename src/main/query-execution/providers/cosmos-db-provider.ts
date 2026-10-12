@@ -38,6 +38,8 @@ export interface CosmosDatabaseLike {
 export interface CosmosFeedResponseLike {
   resources: unknown[]
   requestCharge: number
+  /** `FeedResponse.hasMoreResults` — true while a continuation token remains. */
+  hasMoreResults?: boolean
 }
 
 export interface CosmosContainerLike {
@@ -236,8 +238,29 @@ export class CosmosDbProvider implements DatabaseProvider {
         .query(query, { maxItemCount: DEFAULT_PAGE_SIZE, abortSignal: controller.signal })
         .getAsyncIterator()
 
+      const maxRows = options.maxRows
+      let returned = 0
       for await (const page of iterator) {
-        yield { rows: page.resources, meta: { ru: page.requestCharge } }
+        const remaining = maxRows === undefined ? Infinity : maxRows - returned
+        const rows =
+          page.resources.length > remaining ? page.resources.slice(0, remaining) : page.resources
+        returned += rows.length
+
+        const capped = maxRows !== undefined && returned >= maxRows
+        // Truncated only if rows were actually left behind: this page was
+        // sliced, or the server still holds a continuation. A query with
+        // exactly `maxRows` results is therefore not flagged.
+        const truncated = capped && (rows.length < page.resources.length || !!page.hasMoreResults)
+        yield {
+          rows,
+          meta: { ru: page.requestCharge, ...(truncated ? { truncated: true } : {}) }
+        }
+
+        // Leaving the loop calls the SDK iterator's `return()`; it fetches
+        // one page per `next()`, so nothing further is requested or charged.
+        // Deliberately no `controller.abort()`: with nothing in flight it
+        // buys nothing, and an abort can reject an SDK promise nobody awaits.
+        if (capped) break
       }
     } finally {
       if (options.executionId) this.abortControllers.delete(options.executionId)

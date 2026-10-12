@@ -8,7 +8,11 @@ import type { ResultChunk } from '@shared/types/database-provider'
  * which removes the *rendering-cost* reason for a cap, but the renderer
  * still holds every retained row as plain JS objects in memory — the cap
  * stays for that reason. `rowCount` (per Result Set and overall) keeps
- * counting past the cap so the true total is never understated. The cap is
+ * counting past the cap so the true total is never understated — except for
+ * Cosmos DB, where the run itself is limited to this many rows by default
+ * (`QueryOptions.maxRows`, so a huge container isn't paged to the end for
+ * RUs); then `stoppedAtRowLimit` marks `rowCount` as a lower bound. The
+ * per-tab Row Limit dropdown changes (or, with "All rows", lifts) that limit. The cap is
  * shared, so in a multi-statement script a huge first Result Set can leave
  * later ones with no retained rows — their `rowCount` still shows.
  *
@@ -42,6 +46,9 @@ export interface QueryRunState {
   /** Summed Cosmos RU charge (user story 35) — stays `undefined` if no
    * chunk ever reported one (Azure SQL never does), never collapses to 0. */
   ruTotal: number | undefined
+  /** True when the Provider stopped at `QueryOptions.maxRows` with rows left
+   * behind (Cosmos DB). Then `rowCount` is a lower bound, not the true total. */
+  stoppedAtRowLimit: boolean
   startedAt: number | undefined
   finishedAt: number | undefined
   /** Set only for a genuine failure, never for a user-requested cancel. */
@@ -53,6 +60,7 @@ export const initialQueryRunState: QueryRunState = {
   resultSets: [],
   rowCount: 0,
   ruTotal: undefined,
+  stoppedAtRowLimit: false,
   startedAt: undefined,
   finishedAt: undefined,
   errorMessage: undefined
@@ -105,7 +113,8 @@ export function queryRunReducer(state: QueryRunState, action: QueryRunAction): Q
         ...state,
         resultSets,
         rowCount: state.rowCount + action.chunk.rows.length,
-        ruTotal: ru === undefined ? state.ruTotal : (state.ruTotal ?? 0) + ru
+        ruTotal: ru === undefined ? state.ruTotal : (state.ruTotal ?? 0) + ru,
+        stoppedAtRowLimit: state.stoppedAtRowLimit || action.chunk.meta?.truncated === true
       }
     }
 

@@ -45,6 +45,9 @@ export interface ResultChunk {
   resultSet?: number
   meta?: {
     ru?: number
+    /** Cosmos DB only: set on the final chunk of a run that stopped at
+     * `QueryOptions.maxRows` with more rows still available server-side. */
+    truncated?: boolean
   }
 }
 
@@ -79,6 +82,15 @@ export interface QueryOptions {
    * Ignored by the Azure SQL Provider. */
   database?: string
   container?: string
+  /**
+   * Cosmos DB only: stop fetching once this many rows have been returned,
+   * so a query like `SELECT * FROM c` doesn't burn RUs paging a huge
+   * container to the end. The last chunk carries `meta.truncated` when rows
+   * were left behind. Omitted means run to completion. Ignored by the Azure
+   * SQL Provider. Callers that must be uncapped (Export Service's "export
+   * all matching rows") simply leave it unset.
+   */
+  maxRows?: number
   /**
    * Assigned by the caller (the Query Execution Service) before invoking
    * `executeQuery`, not by the Database Provider. The locked interface

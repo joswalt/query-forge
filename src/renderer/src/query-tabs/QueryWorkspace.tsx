@@ -12,6 +12,7 @@ import { QueryResultsView } from './QueryResultsView'
 import { EditorResizer, useEditorHeight } from './EditorResizer'
 import {
   initialQueryRunState,
+  MAX_DISPLAY_ROWS,
   queryRunReducer,
   type QueryRunAction,
   type QueryRunState
@@ -31,6 +32,10 @@ interface QueryTabState {
    * currently in the editor, so the export always matches what's on
    * screen. */
   lastExecutedQuery: string | undefined
+  /** Cosmos DB Row Limit (GLOSSARY.md): how many rows to fetch before the
+   * Provider stops paging, or `'all'` to run to completion. Deliberately not
+   * persisted in drafts — every session starts back on the RU-safe default. */
+  rowLimit: RowLimit
   run: QueryRunState
   exportState: ExportState
 }
@@ -64,9 +69,27 @@ function createTab(index: number, seed?: OpenQuerySeed): QueryTabState {
     queryText: seed?.queryText ?? '',
     options: seed?.options,
     lastExecutedQuery: undefined,
+    rowLimit: DEFAULT_ROW_LIMIT,
     run: initialQueryRunState,
     exportState: initialExportState
   }
+}
+
+type RowLimit = number | 'all'
+
+/** Choices for the Cosmos Row Limit dropdown. The top numeric choice is the
+ * renderer's display bound (`MAX_DISPLAY_ROWS`) — a limit above it would fetch
+ * rows the grid then discards. `'all'` still only displays that many. */
+const ROW_LIMIT_CHOICES: RowLimit[] = [100, 1_000, 10_000, MAX_DISPLAY_ROWS, 'all']
+const DEFAULT_ROW_LIMIT: RowLimit = MAX_DISPLAY_ROWS
+
+function rowLimitLabel(limit: RowLimit): string {
+  return limit === 'all' ? 'All rows' : `${limit.toLocaleString()} rows`
+}
+
+/** Cosmos DB's `maxRows` for one Run; `'all'` leaves it unset. */
+function toMaxRows(limit: RowLimit): number | undefined {
+  return limit === 'all' ? undefined : limit
 }
 
 /** Cosmos containers a tab can target, loaded once per connection. */
@@ -279,8 +302,14 @@ export const QueryWorkspace = forwardRef<
     const handle: ExecutionHandle = { cancel: () => {}, cancelRequested: false }
     executionsRef.current.set(tabId, handle)
 
+    // `maxRows` goes on this call only — never into `tab.options`, which
+    // "Export all matching rows" reuses and which must stay uncapped.
+    const maxRows = toMaxRows(tab.rowLimit)
+    const executeOptions: QueryOptions =
+      maxRows === undefined ? { ...tab.options } : { ...tab.options, maxRows }
+
     window.api.queryStream
-      .execute(tab.connectionId, queryText, tab.options, {
+      .execute(tab.connectionId, queryText, executeOptions, {
         onChunk: (chunk) => dispatchRun(tabId, { type: 'chunk', chunk }),
         onDone: () => {
           executionsRef.current.delete(tabId)
@@ -607,6 +636,29 @@ export const QueryWorkspace = forwardRef<
             </div>
 
             <div className="query-workspace__actions">
+              {activeCosmos && (
+                <label
+                  className="query-workspace__row-limit"
+                  title="Stops the query once this many rows are returned, so a large container isn't paged to the end for request units. Rows are fetched 100 at a time, so a limit under 100 still reads one full page. “All rows” runs to completion (the grid still shows at most 50,000)."
+                >
+                  Row limit
+                  <select
+                    value={String(activeTab.rowLimit)}
+                    onChange={(e) =>
+                      updateTab(activeTab.id, (t) => ({
+                        ...t,
+                        rowLimit: e.target.value === 'all' ? 'all' : Number(e.target.value)
+                      }))
+                    }
+                  >
+                    {ROW_LIMIT_CHOICES.map((choice) => (
+                      <option key={String(choice)} value={String(choice)}>
+                        {rowLimitLabel(choice)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
               <button
                 type="button"
                 className="btn--ghost"

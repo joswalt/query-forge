@@ -34,7 +34,9 @@ class FakeCosmosClient implements CosmosClientLike {
   readAllDatabases: Array<{ id: string }> = []
   readAllContainers: Array<{ id: string }> = []
   containerPartitionKeyPaths: string[] = ['/partitionKey']
-  queryPages: Array<{ resources: unknown[]; requestCharge: number }> = []
+  queryPages: Array<{ resources: unknown[]; requestCharge: number; hasMoreResults?: boolean }> =
+    []
+  pagesServed = 0
   lastQuery: { query: string; abortSignal?: AbortSignal } | undefined
   lastTarget: { database: string; container: string } | undefined
 
@@ -67,10 +69,14 @@ class FakeCosmosClient implements CosmosClientLike {
             this.lastQuery = { query, abortSignal: options?.abortSignal }
             this.lastTarget = { database: id, container: containerId }
             const pages = this.queryPages
+            const onServed = (): void => {
+              this.pagesServed++
+            }
             return {
               getAsyncIterator: async function* () {
                 for (const page of pages) {
                   if (options?.abortSignal?.aborted) return
+                  onServed()
                   yield page
                 }
               }
@@ -274,6 +280,80 @@ describe('CosmosDbProvider', () => {
         { rows: [{ id: '1' }], meta: { ru: 2.1 } },
         { rows: [{ id: '2' }], meta: { ru: 1.4 } }
       ])
+    })
+
+    describe('maxRows', () => {
+      async function run(
+        client: FakeCosmosClient,
+        maxRows: number | undefined
+      ): Promise<Awaited<ReturnType<typeof collectChunks>>> {
+        const provider = new CosmosDbProvider(makeFactory(client))
+        await provider.connect(makeProfile(baseConfig), 'secret')
+        return collectChunks(provider.executeQuery('SELECT * FROM c', { maxRows }))
+      }
+      async function collectChunks(
+        iterable: AsyncIterable<{ rows: unknown[]; meta?: { ru?: number; truncated?: boolean } }>
+      ): Promise<Array<{ rows: unknown[]; meta?: { ru?: number; truncated?: boolean } }>> {
+        const chunks = []
+        for await (const chunk of iterable) chunks.push(chunk)
+        return chunks
+      }
+
+      it('slices the page that crosses the limit, flags truncated, and fetches no further pages', async () => {
+        const client = new FakeCosmosClient()
+        client.queryPages = [
+          { resources: [{ id: '1' }, { id: '2' }], requestCharge: 1, hasMoreResults: true },
+          { resources: [{ id: '3' }, { id: '4' }], requestCharge: 1, hasMoreResults: true },
+          { resources: [{ id: '5' }], requestCharge: 1, hasMoreResults: false }
+        ]
+
+        const chunks = await run(client, 3)
+
+        expect(chunks).toEqual([
+          { rows: [{ id: '1' }, { id: '2' }], meta: { ru: 1 } },
+          { rows: [{ id: '3' }], meta: { ru: 1, truncated: true } }
+        ])
+        expect(client.pagesServed).toBe(2)
+      })
+
+      it('flags truncated when the limit lands exactly on a page boundary with more to come', async () => {
+        const client = new FakeCosmosClient()
+        client.queryPages = [
+          { resources: [{ id: '1' }, { id: '2' }], requestCharge: 1, hasMoreResults: true },
+          { resources: [{ id: '3' }], requestCharge: 1, hasMoreResults: false }
+        ]
+
+        const chunks = await run(client, 2)
+
+        expect(chunks).toEqual([{ rows: [{ id: '1' }, { id: '2' }], meta: { ru: 1, truncated: true } }])
+        expect(client.pagesServed).toBe(1)
+      })
+
+      it('does not flag truncated when the results end exactly at the limit', async () => {
+        const client = new FakeCosmosClient()
+        client.queryPages = [
+          { resources: [{ id: '1' }, { id: '2' }], requestCharge: 1, hasMoreResults: false }
+        ]
+
+        const chunks = await run(client, 2)
+
+        expect(chunks).toEqual([{ rows: [{ id: '1' }, { id: '2' }], meta: { ru: 1 } }])
+      })
+
+      it('runs to completion when maxRows is omitted', async () => {
+        const client = new FakeCosmosClient()
+        client.queryPages = [
+          { resources: [{ id: '1' }], requestCharge: 1, hasMoreResults: true },
+          { resources: [{ id: '2' }], requestCharge: 1, hasMoreResults: true },
+          { resources: [{ id: '3' }], requestCharge: 1, hasMoreResults: false }
+        ]
+
+        const chunks = await run(client, undefined)
+
+        expect(chunks).toHaveLength(3)
+        expect(chunks.some((c) => c.meta?.truncated)).toBe(false)
+        expect(client.pagesServed).toBe(3)
+      })
     })
 
     it('cancel() aborts the in-flight query via AbortSignal (client-side abandonment only)', async () => {

@@ -66,6 +66,7 @@ export function QueryResultsView({
             <span className="stat__label">Rows</span>
             <span className="stat__value">
               {run.rowCount}
+              {run.stoppedAtRowLimit ? '+' : ''}
               {truncated ? ` (showing first ${retainedRowCount(run)})` : ''}
             </span>
           </span>
@@ -86,6 +87,12 @@ export function QueryResultsView({
 
       {run.status === 'error' && run.errorMessage && <p role="alert">{run.errorMessage}</p>}
       {run.status === 'cancelled' && <p className="empty">Query cancelled.</p>}
+      {run.stoppedAtRowLimit && run.status !== 'running' && (
+        <p className="query-results__notice" role="status">
+          Stopped after {run.rowCount.toLocaleString()} rows to save request units — more rows
+          match. Raise the row limit and re-run, or use “Export all matching”.
+        </p>
+      )}
 
       {hasRows && (
         <>

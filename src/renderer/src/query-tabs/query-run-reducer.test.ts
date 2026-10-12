@@ -20,6 +20,7 @@ describe('queryRunReducer', () => {
       resultSets: [],
       rowCount: 0,
       ruTotal: undefined,
+      stoppedAtRowLimit: false,
       startedAt: 100,
       finishedAt: undefined,
       errorMessage: undefined
@@ -60,6 +61,20 @@ describe('queryRunReducer', () => {
     // not silently become 0 (user story 35: "when available").
     const sqlChunkOnly = queryRunReducer(afterStart, { type: 'chunk', chunk: { rows: [{ a: 1 }] } })
     expect(sqlChunkOnly.ruTotal).toBeUndefined()
+  })
+
+  it('flags stoppedAtRowLimit when a chunk reports truncated, and clears it on the next run', () => {
+    const afterStart = queryRunReducer(initialQueryRunState, { type: 'started', startedAt: 0 })
+    expect(afterStart.stoppedAtRowLimit).toBe(false)
+
+    const afterTruncated = queryRunReducer(afterStart, {
+      type: 'chunk',
+      chunk: { rows: [{ a: 1 }], meta: { ru: 1, truncated: true } }
+    })
+    expect(afterTruncated.stoppedAtRowLimit).toBe(true)
+
+    const restarted = queryRunReducer(afterTruncated, { type: 'started', startedAt: 5 })
+    expect(restarted.stoppedAtRowLimit).toBe(false)
   })
 
   it('caps displayed rows at MAX_DISPLAY_ROWS while rowCount keeps the true total', () => {
