@@ -7,6 +7,7 @@ import { QueryWorkspace, type QueryWorkspaceHandle } from './query-tabs/QueryWor
 import { HistoryPanel } from './history/HistoryPanel'
 import { SavedQueriesPanel } from './saved-queries/SavedQueriesPanel'
 import { Collapsible, OPEN_SECTION_EVENT } from './Collapsible'
+import { ConnectionGroup, OPEN_GROUP_EVENT } from './ConnectionGroup'
 import { OverflowMenu } from './OverflowMenu'
 import { SidebarResizer, useSidebarWidth } from './SidebarResizer'
 import { SidebarRail } from './SidebarRail'
@@ -93,6 +94,9 @@ export function App(): React.JSX.Element {
   /** Rail click: expand, then bring the card into view and focus it. */
   function revealConnection(id: string): void {
     rail.setCollapsed(false)
+    window.dispatchEvent(new CustomEvent(OPEN_SECTION_EVENT, { detail: 'connections' }))
+    const groupName = connections.find((c) => c.id === id)?.groupName
+    if (groupName) window.dispatchEvent(new CustomEvent(OPEN_GROUP_EVENT, { detail: groupName }))
     window.setTimeout(() => {
       const card = document.getElementById(`conn-${id}`)
       card?.scrollIntoView({ block: 'nearest' })
@@ -372,7 +376,8 @@ export function App(): React.JSX.Element {
     )
   }
 
-  const connectedCount = Object.values(statuses).filter((value) => value === 'connected').length
+  const connectedIds = Object.keys(statuses).filter((id) => statuses[id] === 'connected')
+  const connectedCount = connectedIds.length
 
   return (
     <div className="app">
@@ -508,12 +513,27 @@ export function App(): React.JSX.Element {
                       start querying.
                     </p>
                   )
-                : groupKeys.map((key) => (
-                    <div key={key || '(ungrouped)'} className="conn-group">
-                      {key && <h3>{key}</h3>}
-                      <ul className="conn-list">{groups.get(key)!.map(renderConnection)}</ul>
-                    </div>
-                  ))}
+                : groupKeys.map((key) => {
+                    const members = groups.get(key)!
+                    const list = <ul className="conn-list">{members.map(renderConnection)}</ul>
+                    return key ? (
+                      <ConnectionGroup
+                        key={key}
+                        name={key}
+                        count={members.length}
+                        forceOpen={members.some((c) => c.id === editingId)}
+                        connectedCount={
+                          members.filter((c) => statuses[c.id] === 'connected').length
+                        }
+                      >
+                        {list}
+                      </ConnectionGroup>
+                    ) : (
+                      <div key="(ungrouped)" className="conn-group">
+                        {list}
+                      </div>
+                    )
+                  })}
             </Collapsible>
 
             <SavedQueriesPanel refreshToken={savedQueriesVersion} onOpen={handleOpenSavedQuery} />
@@ -527,6 +547,7 @@ export function App(): React.JSX.Element {
           <QueryWorkspace
             ref={workspaceRef}
             connections={connections}
+            connectedIds={connectedIds}
             onQuerySaved={() => setSavedQueriesVersion((v) => v + 1)}
           />
         </main>

@@ -321,8 +321,60 @@
   gap: 6px;
 }
 
-.conn-group h3 {
-  padding-left: 2px;
+.conn-group__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: -6px;
+  color: var(--qf-muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.conn-group__toggle:hover {
+  color: var(--qf-fg);
+}
+
+.conn-group__toggle svg {
+  flex: none;
+  transform: rotate(90deg);
+  transition: transform 120ms ease;
+}
+
+.conn-group[data-open='false'] .conn-group__toggle svg {
+  transform: rotate(0deg);
+}
+
+.conn-group__count {
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
+/* A collapsed group must not hide a live session. */
+.conn-group__live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 4px;
+  color: var(--qf-ok);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.conn-group__live::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conn-group__toggle svg {
+    transition: none;
+  }
 }
 
 .conn-list {

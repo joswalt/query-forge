@@ -167,10 +167,16 @@ export const QueryWorkspace = forwardRef<
   QueryWorkspaceHandle,
   {
     connections: ConnectionProfile[]
+    /** Ids of connections with a live session; a container list that failed to
+     * load while disconnected is retried once its connection comes up. */
+    connectedIds?: readonly string[]
     /** Called after "Save query" succeeds so the sidebar list can reload. */
     onQuerySaved?: () => void
   }
->(function QueryWorkspace({ connections, onQuerySaved }, handleRef): React.JSX.Element {
+>(function QueryWorkspace(
+  { connections, connectedIds, onQuerySaved },
+  handleRef
+): React.JSX.Element {
   const [restored] = useState(initialTabs)
   const [tabs, setTabs] = useState<QueryTabState[]>(restored.tabs)
   const [activeTabId, setActiveTabId] = useState<string>(
@@ -497,12 +503,18 @@ export const QueryWorkspace = forwardRef<
   const activeConnectionId = activeConnection?.id
   const hasContainerList = activeConnectionId ? activeConnectionId in containerLists : true
 
+  const activeIsConnected = activeConnectionId ? (connectedIds?.includes(activeConnectionId) ?? false) : false
+  const activeListUnavailable = activeConnectionId
+    ? containerLists[activeConnectionId]?.status === 'unavailable'
+    : false
+
   useEffect(() => {
-    if (activeConnectionId && needsContainerPicker && !hasContainerList) {
+    if (!activeConnectionId || !needsContainerPicker) return
+    if (!hasContainerList || (activeIsConnected && activeListUnavailable)) {
       loadContainers(activeConnectionId)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeConnectionId, needsContainerPicker, hasContainerList])
+  }, [activeConnectionId, needsContainerPicker, hasContainerList, activeIsConnected, activeListUnavailable])
 
   async function handleSaveToFile(): Promise<void> {
     if (!activeTab) return
