@@ -2,10 +2,13 @@ import { useState } from 'react'
 import type {
   AzureSqlAuthMode,
   ConnectionConfig,
+  ConnectionEnvironment,
   ConnectionProfile,
   CosmosAuthMode
 } from '@shared/types/connection-profile'
 import { parseSqlConnectionString } from './connection-string'
+import { ENVIRONMENT_LABEL } from './connection-environment'
+import { CONNECTION_ENVIRONMENTS } from '@shared/types/connection-profile'
 
 interface Props {
   onCreated: () => void
@@ -43,6 +46,9 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
   )
   const [name, setName] = useState(editing?.name ?? '')
   const [groupName, setGroupName] = useState(editing?.groupName ?? '')
+  const [environment, setEnvironment] = useState<ConnectionEnvironment | ''>(
+    editing?.environment ?? ''
+  )
   const [server, setServer] = useState(initialSql?.server ?? '')
   const [database, setDatabase] = useState(initialSql?.database ?? '')
   const [username, setUsername] = useState(initialSql?.username ?? '')
@@ -195,6 +201,7 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
           readOnly,
           config,
           groupName: groupName.trim() || null,
+          environment: environment || null,
           // Switching to Entra ID drops any stored password/key; otherwise a
           // blank field keeps the existing secret (it's never sent back here).
           secret: isEntraId ? null : secret || undefined
@@ -207,10 +214,12 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
         readOnly,
         config,
         groupName: groupName.trim() || undefined,
+        environment: environment || undefined,
         secret: isEntraId ? undefined : secret || undefined
       })
       setName('')
       setGroupName('')
+      setEnvironment('')
       setServer('')
       setDatabase('')
       setUsername('')
@@ -249,6 +258,21 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
       <label>
         Connection name
         <input value={name} onChange={(e) => setName(e.target.value)} required />
+      </label>
+
+      <label>
+        Environment (optional)
+        <select
+          value={environment}
+          onChange={(e) => setEnvironment(e.target.value as ConnectionEnvironment | '')}
+        >
+          <option value="">Not set</option>
+          {CONNECTION_ENVIRONMENTS.map((value) => (
+            <option key={value} value={value}>
+              {ENVIRONMENT_LABEL[value]}
+            </option>
+          ))}
+        </select>
       </label>
 
       <label>

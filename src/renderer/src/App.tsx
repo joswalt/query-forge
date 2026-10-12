@@ -6,12 +6,15 @@ import { NewConnectionForm } from './NewConnectionForm'
 import { QueryWorkspace, type QueryWorkspaceHandle } from './query-tabs/QueryWorkspace'
 import { HistoryPanel } from './history/HistoryPanel'
 import { SavedQueriesPanel } from './saved-queries/SavedQueriesPanel'
-import { Collapsible } from './Collapsible'
+import { Collapsible, OPEN_SECTION_EVENT } from './Collapsible'
 import { OverflowMenu } from './OverflowMenu'
 import { SidebarResizer, useSidebarWidth } from './SidebarResizer'
+import { SidebarRail } from './SidebarRail'
+import { RAIL_WIDTH, useSidebarCollapsed } from './sidebar-collapsed'
+import { ENVIRONMENT_SHORT } from './connection-environment'
 import { markConnectionsLost, type ConnectionStatus } from './connection-status'
 import type { SavedQuery } from '@shared/types/saved-query'
-import { CosmosIcon, DatabaseIcon, LockIcon, MoonIcon, PlusIcon, SunIcon } from './icons'
+import { CosmosIcon, DatabaseIcon, MoonIcon, PlusIcon, SidebarIcon, SunIcon } from './icons'
 import logoOnDark from './assets/brand/queryforge-logo-dark.png'
 import logoOnLight from './assets/brand/queryforge-logo-light.png'
 
@@ -30,6 +33,7 @@ export function App(): React.JSX.Element {
   const [loaded, setLoaded] = useState(false)
   const workspaceRef = useRef<QueryWorkspaceHandle>(null)
   const sidebar = useSidebarWidth()
+  const rail = useSidebarCollapsed()
   const [savedQueriesVersion, setSavedQueriesVersion] = useState(0)
 
   // Story 63: the utilityProcess died, so every live connection is gone.
@@ -67,6 +71,43 @@ export function App(): React.JSX.Element {
       })
       .catch(() => {})
   }, [])
+
+  // Cmd/Ctrl+B toggles the sidebar, like most editors.
+  const { toggle: toggleSidebar } = rail
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent): void {
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        !event.shiftKey &&
+        !event.altKey &&
+        event.key.toLowerCase() === 'b'
+      ) {
+        event.preventDefault()
+        toggleSidebar()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [toggleSidebar])
+
+  /** Rail click: expand, then bring the card into view and focus it. */
+  function revealConnection(id: string): void {
+    rail.setCollapsed(false)
+    window.setTimeout(() => {
+      const card = document.getElementById(`conn-${id}`)
+      card?.scrollIntoView({ block: 'nearest' })
+      card?.focus()
+    }, 0)
+  }
+
+  function openSection(id: 'saved-queries' | 'history'): void {
+    rail.setCollapsed(false)
+    window.dispatchEvent(new CustomEvent(OPEN_SECTION_EVENT, { detail: id }))
+    window.setTimeout(
+      () => document.getElementById(`section-${id}`)?.scrollIntoView({ block: 'nearest' }),
+      0
+    )
+  }
 
   async function handleToggleTheme(): Promise<void> {
     const previous = theme
@@ -235,40 +276,33 @@ export function App(): React.JSX.Element {
     }
     const message = testMessages[connection.id]
     const isCosmos = connection.config.kind === 'cosmos-db'
+    const hasMetadata = metadataByConnection[connection.id] !== undefined
+    const kindLabel = isCosmos ? 'Azure Cosmos DB' : 'Azure SQL Database'
+    const needsAttention = status === 'connecting' || status === 'error'
     return (
-      <li key={connection.id} className="conn" data-status={status}>
+      <li
+        key={connection.id}
+        id={`conn-${connection.id}`}
+        tabIndex={-1}
+        className="conn"
+        data-status={status}
+        data-env={connection.environment}
+      >
         <div className="conn__head">
-          <span className="conn__kind" title={isCosmos ? 'Azure Cosmos DB' : 'Azure SQL Database'}>
+          <span
+            className="conn__kind"
+            title={`${kindLabel}${connection.hasSecret ? ', credentials saved' : ''}`}
+          >
             {isCosmos ? <CosmosIcon /> : <DatabaseIcon />}
+            <span className="status-dot conn__dot" data-status={status} aria-hidden="true" />
           </span>
-          <strong className="conn__name">{connection.name}</strong>
-          {/* The dot and green border already say "connected"; the word is only
-              shown when something needs attention, and stays readable to
-              screen readers either way. */}
-          <span className="conn__status" data-status={status}>
-            <span className="conn__dot" aria-hidden="true" />
-            <span
-              className={status === 'connecting' || status === 'error' ? undefined : 'visually-hidden'}
-            >
-              {status}
-            </span>
-          </span>
-        </div>
-        {(connection.readOnly || connection.hasSecret) && (
-          <div className="conn__badges">
-            {connection.readOnly && <span className="chip">read-only</span>}
-            {connection.hasSecret && (
-              <span className="chip">
-                <LockIcon size={11} /> credentials saved
-              </span>
-            )}
-          </div>
-        )}
-        <div className="conn__actions">
+          <strong className="conn__name" title={connection.name}>
+            {connection.name}
+          </strong>
           {status === 'connected' ? (
             <button
               type="button"
-              className="btn--ghost"
+              className="btn--ghost conn__primary"
               onClick={() => handleDisconnect(connection.id)}
             >
               Disconnect
@@ -276,27 +310,25 @@ export function App(): React.JSX.Element {
           ) : (
             <button
               type="button"
-              className="btn--ghost conn__connect"
+              className="btn--ghost conn__primary conn__connect"
               disabled={status === 'connecting'}
               onClick={() => handleConnect(connection.id)}
             >
               Connect
             </button>
           )}
-          <button type="button" className="btn--ghost" onClick={() => handleTest(connection.id)}>
-            Test
-          </button>
-          <button
-            type="button"
-            className="btn--ghost"
-            disabled={status !== 'connected'}
-            onClick={() => handleBrowseMetadata(connection.id)}
-          >
-            {metadataByConnection[connection.id] ? 'Refresh metadata' : 'Browse metadata'}
-          </button>
           <OverflowMenu
             label={`More actions for ${connection.name}`}
             items={[
+              {
+                label: hasMetadata ? 'Refresh metadata' : 'Browse metadata',
+                disabled: status !== 'connected',
+                onSelect: () => void handleBrowseMetadata(connection.id)
+              },
+              {
+                label: 'Test connection',
+                onSelect: () => void handleTest(connection.id)
+              },
               { label: 'Edit', onSelect: () => setEditingId(connection.id) },
               {
                 label: 'Delete',
@@ -310,6 +342,25 @@ export function App(): React.JSX.Element {
             ]}
           />
         </div>
+        {/* The dot and green border already say "connected"; the word is only
+            shown when something needs attention, and stays readable to screen
+            readers either way. */}
+        <span className="visually-hidden">{needsAttention ? '' : status}</span>
+        {(connection.environment || connection.readOnly || needsAttention) && (
+          <div className="conn__badges">
+            {connection.environment && (
+              <span className="chip chip--env" data-env={connection.environment}>
+                {ENVIRONMENT_SHORT[connection.environment]}
+              </span>
+            )}
+            {connection.readOnly && <span className="chip">read-only</span>}
+            {needsAttention && (
+              <span className="conn__status-text" data-status={status}>
+                {status}
+              </span>
+            )}
+          </div>
+        )}
         {message && <p className="conn__message">{message}</p>}
         {metadataByConnection[connection.id] && (
           <MetadataTree
@@ -326,20 +377,33 @@ export function App(): React.JSX.Element {
   return (
     <div className="app">
       <header className="topbar">
-        <h1 className="topbar__brand">
-          <img
-            className="topbar__logo topbar__logo--on-dark"
-            src={logoOnDark}
-            alt="QueryForge"
-            draggable={false}
-          />
-          <img
-            className="topbar__logo topbar__logo--on-light"
-            src={logoOnLight}
-            alt="QueryForge"
-            draggable={false}
-          />
-        </h1>
+        <div className="topbar__lead">
+          <button
+            type="button"
+            className="btn--ghost sidebar-toggle"
+            aria-label={rail.collapsed ? 'Show sidebar' : 'Hide sidebar'}
+            aria-expanded={!rail.collapsed}
+            aria-controls="sidebar"
+            title={`${rail.collapsed ? 'Show' : 'Hide'} sidebar (${navigator.platform.startsWith('Mac') ? '⌘' : 'Ctrl+'}B)`}
+            onClick={rail.toggle}
+          >
+            <SidebarIcon size={18} />
+          </button>
+          <h1 className="topbar__brand">
+            <img
+              className="topbar__logo topbar__logo--on-dark"
+              src={logoOnDark}
+              alt="QueryForge"
+              draggable={false}
+            />
+            <img
+              className="topbar__logo topbar__logo--on-light"
+              src={logoOnLight}
+              alt="QueryForge"
+              draggable={false}
+            />
+          </h1>
+        </div>
         <div className="topbar__tools">
           <span className="topbar__summary">
             {connectedCount > 0
@@ -362,76 +426,102 @@ export function App(): React.JSX.Element {
 
       <div
         className="app__body"
-        style={{ '--sidebar-w': `${sidebar.width}px` } as React.CSSProperties}
+        style={
+          {
+            '--sidebar-w': `${rail.collapsed ? RAIL_WIDTH : sidebar.width}px`
+          } as React.CSSProperties
+        }
       >
-        <aside className="sidebar" aria-label="Connections, saved queries and history">
-          {error && <p role="alert">{error}</p>}
+        <aside
+          id="sidebar"
+          className="sidebar"
+          data-collapsed={rail.collapsed || undefined}
+          aria-label="Connections, saved queries and history"
+        >
+          {error && (
+            <p role="alert" className="sidebar__error">
+              {error}
+            </p>
+          )}
+          {rail.collapsed && (
+            <SidebarRail
+              connections={connections}
+              statuses={statuses}
+              onRevealConnection={revealConnection}
+              onOpenSection={openSection}
+              onNewConnection={() => {
+                setShowNewForm(true)
+                rail.setCollapsed(false)
+              }}
+            />
+          )}
+          {/* Stays mounted while collapsed (just hidden) so a half-filled form
+              or a history search survives. */}
+          <div className="sidebar__content" hidden={rail.collapsed}>
 
-          <Collapsible
-            id="connections"
-            title="Connections"
-            actions={
-              <button
-                type="button"
-                className="btn--ghost section-head__action"
-                aria-expanded={showNewForm}
-                onClick={() => setShowNewForm((open) => !open)}
-              >
-                <PlusIcon size={14} /> New connection
-              </button>
-            }
-          >
-
-            {showNewForm && (
-              <div className="sidebar__form">
-                <NewConnectionForm
-                  onCreated={() => {
-                    setShowNewForm(false)
-                    void refresh()
-                  }}
-                />
-              </div>
-            )}
-
-            {recents.length > 0 && (
-              <div className="recents">
-                <span className="recents__label">Recent</span>
-                {recents.map((connection) => (
-                  <button
-                    key={connection.id}
-                    type="button"
-                    className="chip chip--button"
-                    disabled={(statuses[connection.id] ?? 'disconnected') !== 'disconnected'}
-                    onClick={() => void handleConnect(connection.id)}
-                  >
-                    {connection.name}
-                  </button>
-                ))}
-              </div>
-            )}
-
-            {connections.length === 0 ? (
-              !showNewForm && (
-                <p className="empty">
-                  No saved connections yet. Add an Azure SQL Database or Cosmos DB account to start
-                  querying.
-                </p>
-              )
-            ) : (
-              groupKeys.map((key) => (
-                <div key={key || '(ungrouped)'} className="conn-group">
-                  {key && <h3>{key}</h3>}
-                  <ul className="conn-list">{groups.get(key)!.map(renderConnection)}</ul>
+            <Collapsible
+              id="connections"
+              title="Connections"
+              actions={
+                <button
+                  type="button"
+                  className="btn--ghost section-head__action"
+                  aria-expanded={showNewForm}
+                  onClick={() => setShowNewForm((open) => !open)}
+                >
+                  <PlusIcon size={14} /> New connection
+                </button>
+              }
+            >
+              {showNewForm && (
+                <div className="sidebar__form">
+                  <NewConnectionForm
+                    onCreated={() => {
+                      setShowNewForm(false)
+                      void refresh()
+                    }}
+                  />
                 </div>
-              ))
-            )}
-          </Collapsible>
+              )}
 
-          <SavedQueriesPanel refreshToken={savedQueriesVersion} onOpen={handleOpenSavedQuery} />
+              {recents.length > 0 && (
+                <div className="recents">
+                  <span className="recents__label">Recent</span>
+                  {recents.map((connection) => (
+                    <button
+                      key={connection.id}
+                      type="button"
+                      className="chip chip--button"
+                      disabled={(statuses[connection.id] ?? 'disconnected') !== 'disconnected'}
+                      onClick={() => void handleConnect(connection.id)}
+                    >
+                      {connection.name}
+                    </button>
+                  ))}
+                </div>
+              )}
 
-          <HistoryPanel />
+              {connections.length === 0
+                ? !showNewForm && (
+                    <p className="empty">
+                      No saved connections yet. Add an Azure SQL Database or Cosmos DB account to
+                      start querying.
+                    </p>
+                  )
+                : groupKeys.map((key) => (
+                    <div key={key || '(ungrouped)'} className="conn-group">
+                      {key && <h3>{key}</h3>}
+                      <ul className="conn-list">{groups.get(key)!.map(renderConnection)}</ul>
+                    </div>
+                  ))}
+            </Collapsible>
+
+            <SavedQueriesPanel refreshToken={savedQueriesVersion} onOpen={handleOpenSavedQuery} />
+
+            <HistoryPanel />
+          </div>
         </aside>
-        <SidebarResizer {...sidebar} />
+        {!rail.collapsed && <SidebarResizer {...sidebar} />}
 
         <main className="workspace">
           <QueryWorkspace

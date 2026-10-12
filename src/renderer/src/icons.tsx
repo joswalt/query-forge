@@ -96,3 +96,24 @@ export const MoreIcon = (p: IconProps): React.JSX.Element => (
     <circle cx="12.5" cy="8" r="0.6" />
   </Svg>
 )
+
+/** Sidebar toggle: a window with its left pane marked. */
+export const SidebarIcon = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <rect x="2" y="3" width="12" height="10" rx="2" />
+    <path d="M6.2 3v10" />
+  </Svg>
+)
+
+export const BookmarkIcon = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <path d="M4.2 2.6h7.6v10.8L8 10.6l-3.8 2.8V2.6Z" />
+  </Svg>
+)
+
+export const ClockIcon = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <circle cx="8" cy="8" r="5.8" />
+    <path d="M8 4.8V8l2.2 1.4" />
+  </Svg>
+)

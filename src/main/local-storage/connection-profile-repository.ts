@@ -1,12 +1,17 @@
 import type Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
-import type { ConnectionConfig, ConnectionProfile } from '@shared/types/connection-profile'
+import type {
+  ConnectionConfig,
+  ConnectionEnvironment,
+  ConnectionProfile
+} from '@shared/types/connection-profile'
 
 export interface CreateConnectionProfileInput {
   name: string
   readOnly: boolean
   config: ConnectionConfig
   groupName?: string
+  environment?: ConnectionEnvironment
   secretCiphertext?: Buffer
 }
 
@@ -16,6 +21,8 @@ export interface UpdateConnectionProfileInput {
   config?: ConnectionConfig
   /** `null` clears the group; `undefined` leaves it untouched. */
   groupName?: string | null
+  /** `null` clears the environment; `undefined` leaves it untouched. */
+  environment?: ConnectionEnvironment | null
   /** `null` clears the stored secret; `undefined` leaves it untouched. */
   secretCiphertext?: Buffer | null
 }
@@ -27,6 +34,7 @@ interface ConnectionProfileRow {
   config_json: string
   secret_ciphertext: Buffer | null
   group_name: string | null
+  environment: ConnectionEnvironment | null
   last_connected_at: string | null
   created_at: string
   updated_at: string
@@ -47,8 +55,8 @@ export class ConnectionProfileRepository {
     const now = new Date().toISOString()
     this.db
       .prepare(
-        `INSERT INTO connection_profiles (id, name, read_only, config_json, secret_ciphertext, group_name, created_at, updated_at)
-         VALUES (@id, @name, @readOnly, @configJson, @secretCiphertext, @groupName, @createdAt, @updatedAt)`
+        `INSERT INTO connection_profiles (id, name, read_only, config_json, secret_ciphertext, group_name, environment, created_at, updated_at)
+         VALUES (@id, @name, @readOnly, @configJson, @secretCiphertext, @groupName, @environment, @createdAt, @updatedAt)`
       )
       .run({
         id,
@@ -57,6 +65,7 @@ export class ConnectionProfileRepository {
         configJson: JSON.stringify(input.config),
         secretCiphertext: input.secretCiphertext ?? null,
         groupName: input.groupName?.trim() || null,
+        environment: input.environment ?? null,
         createdAt: now,
         updatedAt: now
       })
@@ -88,12 +97,14 @@ export class ConnectionProfileRepository {
       input.secretCiphertext === undefined ? existing.secret_ciphertext : input.secretCiphertext
     const groupName =
       input.groupName === undefined ? existing.group_name : input.groupName?.trim() || null
+    const environment =
+      input.environment === undefined ? existing.environment : input.environment
     const updatedAt = new Date().toISOString()
 
     this.db
       .prepare(
         `UPDATE connection_profiles
-         SET name = @name, read_only = @readOnly, config_json = @configJson, secret_ciphertext = @secretCiphertext, group_name = @groupName, updated_at = @updatedAt
+         SET name = @name, read_only = @readOnly, config_json = @configJson, secret_ciphertext = @secretCiphertext, group_name = @groupName, environment = @environment, updated_at = @updatedAt
          WHERE id = @id`
       )
       .run({
@@ -103,6 +114,7 @@ export class ConnectionProfileRepository {
         configJson,
         secretCiphertext,
         groupName,
+        environment,
         updatedAt
       })
 
@@ -138,6 +150,7 @@ function toConnectionProfile(row: ConnectionProfileRow): ConnectionProfile {
     config: JSON.parse(row.config_json) as ConnectionConfig,
     hasSecret: row.secret_ciphertext !== null,
     groupName: row.group_name ?? undefined,
+    environment: row.environment ?? undefined,
     lastConnectedAt: row.last_connected_at ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at

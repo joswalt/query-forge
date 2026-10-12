@@ -51,6 +51,7 @@ export class ConnectionManager {
       readOnly: request.readOnly ?? false,
       config: request.config,
       groupName: request.groupName,
+      environment: request.environment,
       secretCiphertext:
         request.secret !== undefined ? this.secretStore.encrypt(request.secret) : undefined
     }
@@ -70,6 +71,7 @@ export class ConnectionManager {
       readOnly: request.readOnly,
       config: request.config,
       groupName: request.groupName,
+      environment: request.environment,
       secretCiphertext:
         request.secret === null
           ? null

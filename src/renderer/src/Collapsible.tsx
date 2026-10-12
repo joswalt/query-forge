@@ -1,7 +1,11 @@
-import { useId, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { ChevronIcon } from './icons'
 
 const STORAGE_PREFIX = 'queryforge.ui.section.'
+
+/** Dispatched on `window` (detail: section id) to open a section from outside,
+ * e.g. from the collapsed sidebar rail. */
+export const OPEN_SECTION_EVENT = 'queryforge:open-section'
 
 function readOpen(id: string, fallback: boolean): boolean {
   try {
@@ -40,9 +44,7 @@ export function Collapsible({
   const [open, setOpen] = useState(() => readOpen(id, defaultOpen))
   const bodyId = useId()
 
-  function toggle(): void {
-    const next = !open
-    setOpen(next)
+  function remember(next: boolean): void {
     try {
       localStorage.setItem(STORAGE_PREFIX + id, next ? '1' : '0')
     } catch {
@@ -50,8 +52,25 @@ export function Collapsible({
     }
   }
 
+  function toggle(): void {
+    const next = !open
+    setOpen(next)
+    remember(next)
+  }
+
+  useEffect(() => {
+    function onOpenRequest(event: Event): void {
+      if ((event as CustomEvent<string>).detail !== id) return
+      setOpen(true)
+      remember(true)
+    }
+    window.addEventListener(OPEN_SECTION_EVENT, onOpenRequest)
+    return () => window.removeEventListener(OPEN_SECTION_EVENT, onOpenRequest)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id])
+
   return (
-    <section className="sidebar__section collapsible" data-open={open}>
+    <section id={`section-${id}`} className="sidebar__section collapsible" data-open={open}>
       <div className="section-head">
         <h2 className="collapsible__title">
           <button
