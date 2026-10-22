@@ -304,19 +304,17 @@
   min-height: 300px;
 }
 
-.results-json-view > .json-tree {
+.results-json-view > .json-tree-panel {
   flex: 1 1 0;
   min-height: 0;
+}
+
+.results-json-view > .json-tree-panel .json-tree {
   max-height: none;
 }
 
-.results-json-view > :not(.json-tree) {
+.results-json-view > :not(.json-tree-panel) {
   flex: none;
-}
-
-.results-json-view__toolbar {
-  display: flex;
-  gap: 6px;
 }
 
 .results-json-view > p {
@@ -324,6 +322,46 @@
   font-size: 12.5px;
   max-width: var(--qf-note-measure);
   text-wrap: pretty;
+}
+
+.json-tree-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.json-tree-panel > .json-tree {
+  flex: 1 1 auto;
+}
+
+.json-tree-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.json-tree-toolbar__spacer {
+  flex: 1;
+}
+
+.json-find {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.json-find input {
+  width: 180px;
+  margin-right: 4px;
+}
+
+.json-find__count {
+  min-width: 9ch;
+  color: var(--qf-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 .json-tree {
@@ -338,14 +376,80 @@
   line-height: 1.7;
 }
 
-.json-toggle {
+.json-tree:focus {
+  outline: none;
+}
+
+.json-entries {
+  padding-left: 18px;
+}
+
+/* Each top-level row (a result document, or a field in the inspector)
+ * skips style/layout while offscreen. With 500 rows of nested documents the
+ * tree is tens of thousands of lines, and without this every toggle or Find
+ * highlight relaid out all of them. `auto` remembers each row's last
+ * rendered height so the scrollbar stays put once a row has been seen. */
+.json-tree > .json-node > .json-entries > * {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 320px;
+}
+
+.json-line {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.json-toggle,
+.json-toggle-spacer {
+  display: inline-block;
   width: 18px;
-  padding: 0;
   margin-right: 2px;
+}
+
+.json-toggle {
+  padding: 0;
   border: 0;
+  border-radius: 3px;
   background: transparent;
   color: var(--qf-muted);
-  font-size: 9px;
+  font-size: 12px;
+  line-height: inherit;
+  text-align: center;
+}
+
+.json-toggle:hover:not(:disabled) {
+  border: 0;
+  color: var(--qf-fg);
+}
+
+.json-key--toggle {
+  cursor: pointer;
+}
+
+.json-key--toggle:hover {
+  text-decoration: underline;
+  text-decoration-color: var(--qf-muted);
+}
+
+.json-parsed-hint {
+  margin-left: 6px;
+  padding: 0 4px;
+  border: 1px solid var(--qf-border);
+  border-radius: 3px;
+  color: var(--qf-muted);
+  font-size: 10px;
+  cursor: help;
+}
+
+.json-match {
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--qf-accent) 28%, transparent);
+  color: inherit;
+}
+
+.json-match--current {
+  background: var(--qf-accent);
+  color: var(--qf-accent-fg);
 }
 
 .json-key {
@@ -395,8 +499,11 @@
   gap: 6px;
 }
 
-.cell-inspector .json-tree {
+.cell-inspector .json-tree-panel {
   flex: 1;
+}
+
+.cell-inspector .json-tree {
   max-height: none;
   background: var(--qf-panel);
 }

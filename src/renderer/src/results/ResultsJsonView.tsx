@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { JsonTree } from './JsonTree'
 
 /**
@@ -27,7 +28,12 @@ export function ResultsJsonView({
   onSave: () => void
 }): React.JSX.Element {
   const truncated = rows.length > JSON_VIEW_RENDER_LIMIT
-  const displayRows = truncated ? rows.slice(0, JSON_VIEW_RENDER_LIMIT) : rows
+  // Memoized: a fresh slice each render would look like a new result to
+  // JsonTree and reset its collapse state.
+  const displayRows = useMemo(
+    () => (truncated ? rows.slice(0, JSON_VIEW_RENDER_LIMIT) : rows),
+    [rows, truncated]
+  )
 
   async function handleCopy(): Promise<void> {
     await navigator.clipboard.writeText(JSON.stringify(rows, null, 2))
@@ -35,22 +41,26 @@ export function ResultsJsonView({
 
   return (
     <div className="results-json-view">
-      <div className="results-json-view__toolbar">
-        <button type="button" onClick={handleCopy}>
-          Copy JSON
-        </button>
-        <button type="button" onClick={onSave}>
-          Save JSON…
-        </button>
-      </div>
       {truncated && (
         <p>
-          Showing the first {JSON_VIEW_RENDER_LIMIT} of {rows.length} loaded rows as a JSON tree.
-          &quot;Copy JSON&quot; and &quot;Save JSON…&quot; still act on all {rows.length} rows — use
-          the table view to browse beyond this point, or export.
+          Showing the first {JSON_VIEW_RENDER_LIMIT} of {rows.length} loaded rows as a JSON tree,
+          and Find searches only these. &quot;Copy JSON&quot; and &quot;Save JSON…&quot; still act
+          on all {rows.length} rows — use the table view to browse beyond this point, or export.
         </p>
       )}
-      <JsonTree value={displayRows} />
+      <JsonTree
+        value={displayRows}
+        actions={
+          <>
+            <button type="button" onClick={handleCopy}>
+              Copy JSON
+            </button>
+            <button type="button" onClick={onSave}>
+              Save JSON…
+            </button>
+          </>
+        }
+      />
     </div>
   )
 }

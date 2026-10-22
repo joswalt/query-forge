@@ -35,6 +35,9 @@ export function QueryResultsView({
   const [viewMode, setViewMode] = useState<ViewMode>('table')
   const [inspectedCell, setInspectedCell] = useState<unknown>(undefined)
   const [inspectorOpen, setInspectorOpen] = useState(false)
+  // Bumped per inspected cell so the inspector's JSON tree starts fresh
+  // (expanded, no Find query) rather than carrying over the last cell's.
+  const [inspection, setInspection] = useState(0)
   // The selection belongs to one run: a re-run, or switching to another
   // tab's run, starts back on the first Result Set instead of inheriting it.
   const [selection, setSelection] = useState({ startedAt: run.startedAt, index: 0 })
@@ -206,11 +209,17 @@ export function QueryResultsView({
               rows={currentRows}
               onExpandCell={(value) => {
                 setInspectedCell(value)
+                setInspection((n) => n + 1)
                 setInspectorOpen(true)
               }}
             />
           ) : (
-            <ResultsJsonView rows={currentRows} onSave={() => onExportLoaded('json', setIndex)} />
+            <ResultsJsonView
+              // Remount per run and per Result Set so collapse state doesn't
+              // leak across results; rows streaming into the same run keep it.
+              key={`${run.startedAt}:${setIndex}`}
+              rows={currentRows}
+              onSave={() => onExportLoaded('json', setIndex)} />
           )}
         </>
       )}
@@ -228,7 +237,9 @@ export function QueryResultsView({
       )}
 
       {inspectorOpen && (
-        <CellInspector value={inspectedCell} onClose={() => setInspectorOpen(false)} />
+        <CellInspector
+          key={inspection}
+          value={inspectedCell} onClose={() => setInspectorOpen(false)} />
       )}
     </div>
   )
