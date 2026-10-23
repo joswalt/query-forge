@@ -1,8 +1,8 @@
 import type { StreamingExtractor } from './extractor'
 
 /** Compact JSON per row, one per line, inside a single array — the format
- * the JSON export has always written (user story 24). Always an array, even
- * for one row (user story 26). */
+ * the JSON export has always written (Extractors story 24). Always an array, even
+ * for one row (Extractors story 26). */
 export const jsonExtractor: StreamingExtractor = {
   id: 'json',
   label: 'JSON',

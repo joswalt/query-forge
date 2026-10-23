@@ -28,7 +28,8 @@ export interface ExportAllRequest {
 
 /**
  * Writes query result rows to an `ExportSink` through an Extractor (user
- * stories 45-49; ADR 0003: the same shared code the renderer copies with). Two entry points mirror the UI's explicit "loaded" vs "all
+ * stories 45-49; ADR 0003: the same shared code the renderer copies
+ * with). Two entry points mirror the UI's explicit "loaded" vs "all
  * matching" distinction (user story 47) — they have genuinely different
  * sources and memory characteristics, not just different labels on the
  * same code path:
@@ -86,7 +87,7 @@ export class ExportService {
   constructor(private readonly client: QueryExecutionClient) {}
 
   /** `columns` is the grid's displayed column list, so the file matches
-   * what the user sees (user story 45). */
+   * what the user sees (Extractors story 45). */
   async exportLoadedRows(
     rows: unknown[],
     columns: readonly string[],

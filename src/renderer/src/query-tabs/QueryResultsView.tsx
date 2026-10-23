@@ -100,7 +100,8 @@ export function QueryResultsView({
     const timer = setTimeout(() => setToast(null), TOAST_MS)
     return () => clearTimeout(timer)
   }, [toast])
-  /** An oversized copy waiting on "copy anyway / export instead" (user story 11). */
+  /** An oversized copy waiting on "copy anyway / export instead"
+   * (Extractors story 11). */
   const [pendingCopy, setPendingCopy] = useState<{
     plan: CopyPlan
     rows: unknown[]
@@ -263,7 +264,7 @@ export function QueryResultsView({
              * — copying or exporting mid-run would silently write fewer
              * rows than the grid ends up showing once the run finishes.
              * "Export all matching" stays file-only (never clipboard): it
-             * re-runs the query, a second RU charge (user story 15). */}
+             * re-runs the query, a second RU charge (Extractors story 15). */}
             <span className="query-results__export-group">
               <button
                 type="button"

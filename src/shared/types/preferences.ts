@@ -22,7 +22,7 @@ export interface Preferences {
    * speculative structure with nothing to justify it. */
   theme: Theme
   /** The Active Extractor and Include header toggle (GLOSSARY.md), global
-   * across tabs (user stories 2, 19). A persisted id this build doesn't
+   * across tabs (Extractors stories 2, 19). A persisted id this build doesn't
    * know is read back as CSV (`getExtractor`). */
   extractor: {
     activeExtractorId: ExtractorId

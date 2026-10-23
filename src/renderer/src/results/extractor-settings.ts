@@ -3,7 +3,7 @@ import { getExtractor, type ExtractorId } from '@shared/extractors/extract'
 import { defaultPreferences } from '@shared/types/preferences'
 
 /** The Active Extractor and the Include header toggle, global across tabs
- * and remembered across launches in Preferences (user stories 2, 19). */
+ * and remembered across launches in Preferences (Extractors stories 2, 19). */
 export interface ExtractorSettings {
   extractorId: ExtractorId
   includeHeader: boolean
@@ -30,6 +30,7 @@ export function useExtractorSettings(): [
           includeHeader: prefs.extractor.includeHeader
         })
       )
+      // Best-effort: the defaults stay in place if Preferences can't be read.
       .catch(() => {})
   }, [])
 

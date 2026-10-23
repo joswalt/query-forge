@@ -61,7 +61,7 @@ describe('planCopy', () => {
   })
 
   it('asks for confirmation once the output reaches the size limit', () => {
-    const request = { scope: 'rows' as const, rows, columns, extractorId: 'csv', options }
+    const request = { scope: 'rows' as const, rows, columns, extractorId: 'csv' as const, options }
     const text = 'id,name\n1,a\n2,b\n3,c'
     expect(planCopy(request, text.length + 1).needsSizeConfirmation).toBe(false)
     expect(planCopy(request, text.length).needsSizeConfirmation).toBe(true)

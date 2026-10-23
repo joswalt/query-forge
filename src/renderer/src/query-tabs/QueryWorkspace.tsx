@@ -46,7 +46,7 @@ interface QueryTabState {
   exportState: ExportState
 }
 
-/** The table name inferred for a tab, if any (user story 38): the Cosmos
+/** The table name inferred for a tab, if any (Extractors story 38): the Cosmos
  * container the tab targets, else a single-table `FROM` in the editor's
  * query. Derived on every render, so it follows the query text as it
  * changes until the user edits the Table field. */
@@ -385,7 +385,7 @@ export const QueryWorkspace = forwardRef<
     execution.cancel()
   }
 
-  /** Suggested save-dialog name (user stories 16-17):
+  /** Suggested save-dialog name (Extractors stories 16-17):
    * `<container-or-table>_<yyyyMMdd-HHmm>.<ext>`, falling back to the
    * profile name. Later Result Sets of a script are numbered so exporting
    * several in a row doesn't offer to overwrite the first. */

@@ -32,7 +32,7 @@ interface ContextMenuState {
  * without a proportional render cost). `columns` comes from the parent (the
  * union across all retained rows, `computeColumnUnion`, since Cosmos
  * documents are heterogeneous) so copy and export use exactly the columns
- * displayed here (user story 45).
+ * displayed here (Extractors story 45).
  *
  * The header row is a `position: sticky` child of the *same* scroll
  * container the virtualized body scrolls in — not a separate element
@@ -60,7 +60,7 @@ export function ResultsGrid({
   rows: unknown[]
   columns: string[]
   /** The run is still appending rows: copying "all loaded" would silently
-   * get fewer rows than the run will produce (user story 48). */
+   * get fewer rows than the run will produce (Extractors story 48). */
   streaming: boolean
   /** Open the JSON inspector for one cell's value (user story 41). */
   onExpandCell: (value: unknown) => void

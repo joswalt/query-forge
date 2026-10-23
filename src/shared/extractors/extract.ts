@@ -1,4 +1,4 @@
-import type { Extractor, ExtractorOptions } from './extractor'
+import type { Extractor, ExtractorId, ExtractorOptions } from './extractor'
 import { jsonExtractor, jsonLinesExtractor } from './json-extractors'
 import {
   sqlInsertMultirowExtractor,
@@ -22,7 +22,11 @@ export type { Extractor, ExtractorId, ExtractorOptions } from './extractor'
  * a column list into text. Pure, shared code used by both the renderer
  * (clipboard copy, via `extract`) and main (the Export Service writing a
  * file), so copied and exported output are byte-identical for the same rows
- * and Extractor (user story 50; ADR 0003). Listed in dropdown order.
+ * and Extractor (Extractors story 50; ADR 0003). Listed in dropdown order.
+ *
+ * "Extractors story N" here and in the copy/export UI cites the user
+ * stories of .scratch/queryforge-enhancements/issues/12-data-extractors.md,
+ * not spec.md's numbering.
  */
 export const EXTRACTORS: readonly Extractor[] = [
   csvExtractor,
@@ -48,7 +52,7 @@ export function getExtractor(id: string): Extractor {
 /** The whole output for in-memory rows: the renderer's copy actions and the
  * Export Service's "Export loaded" both go through this. */
 export function extract(
-  extractorId: string,
+  extractorId: ExtractorId,
   rows: readonly unknown[],
   columns: readonly string[],
   options: ExtractorOptions

@@ -141,7 +141,7 @@ describe('ExportService.exportAll', () => {
   })
 })
 
-describe('ExportService parity with extract (user story 50)', () => {
+describe('ExportService parity with extract (Extractors story 50)', () => {
   const rows = [
     { id: 1, name: 'a', nested: { x: [1, 2] } },
     { id: 2, extra: 'with, comma' },
