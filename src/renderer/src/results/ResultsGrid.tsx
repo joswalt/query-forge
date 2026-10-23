@@ -23,7 +23,15 @@ interface ContextMenuState {
   x: number
   y: number
   rowIndex: number
+  /** Opened in the lower half / right part of the window: the menu (and
+   * its "Copy as ▸" submenu, which lists every Extractor) grows up / opens
+   * to the left so it stays on screen. */
+  openUp: boolean
+  openLeft: boolean
 }
+
+/** Room the menu plus its submenu need to the right of the cursor. */
+const MENU_WITH_SUBMENU_WIDTH_PX = 340
 
 /**
  * The results grid (user stories 38-39): TanStack Table for column
@@ -286,7 +294,13 @@ export function ResultsGrid({
                         if (!isRowNumber) {
                           setActiveCell({ rowIndex: virtualRow.index, columnId: cell.column.id })
                         }
-                        setContextMenu({ x: e.clientX, y: e.clientY, rowIndex: virtualRow.index })
+                        setContextMenu({
+                          x: e.clientX,
+                          y: e.clientY,
+                          rowIndex: virtualRow.index,
+                          openUp: e.clientY > window.innerHeight / 2,
+                          openLeft: e.clientX > window.innerWidth - MENU_WITH_SUBMENU_WIDTH_PX
+                        })
                       }}
                     >
                       {isRowNumber
@@ -303,8 +317,20 @@ export function ResultsGrid({
 
       {contextMenu && (
         <ul
-          className="results-grid__context-menu"
-          style={{ position: 'fixed', top: contextMenu.y, left: contextMenu.x }}
+          className={[
+            'results-grid__context-menu',
+            contextMenu.openUp ? 'is-open-up' : '',
+            contextMenu.openLeft ? 'is-open-left' : ''
+          ]
+            .filter(Boolean)
+            .join(' ')}
+          style={{
+            position: 'fixed',
+            left: contextMenu.x,
+            ...(contextMenu.openUp
+              ? { bottom: window.innerHeight - contextMenu.y }
+              : { top: contextMenu.y })
+          }}
           onClick={(e) => e.stopPropagation()}
         >
           <li>

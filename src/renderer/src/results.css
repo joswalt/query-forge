@@ -368,6 +368,20 @@
   left: 100%;
 }
 
+.results-grid__submenu button {
+  white-space: nowrap;
+}
+
+.is-open-up .results-grid__submenu {
+  top: auto;
+  bottom: -5px;
+}
+
+.is-open-left .results-grid__submenu {
+  left: auto;
+  right: 100%;
+}
+
 .results-grid__submenu-host:hover > .results-grid__submenu,
 .results-grid__submenu-host:focus-within > .results-grid__submenu {
   display: block;
