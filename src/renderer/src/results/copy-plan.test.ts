@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest'
 import { copyScopeForShortcut, planCopy } from './copy-plan'
 
 const options = { includeHeader: true, tableName: 'my_table' }
-const rows = [{ id: 1, name: 'a' }, { id: 2, name: 'b' }, { id: 3, name: 'c' }]
+const rows = [
+  { id: 1, name: 'a' },
+  { id: 2, name: 'b' },
+  { id: 3, name: 'c' }
+]
 const columns = ['id', 'name']
 
 describe('copyScopeForShortcut', () => {

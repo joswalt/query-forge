@@ -1,6 +1,11 @@
 import type { Extractor, ExtractorOptions } from './extractor'
 import { jsonExtractor, jsonLinesExtractor } from './json-extractors'
 import {
+  sqlInsertMultirowExtractor,
+  sqlInsertsExtractor,
+  whereClauseExtractor
+} from './sql-extractors'
+import {
   csvExtractor,
   markdownExtractor,
   oneRowExtractor,
@@ -28,7 +33,10 @@ export const EXTRACTORS: readonly Extractor[] = [
   jsonLinesExtractor,
   markdownExtractor,
   prettyExtractor,
-  oneRowExtractor
+  oneRowExtractor,
+  sqlInsertsExtractor,
+  sqlInsertMultirowExtractor,
+  whereClauseExtractor
 ]
 
 /** The Extractor for `id`, or CSV for an unknown id (e.g. a persisted

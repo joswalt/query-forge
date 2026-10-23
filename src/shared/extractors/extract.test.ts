@@ -17,7 +17,10 @@ describe('Extractor registry', () => {
 
 describe('CSV Extractor', () => {
   it('writes a header, then data rows in column order with missing fields empty', () => {
-    const rows = [{ id: '1', name: 'a' }, { id: '2', extra: true }]
+    const rows = [
+      { id: '1', name: 'a' },
+      { id: '2', extra: true }
+    ]
     expect(extract('csv', rows, ['id', 'name', 'extra'], withHeader)).toBe(
       'id,name,extra\n1,a,\n2,,true'
     )
@@ -59,7 +62,10 @@ describe('CSV Extractor', () => {
 
 describe('JSON Extractor', () => {
   it('writes a valid JSON array preserving nested structure and heterogeneous rows', () => {
-    const rows = [{ id: 1, nested: { a: [1, 2] } }, { id: 2, extra: true }]
+    const rows = [
+      { id: 1, nested: { a: [1, 2] } },
+      { id: 2, extra: true }
+    ]
     const text = extract('json', rows, ['id'], withHeader)
     expect(JSON.parse(text)).toEqual(rows)
     expect(text).toBe('[\n{"id":1,"nested":{"a":[1,2]}},\n{"id":2,"extra":true}\n]')
@@ -145,7 +151,10 @@ describe('Markdown Extractor', () => {
 
 describe('Pretty Extractor', () => {
   it('draws an ASCII box table with columns padded to the widest value', () => {
-    const rows = [{ id: 1, name: 'alice' }, { id: 22, name: null }]
+    const rows = [
+      { id: 1, name: 'alice' },
+      { id: 22, name: null }
+    ]
     expect(extract('pretty', rows, ['id', 'name'], withHeader)).toBe(
       [
         '+----+-------+',
@@ -182,18 +191,118 @@ describe('Pretty Extractor', () => {
 
 describe('One-row Extractor', () => {
   it('joins every value on one line, strings quoted, numbers bare', () => {
-    expect(extract('one-row', [{ id: 1 }, { id: 2 }, { id: 3 }], ['id'], withHeader)).toBe('1, 2, 3')
+    expect(extract('one-row', [{ id: 1 }, { id: 2 }, { id: 3 }], ['id'], withHeader)).toBe(
+      '1, 2, 3'
+    )
     expect(extract('one-row', [{ s: "o'brien" }, { s: 'x' }], ['s'], withHeader)).toBe(
       "'o''brien', 'x'"
     )
   })
 
   it('walks rows then columns, rendering null as NULL and nested values as quoted JSON', () => {
-    const rows = [{ a: 1, b: null }, { a: true, b: { x: 1 } }]
+    const rows = [
+      { a: 1, b: null },
+      { a: true, b: { x: 1 } }
+    ]
     expect(extract('one-row', rows, ['a', 'b'], withHeader)).toBe(`1, NULL, true, '{"x":1}'`)
   })
 
   it('writes nothing for no rows', () => {
     expect(extract('one-row', [], ['a'], withHeader)).toBe('')
+  })
+})
+
+describe('SQL Inserts Extractor', () => {
+  const sql: ExtractorOptions = { includeHeader: true, tableName: 'dbo.Users' }
+
+  it('writes one INSERT per row with bracketed columns into the Table field name', () => {
+    const rows = [
+      { id: 1, name: 'a' },
+      { id: 2, name: 'b' }
+    ]
+    expect(extract('sql-inserts', rows, ['id', 'name'], sql)).toBe(
+      "INSERT INTO dbo.Users ([id], [name]) VALUES (1, N'a');\n" +
+        "INSERT INTO dbo.Users ([id], [name]) VALUES (2, N'b');"
+    )
+  })
+
+  it('renders T-SQL literals: numbers bare, booleans 1/0, N-strings with doubled quotes, NULL', () => {
+    const rows = [{ n: -1.5, big: 10n, t: true, f: false, s: "o'brien", z: null }]
+    expect(extract('sql-inserts', rows, ['n', 'big', 't', 'f', 's', 'z', 'missing'], sql)).toBe(
+      "INSERT INTO dbo.Users ([n], [big], [t], [f], [s], [z], [missing]) VALUES (-1.5, 10, 1, 0, N'o''brien', NULL, NULL);"
+    )
+  })
+
+  it('renders nested values as JSON string literals and dates as ISO strings', () => {
+    const rows = [{ doc: { tags: ["it's"] }, at: new Date('2026-10-23T09:00:00.000Z') }]
+    expect(extract('sql-inserts', rows, ['doc', 'at'], sql)).toBe(
+      `INSERT INTO dbo.Users ([doc], [at]) VALUES (N'{"tags":["it''s"]}', N'2026-10-23T09:00:00.000Z');`
+    )
+  })
+
+  it('escapes ] in column names and falls back to my_table for a blank Table field', () => {
+    expect(
+      extract('sql-inserts', [{ 'a]b': 1 }], ['a]b'], { includeHeader: true, tableName: '  ' })
+    ).toBe('INSERT INTO my_table ([a]]b]) VALUES (1);')
+  })
+
+  it('writes nothing for no rows', () => {
+    expect(extract('sql-inserts', [], ['id'], sql)).toBe('')
+  })
+})
+
+describe('SQL Insert Multirow Extractor', () => {
+  const sql: ExtractorOptions = { includeHeader: true, tableName: 't' }
+
+  it('writes one INSERT with a VALUES tuple per row', () => {
+    const rows = [
+      { id: 1, name: 'a' },
+      { id: 2, name: null }
+    ]
+    expect(extract('sql-insert-multirow', rows, ['id', 'name'], sql)).toBe(
+      "INSERT INTO t ([id], [name]) VALUES\n  (1, N'a'),\n  (2, NULL);"
+    )
+  })
+
+  it('starts a new INSERT every 1,000 rows (the T-SQL VALUES limit)', () => {
+    const rows = Array.from({ length: 1001 }, (_, i) => ({ id: i }))
+    const statements = extract('sql-insert-multirow', rows, ['id'], sql).split(';\n')
+    expect(statements).toHaveLength(2)
+    expect(statements[0].split('\n')).toHaveLength(1001)
+    expect(statements[1]).toBe('INSERT INTO t ([id]) VALUES\n  (1000);')
+  })
+
+  it('writes nothing for no rows', () => {
+    expect(extract('sql-insert-multirow', [], ['id'], sql)).toBe('')
+  })
+})
+
+describe('Where Clause Extractor', () => {
+  it('ANDs each row’s columns and ORs the rows', () => {
+    const rows = [
+      { a: 1, b: 'x' },
+      { a: 2, b: null }
+    ]
+    expect(extract('where-clause', rows, ['a', 'b'], withHeader)).toBe(
+      "([a] = 1 AND [b] = N'x')\nOR ([a] = 2 AND [b] IS NULL)"
+    )
+  })
+
+  it('collapses a single column to IN (...)', () => {
+    expect(extract('where-clause', [{ id: 1 }, { id: 2 }, { id: 3 }], ['id'], withHeader)).toBe(
+      '[id] IN (1, 2, 3)'
+    )
+  })
+
+  it('matches NULLs in a single column with IS NULL, since IN (NULL) never matches', () => {
+    expect(extract('where-clause', [{ id: 1 }, { id: null }], ['id'], withHeader)).toBe(
+      '([id] IN (1) OR [id] IS NULL)'
+    )
+    expect(extract('where-clause', [{}], ['id'], withHeader)).toBe('[id] IS NULL')
+  })
+
+  it('writes nothing for no rows or no columns', () => {
+    expect(extract('where-clause', [], ['id'], withHeader)).toBe('')
+    expect(extract('where-clause', [{ id: 1 }], [], withHeader)).toBe('')
   })
 })

@@ -64,7 +64,10 @@ export const markdownExtractor: BufferingExtractor = {
     const head = options.includeHeader
       ? `${line(columns)}\n| ${columns.map(() => '---').join(' | ')} |`
       : undefined
-    return joinLines(head, rows.map((row) => line(cells(row, columns))))
+    return joinLines(
+      head,
+      rows.map((row) => line(cells(row, columns)))
+    )
   }
 }
 
@@ -92,7 +95,10 @@ export const prettyExtractor: BufferingExtractor = {
     const header = columns.map(prettyCell)
     const body = rows.map((row) => cells(row, columns).map(prettyCell))
     const widths = columns.map((_, i) =>
-      Math.max(options.includeHeader ? header[i].length : 0, ...body.map((values) => values[i].length))
+      Math.max(
+        options.includeHeader ? header[i].length : 0,
+        ...body.map((values) => values[i].length)
+      )
     )
     const border = `+${widths.map((width) => '-'.repeat(width + 2)).join('+')}+`
     const line = (values: readonly string[]): string =>

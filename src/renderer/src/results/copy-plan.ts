@@ -47,7 +47,11 @@ export interface CopyPlan {
  */
 export function planCopy(request: CopyRequest, sizeLimit = COPY_SIZE_LIMIT): CopyPlan {
   if (request.scope === 'cell') {
-    return { text: formatCellValue(request.value), message: 'Copied value', needsSizeConfirmation: false }
+    return {
+      text: formatCellValue(request.value),
+      message: 'Copied value',
+      needsSizeConfirmation: false
+    }
   }
   const { rows, columns, extractorId, options } = request
   const text = extract(extractorId, rows, columns, options)

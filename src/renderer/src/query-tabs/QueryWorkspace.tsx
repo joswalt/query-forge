@@ -5,6 +5,8 @@ import type {
   QueryOptions
 } from '@shared/types/database-provider'
 import { getExtractor, type ExtractorId, type ExtractorOptions } from '@shared/extractors/extract'
+import { inferTableName } from '@shared/extractors/infer-table-name'
+import { FALLBACK_TABLE_NAME } from '@shared/extractors/sql-extractors'
 import { QueryEditor, type QueryEditorHandle } from '../editor/QueryEditor'
 import { initialExportState, type ExportState } from '../results/export-state'
 import { useExtractorSettings } from '../results/extractor-settings'
@@ -44,13 +46,13 @@ interface QueryTabState {
   exportState: ExportState
 }
 
-/** The Table field's value when no name can be inferred (user story 39). */
-const FALLBACK_TABLE_NAME = 'my_table'
-
-/** The table name inferred for a tab, if any: the Cosmos container the tab
- * targets. */
+/** The table name inferred for a tab, if any (user story 38): the Cosmos
+ * container the tab targets, else a single-table `FROM` in the query that
+ * produced the results on screen (the editor's text before the first run).
+ * Derived on every render, so it follows the query until the user edits the
+ * Table field. */
 function inferredTableName(tab: QueryTabState): string | undefined {
-  return tab.options?.container
+  return tab.options?.container ?? inferTableName(tab.lastExecutedQuery ?? tab.queryText)
 }
 
 function tableNameFor(tab: QueryTabState): string {

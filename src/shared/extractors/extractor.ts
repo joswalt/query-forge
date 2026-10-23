@@ -14,6 +14,9 @@ export type ExtractorId =
   | 'markdown'
   | 'pretty'
   | 'one-row'
+  | 'sql-inserts'
+  | 'sql-insert-multirow'
+  | 'where-clause'
 
 export interface ExtractorOptions {
   includeHeader: boolean
