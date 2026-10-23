@@ -114,15 +114,15 @@ export class ExportService {
     if (!extractor.buffersAllRows) {
       // These formats ignore the column list, so each row is written as it
       // arrives and memory stays flat however many rows match.
-      sink.write(extractor.begin([], extractorOptions))
+      sink.write(extractor.begin(extractorOptions))
       for await (const chunk of chunks) {
         for (const row of rowsOf(chunk)) {
-          sink.write(extractor.row(row, [], extractorOptions, rowsWritten))
+          sink.write(extractor.row(row, extractorOptions, rowsWritten))
           rowsWritten += 1
         }
         onProgress?.(rowsWritten)
       }
-      sink.write(extractor.end([], extractorOptions, rowsWritten))
+      sink.write(extractor.end(extractorOptions, rowsWritten))
       return
     }
 
