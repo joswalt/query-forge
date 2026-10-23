@@ -47,12 +47,11 @@ interface QueryTabState {
 }
 
 /** The table name inferred for a tab, if any (user story 38): the Cosmos
- * container the tab targets, else a single-table `FROM` in the query that
- * produced the results on screen (the editor's text before the first run).
- * Derived on every render, so it follows the query until the user edits the
- * Table field. */
+ * container the tab targets, else a single-table `FROM` in the editor's
+ * query. Derived on every render, so it follows the query text as it
+ * changes until the user edits the Table field. */
 function inferredTableName(tab: QueryTabState): string | undefined {
-  return tab.options?.container ?? inferTableName(tab.lastExecutedQuery ?? tab.queryText)
+  return tab.options?.container ?? inferTableName(tab.queryText)
 }
 
 function tableNameFor(tab: QueryTabState): string {
@@ -391,10 +390,11 @@ export const QueryWorkspace = forwardRef<
    * profile name. Later Result Sets of a script are numbered so exporting
    * several in a row doesn't offer to overwrite the first. */
   function exportFileName(tab: QueryTabState, extractorId: ExtractorId, resultSet: number): string {
+    // `||`, not `??`: a Table field the user cleared still falls back.
     const base =
-      tab.tableNameOverride ??
-      inferredTableName(tab) ??
-      connections.find((c) => c.id === tab.connectionId)?.name ??
+      tab.tableNameOverride?.trim() ||
+      inferredTableName(tab) ||
+      connections.find((c) => c.id === tab.connectionId)?.name ||
       'export'
     const safeBase = base.replace(/[\\/:*?"<>|\[\]]+/g, '_').replace(/^_+|_+$/g, '') || 'export'
     const setSuffix = resultSet > 0 ? `_result-${resultSet + 1}` : ''
