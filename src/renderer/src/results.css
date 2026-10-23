@@ -143,6 +143,62 @@
   font-size: 12px;
 }
 
+.extractor-strip {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--qf-muted);
+}
+
+.extractor-strip__field,
+.extractor-strip__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.extractor-strip select,
+.extractor-strip input[type='text'] {
+  padding: 2px 6px;
+  font-size: 12px;
+}
+
+.extractor-strip input[type='text'] {
+  width: 14ch;
+  font-family: var(--qf-font-mono);
+}
+
+.extractor-strip__toggle:has(input:disabled) {
+  opacity: 0.55;
+}
+
+.query-results__copy-guard {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--qf-warn);
+  border-radius: 9px;
+  font-size: 12.5px;
+}
+
+.toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 30;
+  padding: 8px 14px;
+  border: 1px solid var(--qf-border-strong);
+  border-radius: 9px;
+  background: var(--qf-bg-elevated);
+  box-shadow: var(--qf-pop-shadow);
+  color: var(--qf-fg);
+  font-size: 12.5px;
+}
+
 .query-results__export-status {
   display: flex;
   align-items: center;
@@ -293,6 +349,28 @@
   border: 0;
   background: transparent;
   text-align: left;
+}
+
+.results-grid__submenu-host {
+  position: relative;
+}
+
+.results-grid__submenu-host > button {
+  display: flex;
+  justify-content: space-between;
+}
+
+/* "Copy as ▸" opens to the right on hover or keyboard focus. */
+.results-grid__submenu {
+  display: none;
+  position: absolute;
+  top: -5px;
+  left: 100%;
+}
+
+.results-grid__submenu-host:hover > .results-grid__submenu,
+.results-grid__submenu-host:focus-within > .results-grid__submenu {
+  display: block;
 }
 
 /* ---------- JSON ---------- */

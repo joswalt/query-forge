@@ -65,5 +65,17 @@ A single automatically recorded past query execution — profile, status (`succe
 _Avoid_: History Record (too generic), Query Log (implies append-only diagnostic output, not a user-facing reusable record)
 
 **Preferences**:
-The JSON-file-backed (not SQLite) settings owned by the Local Storage Service alongside its SQLite database (map.md ticket 07) — non-secret, non-Connection-Profile user settings. Currently holds whether Query History Entries persist query text; a future theme choice (user story 54) is expected to live here too but is not yet implemented.
+The JSON-file-backed (not SQLite) settings owned by the Local Storage Service alongside its SQLite database (map.md ticket 07) — non-secret, non-Connection-Profile user settings. Holds whether Query History Entries persist query text, the theme (user story 54), and the Active Extractor with its Include header toggle.
 _Avoid_: Settings (used informally elsewhere in product-overview.md, but "Preferences" is this codebase's identifier — e.g. `PreferencesStore`, `preferences.json`)
+
+**Extractor**:
+A named output format that turns result rows plus an explicit column list into text: CSV, TSV, JSON, Markdown, SQL Inserts, and so on (`src/shared/extractors/`). Pure, shared code: the renderer copies with it and main's Export Service writes files with it, so a copy and an export of the same rows are byte-identical (ADR 0003). Column-based Extractors take the grid's displayed columns; nested Cosmos values render as compact JSON.
+_Avoid_: Format, Serializer, Export Format (the old `ExportFormat` `'csv' | 'json'` type it replaced)
+
+**Active Extractor**:
+The one Extractor every copy-rows and export action uses, chosen from the results header dropdown and persisted globally in Preferences (not per tab). "Copy cell" never uses it; it always copies the raw value.
+_Avoid_: Default format, Current format
+
+**Copy as / Export as**:
+A copy or export parameterized by an Extractor. "Copy as ▸" on the grid context menu is a one-off copy in any Extractor that leaves the Active Extractor unchanged.
+_Avoid_: Convert, Save as

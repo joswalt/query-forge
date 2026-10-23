@@ -13,7 +13,7 @@ import type {
   ResultChunk,
   TestResult
 } from '@shared/types/database-provider'
-import type { ExportFormat } from '@shared/types/export'
+import type { ExtractorId, ExtractorOptions } from '@shared/extractors/extract'
 import type { QueryHistoryEntry } from '@shared/types/query-history'
 import type { Preferences } from '@shared/types/preferences'
 import type {
@@ -173,15 +173,25 @@ const exportApi = {
 
   exportLoaded: (
     rows: unknown[],
-    format: ExportFormat,
+    columns: string[],
+    extractorId: ExtractorId,
+    extractorOptions: ExtractorOptions,
     destinationPath: string
-  ): Promise<void> => ipcRenderer.invoke('export:loaded', { rows, format, destinationPath }),
+  ): Promise<void> =>
+    ipcRenderer.invoke('export:loaded', {
+      rows,
+      columns,
+      extractorId,
+      extractorOptions,
+      destinationPath
+    }),
 
   exportAll: async (
     profileId: string,
     query: string,
     options: QueryOptions | undefined,
-    format: ExportFormat,
+    extractorId: ExtractorId,
+    extractorOptions: ExtractorOptions,
     resultSet: number,
     destinationPath: string,
     handlers: ExportAllStreamHandlers
@@ -215,7 +225,8 @@ const exportApi = {
       executionId,
       query,
       options,
-      format,
+      extractorId,
+      extractorOptions,
       resultSet,
       destinationPath
     })

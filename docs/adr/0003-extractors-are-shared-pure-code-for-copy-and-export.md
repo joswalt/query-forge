@@ -1,0 +1,11 @@
+# Extractors are pure shared code used by both renderer copy and main export
+
+QueryForge got data out in two hard-wired shapes: CSV/JSON files written by main's Export Service (`csv-serialize.ts`, `JsonArrayWriter`) and a fixed TSV built by the renderer for the clipboard (`cell-format.ts`). Adding Markdown, Pretty, SQL Inserts and the rest (ticket 12) in both places would mean two implementations of every format, drifting apart one escaping rule at a time.
+
+Instead, each format is an **Extractor** in `src/shared/extractors/`: pure functions with no Node, DOM or Electron dependency, exposed as streaming pieces (`begin`, `row`, `end`, or a whole-input `render` for formats like Pretty that need every row first) plus one in-memory entry point, `extract(extractorId, rows, columns, options)`. The renderer's copy actions call `extract` directly. Main's Export Service calls `extract` for "Export loaded" and streams the pieces for "Export all matching". Same code, same bytes (user story 50).
+
+This **extends** spec.md §6's main-only Export Service; it doesn't replace it. "Export all matching" still re-executes the query in main under a new Execution ID and streams to disk without the rows ever visiting the renderer. Only the formatting logic moved to `shared`. Formats that need the full column set before their first byte (`buffersAllRows`: every column-based format) buffer the streamed rows to compute the column union, the tradeoff CSV already made; JSON and JSON Lines stream row by row.
+
+**Considered and rejected**: (a) formatting in main only and having the renderer ask main over IPC for clipboard text: an extra round-trip structured-cloning up to `MAX_DISPLAY_ROWS` rows for every copy, for no isolation benefit, since result rows are already in the renderer; (b) formatting in the renderer only and having main ask the renderer for export text: breaks "Export all matching never visits the renderer" and its memory characteristics.
+
+**Consequence**: Extractors must stay free of runtime-specific APIs (no `Buffer`, no `fs`, no DOM) because both tsconfig projects compile them. The Active Extractor id travels over the export IPC in place of the old `ExportFormat`. An unknown id resolves to CSV.

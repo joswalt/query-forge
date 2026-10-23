@@ -1,35 +1,68 @@
-import { useState } from 'react'
-import type { ExportFormat } from '@shared/types/export'
+import { useEffect, useMemo, useState } from 'react'
+import { computeColumnUnion } from '@shared/column-union'
+import {
+  EXTRACTORS,
+  getExtractor,
+  type ExtractorId,
+  type ExtractorOptions
+} from '@shared/extractors/extract'
 import { CellInspector } from '../results/CellInspector'
+import { planCopy, type CopyPlan } from '../results/copy-plan'
 import type { ExportState } from '../results/export-state'
-import { ResultsGrid } from '../results/ResultsGrid'
+import type { ExtractorSettings } from '../results/extractor-settings'
+import { ResultsGrid, type GridCopy } from '../results/ResultsGrid'
 import { ResultsJsonView } from '../results/ResultsJsonView'
 import brandMark from '../assets/brand/queryforge-icon-transparent-1024.png'
 import { retainedRowCount, type QueryRunState } from './query-run-reducer'
 
 type ViewMode = 'table' | 'json'
 
+const TOAST_MS = 2500
+
+/** What "Export loaded…" writes: these rows, in these columns, through this
+ * Extractor (the Active one unless given). */
+export interface ExportLoadedRequest {
+  rows: unknown[]
+  columns: string[]
+  resultSet: number
+  extractorId?: ExtractorId
+}
+
 /**
  * Results display (user stories 38-44): status/duration/RU bar, then either
  * the virtualized TanStack grid or the JSON view of the selected Result Set's
  * rows — switchable without re-executing the query (user story 43). A
  * multi-statement script (user story 61) gets a tab per Result Set; a
- * single-result run looks exactly as it always did. Export
- * actions are wired by the parent (QueryWorkspace), which also owns the
- * Export Service IPC calls — this component only renders the buttons and
- * forwards clicks, keeping it ignorant of IPC/export-progress plumbing.
+ * single-result run looks exactly as it always did.
+ *
+ * One strip holds the Active Extractor dropdown, the Include header toggle,
+ * and (for SQL Extractors) the Table field; the selected Result Set's
+ * Copy all / Export loaded… / Export all matching… all use it. Copies
+ * happen here (clipboard, toast, size guard); export actions are wired by
+ * the parent (QueryWorkspace), which also owns the Export Service IPC
+ * calls — this component only renders the buttons and forwards clicks,
+ * keeping it ignorant of IPC/export-progress plumbing.
  */
 export function QueryResultsView({
   run,
   exportState,
+  extractorSettings,
+  onExtractorSettingsChange,
+  tableName,
+  onTableNameChange,
   onExportLoaded,
   onExportAll,
   onCancelExport
 }: {
   run: QueryRunState
   exportState: ExportState
-  onExportLoaded: (format: ExportFormat, resultSet: number) => void
-  onExportAll: (format: ExportFormat, resultSet: number) => void
+  extractorSettings: ExtractorSettings
+  onExtractorSettingsChange: (patch: Partial<ExtractorSettings>) => void
+  /** The tab's Table field value for the SQL Extractors. */
+  tableName: string
+  onTableNameChange: (tableName: string) => void
+  onExportLoaded: (request: ExportLoadedRequest) => void
+  onExportAll: (resultSet: number) => void
   onCancelExport: () => void
 }): React.JSX.Element {
   const [viewMode, setViewMode] = useState<ViewMode>('table')
@@ -53,6 +86,50 @@ export function QueryResultsView({
   const setIndex = Math.min(selectedSet, Math.max(run.resultSets.length - 1, 0))
   const current = run.resultSets[setIndex]
   const currentRows = current?.rows ?? []
+  const columns = useMemo(() => computeColumnUnion(currentRows), [currentRows])
+  const streaming = run.status === 'running'
+  const activeExtractor = getExtractor(extractorSettings.extractorId)
+  const extractorOptions: ExtractorOptions = {
+    includeHeader: extractorSettings.includeHeader,
+    tableName
+  }
+
+  const [toast, setToast] = useState<{ message: string; id: number } | null>(null)
+  useEffect(() => {
+    if (!toast) return
+    const timer = setTimeout(() => setToast(null), TOAST_MS)
+    return () => clearTimeout(timer)
+  }, [toast])
+  /** An oversized copy waiting on "copy anyway / export instead" (user story 11). */
+  const [pendingCopy, setPendingCopy] = useState<{
+    plan: CopyPlan
+    rows: unknown[]
+    extractorId: ExtractorId
+  } | null>(null)
+
+  function writeClipboard(plan: CopyPlan): void {
+    navigator.clipboard.writeText(plan.text).then(
+      () => setToast({ message: plan.message, id: Date.now() }),
+      (err) => setToast({ message: `Copy failed: ${String(err)}`, id: Date.now() })
+    )
+  }
+
+  function handleCopy(copy: GridCopy): void {
+    if (copy.scope === 'cell') {
+      writeClipboard(planCopy(copy))
+      return
+    }
+    const extractorId = copy.extractorId ?? activeExtractor.id
+    const plan = planCopy({
+      scope: 'rows',
+      rows: copy.rows,
+      columns,
+      extractorId,
+      options: extractorOptions
+    })
+    if (plan.needsSizeConfirmation) setPendingCopy({ plan, rows: copy.rows, extractorId })
+    else writeClipboard(plan)
+  }
   const truncated = retainedRowCount(run) < run.rowCount
   const hasRows = multiSet
     ? run.resultSets.some((set) => set.rowCount > 0)
@@ -134,49 +211,132 @@ export function QueryResultsView({
               </button>
             </div>
 
+            <div className="extractor-strip" aria-label="Copy and export format">
+              <label className="extractor-strip__field">
+                <span>Format</span>
+                <select
+                  value={activeExtractor.id}
+                  onChange={(e) =>
+                    onExtractorSettingsChange({ extractorId: e.target.value as ExtractorId })
+                  }
+                >
+                  {EXTRACTORS.map((extractor) => (
+                    <option key={extractor.id} value={extractor.id}>
+                      {extractor.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label
+                className="extractor-strip__toggle"
+                title={activeExtractor.hasHeader ? undefined : `${activeExtractor.label} has no header`}
+              >
+                <input
+                  type="checkbox"
+                  checked={extractorSettings.includeHeader}
+                  disabled={!activeExtractor.hasHeader}
+                  onChange={(e) => onExtractorSettingsChange({ includeHeader: e.target.checked })}
+                />
+                Include header
+              </label>
+              {activeExtractor.usesTableName && (
+                <label className="extractor-strip__field">
+                  <span>Table</span>
+                  <input
+                    type="text"
+                    value={tableName}
+                    spellCheck={false}
+                    onChange={(e) => onTableNameChange(e.target.value)}
+                  />
+                </label>
+              )}
+            </div>
+
             {/* "Loaded" vs "all matching" is a deliberate, visible UI
              * distinction (user story 47), not two modes of the same
              * button — "all" re-executes the query in main under a new
              * Execution ID and is uncapped, unlike what's on screen.
              *
-             * "Export loaded" is disabled while the run is still
-             * `'running'`: its source is `run.rows` at click time, but a
-             * still-running query keeps appending to that same array —
-             * exporting mid-run would silently write fewer rows than the
-             * grid ends up showing once the run finishes. */}
-            <span
-              className="query-results__export-group"
-              title="Writes the rows already loaded in this view"
-            >
-              <span className="query-results__export-label">Export loaded</span>
+             * "Copy all" and "Export loaded" are disabled while the run is
+             * still `'running'`: their source is `run.rows` at click time,
+             * but a still-running query keeps appending to that same array
+             * — copying or exporting mid-run would silently write fewer
+             * rows than the grid ends up showing once the run finishes.
+             * "Export all matching" stays file-only (never clipboard): it
+             * re-runs the query, a second RU charge (user story 15). */}
+            <span className="query-results__export-group">
               <button
                 type="button"
-                disabled={run.status === 'running'}
-                onClick={() => onExportLoaded('csv', setIndex)}
+                disabled={streaming}
+                title={`Copies every loaded row of this result as ${activeExtractor.label}`}
+                onClick={() => handleCopy({ scope: 'rows', rows: currentRows })}
               >
-                CSV
+                Copy all
               </button>
               <button
                 type="button"
-                disabled={run.status === 'running'}
-                onClick={() => onExportLoaded('json', setIndex)}
+                disabled={streaming}
+                title={`Writes the rows already loaded in this view as ${activeExtractor.label}`}
+                onClick={() => onExportLoaded({ rows: currentRows, columns, resultSet: setIndex })}
               >
-                JSON
+                Export loaded…
               </button>
             </span>
-            <span
-              className="query-results__export-group query-results__export-group--all"
-              title="Runs the query again and writes every matching row of the selected result. Cosmos DB charges request units for the second run."
-            >
-              <span className="query-results__export-label">Export all matching</span>
-              <button type="button" onClick={() => onExportAll('csv', setIndex)}>
-                CSV
+            <span className="query-results__export-group query-results__export-group--all">
+              <button
+                type="button"
+                title={
+                  `Runs the query again and writes every matching row of the selected result as ${activeExtractor.label}. Cosmos DB charges request units for the second run.` +
+                  (activeExtractor.buffersAllRows
+                    ? ` ${activeExtractor.label} holds every row in memory before writing; JSON or JSON Lines stream instead.`
+                    : '')
+                }
+                onClick={() => onExportAll(setIndex)}
+              >
+                Export all matching…
               </button>
-              <button type="button" onClick={() => onExportAll('json', setIndex)}>
-                JSON
-              </button>
+              {activeExtractor.buffersAllRows && (
+                <span className="query-results__export-label">holds all rows in memory</span>
+              )}
             </span>
           </div>
+
+          {pendingCopy && (
+            <div className="query-results__copy-guard" role="alertdialog" aria-label="Large copy">
+              <span>
+                This copy is {(pendingCopy.plan.text.length / (1024 * 1024)).toFixed(1)} MB of text,
+                which can freeze the app or your clipboard.
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  writeClipboard(pendingCopy.plan)
+                  setPendingCopy(null)
+                }}
+              >
+                Copy anyway
+              </button>
+              <button
+                type="button"
+                className="btn--primary"
+                autoFocus
+                onClick={() => {
+                  onExportLoaded({
+                    rows: pendingCopy.rows,
+                    columns,
+                    resultSet: setIndex,
+                    extractorId: pendingCopy.extractorId
+                  })
+                  setPendingCopy(null)
+                }}
+              >
+                Export to file instead
+              </button>
+              <button type="button" className="btn--ghost" onClick={() => setPendingCopy(null)}>
+                Cancel
+              </button>
+            </div>
+          )}
 
           {exportState.status !== 'idle' && (
             <div className="query-results__export-status">
@@ -207,6 +367,9 @@ export function QueryResultsView({
           {viewMode === 'table' ? (
             <ResultsGrid
               rows={currentRows}
+              columns={columns}
+              streaming={streaming}
+              onCopy={handleCopy}
               onExpandCell={(value) => {
                 setInspectedCell(value)
                 setInspection((n) => n + 1)
@@ -219,7 +382,9 @@ export function QueryResultsView({
               // leak across results; rows streaming into the same run keep it.
               key={`${run.startedAt}:${setIndex}`}
               rows={currentRows}
-              onSave={() => onExportLoaded('json', setIndex)} />
+              onSave={() =>
+                onExportLoaded({ rows: currentRows, columns, resultSet: setIndex, extractorId: 'json' })
+              } />
           )}
         </>
       )}
@@ -233,6 +398,12 @@ export function QueryResultsView({
           <img src={brandMark} alt="" width={84} height={84} draggable={false} />
           <p className="results-empty__title">Results appear here</p>
           <p className="empty">Pick a connection, write a query, and press Run.</p>
+        </div>
+      )}
+
+      {toast && (
+        <div key={toast.id} className="toast" role="status">
+          {toast.message}
         </div>
       )}
 

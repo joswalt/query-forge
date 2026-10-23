@@ -5,7 +5,7 @@ import { rename, unlink } from 'node:fs/promises'
 import type { WriteStream } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import type { ExecutionId, QueryOptions } from '@shared/types/database-provider'
-import type { ExportFormat } from '@shared/types/export'
+import type { ExtractorId, ExtractorOptions } from '@shared/extractors/extract'
 import type { QueryExecutionClient } from '../query-execution/query-execution-client'
 import type { ExportService } from '../export/export-service'
 import type { ExportSink } from '../export/export-sink'
@@ -45,10 +45,22 @@ export function registerExportIpcHandlers(
     'export:loaded',
     async (
       _event,
-      request: { rows: unknown[]; format: ExportFormat; destinationPath: string }
+      request: {
+        rows: unknown[]
+        columns: string[]
+        extractorId: ExtractorId
+        extractorOptions: ExtractorOptions
+        destinationPath: string
+      }
     ): Promise<void> => {
       await writeWithTempFile(request.destinationPath, (sink) =>
-        exportService.exportLoadedRows(request.rows, request.format, sink)
+        exportService.exportLoadedRows(
+          request.rows,
+          request.columns,
+          request.extractorId,
+          request.extractorOptions,
+          sink
+        )
       )
     }
   )
@@ -76,7 +88,8 @@ interface ExportAllRequest {
   executionId: ExecutionId
   query: string
   options?: QueryOptions
-  format: ExportFormat
+  extractorId: ExtractorId
+  extractorOptions: ExtractorOptions
   resultSet?: number
   destinationPath: string
 }

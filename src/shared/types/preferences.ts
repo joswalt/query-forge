@@ -4,6 +4,8 @@
  * file for preferences"). Shared between main's `PreferencesStore` and the
  * renderer so both type against the same shape.
  */
+import type { ExtractorId } from '../extractors/extract'
+
 export type Theme = 'light' | 'dark'
 
 export interface Preferences {
@@ -19,9 +21,17 @@ export interface Preferences {
    * own yet — nesting it under e.g. `appearance` preemptively would be
    * speculative structure with nothing to justify it. */
   theme: Theme
+  /** The Active Extractor and Include header toggle (GLOSSARY.md), global
+   * across tabs (user stories 2, 19). A persisted id this build doesn't
+   * know is read back as CSV (`getExtractor`). */
+  extractor: {
+    activeExtractorId: ExtractorId
+    includeHeader: boolean
+  }
 }
 
 export const defaultPreferences: Preferences = {
   queryHistory: { persistQueryText: false },
-  theme: 'dark'
+  theme: 'dark',
+  extractor: { activeExtractorId: 'csv', includeHeader: true }
 }

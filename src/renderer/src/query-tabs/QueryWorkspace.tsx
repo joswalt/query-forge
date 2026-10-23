@@ -4,11 +4,12 @@ import type {
   DatabaseMetadataObject,
   QueryOptions
 } from '@shared/types/database-provider'
-import type { ExportFormat } from '@shared/types/export'
+import { getExtractor, type ExtractorId, type ExtractorOptions } from '@shared/extractors/extract'
 import { QueryEditor, type QueryEditorHandle } from '../editor/QueryEditor'
 import { initialExportState, type ExportState } from '../results/export-state'
+import { useExtractorSettings } from '../results/extractor-settings'
 import { CloseIcon, PlayIcon, PlusIcon } from '../icons'
-import { QueryResultsView } from './QueryResultsView'
+import { QueryResultsView, type ExportLoadedRequest } from './QueryResultsView'
 import { EditorResizer, useEditorHeight } from './EditorResizer'
 import {
   initialQueryRunState,
@@ -36,8 +37,33 @@ interface QueryTabState {
    * Provider stops paging, or `'all'` to run to completion. Deliberately not
    * persisted in drafts — every session starts back on the RU-safe default. */
   rowLimit: RowLimit
+  /** The SQL Extractors' Table field once the user has typed in it;
+   * `undefined` while it still follows the inferred name. */
+  tableNameOverride: string | undefined
   run: QueryRunState
   exportState: ExportState
+}
+
+/** The Table field's value when no name can be inferred (user story 39). */
+const FALLBACK_TABLE_NAME = 'my_table'
+
+/** The table name inferred for a tab, if any: the Cosmos container the tab
+ * targets. */
+function inferredTableName(tab: QueryTabState): string | undefined {
+  return tab.options?.container
+}
+
+function tableNameFor(tab: QueryTabState): string {
+  return tab.tableNameOverride ?? inferredTableName(tab) ?? FALLBACK_TABLE_NAME
+}
+
+/** `yyyyMMdd-HHmm` in local time. */
+function fileTimestamp(date: Date): string {
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return (
+    `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}` +
+    `-${pad(date.getHours())}${pad(date.getMinutes())}`
+  )
 }
 
 /** Transient, non-rendered bookkeeping for one tab's in-flight execution —
@@ -70,6 +96,7 @@ function createTab(index: number, seed?: OpenQuerySeed): QueryTabState {
     options: seed?.options,
     lastExecutedQuery: undefined,
     rowLimit: DEFAULT_ROW_LIMIT,
+    tableNameOverride: undefined,
     run: initialQueryRunState,
     exportState: initialExportState
   }
@@ -198,6 +225,7 @@ export const QueryWorkspace = forwardRef<
   const nextIndexRef = useRef(restored.tabs.length + 1)
   const executionsRef = useRef(new Map<string, ExecutionHandle>())
   const exportExecutionsRef = useRef(new Map<string, ExecutionHandle>())
+  const [extractorSettings, updateExtractorSettings] = useExtractorSettings()
   const editorRef = useRef<QueryEditorHandle>(null)
   const editorHeight = useEditorHeight()
 
@@ -356,10 +384,24 @@ export const QueryWorkspace = forwardRef<
     execution.cancel()
   }
 
-  /** Suggested save-dialog name; later Result Sets of a script are numbered
-   * so exporting several in a row doesn't offer to overwrite the first. */
-  function exportFileName(format: ExportFormat, resultSet: number): string {
-    return resultSet > 0 ? `export-result-${resultSet + 1}.${format}` : `export.${format}`
+  /** Suggested save-dialog name (user stories 16-17):
+   * `<container-or-table>_<yyyyMMdd-HHmm>.<ext>`, falling back to the
+   * profile name. Later Result Sets of a script are numbered so exporting
+   * several in a row doesn't offer to overwrite the first. */
+  function exportFileName(tab: QueryTabState, extractorId: ExtractorId, resultSet: number): string {
+    const base =
+      tab.tableNameOverride ??
+      inferredTableName(tab) ??
+      connections.find((c) => c.id === tab.connectionId)?.name ??
+      'export'
+    const safeBase = base.replace(/[\\/:*?"<>|\[\]]+/g, '_').replace(/^_+|_+$/g, '') || 'export'
+    const setSuffix = resultSet > 0 ? `_result-${resultSet + 1}` : ''
+    const extension = getExtractor(extractorId).fileExtension
+    return `${safeBase}${setSuffix}_${fileTimestamp(new Date())}.${extension}`
+  }
+
+  function extractorOptionsFor(tab: QueryTabState): ExtractorOptions {
+    return { includeHeader: extractorSettings.includeHeader, tableName: tableNameFor(tab) }
   }
 
   function dispatchExport(tabId: string, exportState: ExportState): void {
@@ -369,24 +411,23 @@ export const QueryWorkspace = forwardRef<
   /** "Export loaded rows" (user story 45): the rows already in `tab.run`,
    * capped at MAX_DISPLAY_ROWS — a single bounded `invoke`, no progress
    * events or cancel (see export-ipc.ts's doc for why). */
-  async function handleExportLoaded(
-    tabId: string,
-    format: ExportFormat,
-    resultSet: number
-  ): Promise<void> {
+  async function handleExportLoaded(tabId: string, request: ExportLoadedRequest): Promise<void> {
     const tab = tabs.find((t) => t.id === tabId)
     if (!tab) return
+    const extractorId = request.extractorId ?? extractorSettings.extractorId
 
     const destinationPath = await window.api.export.chooseDestination(
-      exportFileName(format, resultSet)
+      exportFileName(tab, extractorId, request.resultSet)
     )
     if (!destinationPath) return
 
     dispatchExport(tabId, { status: 'running', kind: 'loaded' })
     try {
       await window.api.export.exportLoaded(
-        tab.run.resultSets[resultSet]?.rows ?? [],
-        format,
+        request.rows,
+        request.columns,
+        extractorId,
+        extractorOptionsFor(tab),
         destinationPath
       )
       dispatchExport(tabId, { status: 'done' })
@@ -404,7 +445,7 @@ export const QueryWorkspace = forwardRef<
    * Cosmos — this is why it's a visibly distinct action from "export
    * loaded", not a toggle on the same button, per user story 47), with
    * progress and cancel (user story 48). */
-  function handleExportAll(tabId: string, format: ExportFormat, resultSet: number): void {
+  function handleExportAll(tabId: string, resultSet: number): void {
     const tab = tabs.find((t) => t.id === tabId)
     if (!tab) return
 
@@ -418,9 +459,11 @@ export const QueryWorkspace = forwardRef<
     const connectionId = tab.connectionId
     const query = tab.lastExecutedQuery
     const options = tab.options
+    const extractorId = extractorSettings.extractorId
+    const extractorOptions = extractorOptionsFor(tab)
 
     window.api.export
-      .chooseDestination(exportFileName(format, resultSet))
+      .chooseDestination(exportFileName(tab, extractorId, resultSet))
       .then((destinationPath) => {
         if (!destinationPath) return
 
@@ -433,19 +476,31 @@ export const QueryWorkspace = forwardRef<
         exportExecutionsRef.current.set(tabId, handle)
 
         window.api.export
-          .exportAll(connectionId, query, options, format, resultSet, destinationPath, {
-            onProgress: (rowsWritten) =>
-              dispatchExport(tabId, { status: 'running', kind: 'all', rowsWritten }),
-            onDone: () => {
-              exportExecutionsRef.current.delete(tabId)
-              dispatchExport(tabId, { status: 'done' })
-            },
-            onError: (message) => {
-              const cancelled = exportExecutionsRef.current.get(tabId)?.cancelRequested ?? false
-              exportExecutionsRef.current.delete(tabId)
-              dispatchExport(tabId, cancelled ? { status: 'cancelled' } : { status: 'error', message })
+          .exportAll(
+            connectionId,
+            query,
+            options,
+            extractorId,
+            extractorOptions,
+            resultSet,
+            destinationPath,
+            {
+              onProgress: (rowsWritten) =>
+                dispatchExport(tabId, { status: 'running', kind: 'all', rowsWritten }),
+              onDone: () => {
+                exportExecutionsRef.current.delete(tabId)
+                dispatchExport(tabId, { status: 'done' })
+              },
+              onError: (message) => {
+                const cancelled = exportExecutionsRef.current.get(tabId)?.cancelRequested ?? false
+                exportExecutionsRef.current.delete(tabId)
+                dispatchExport(
+                  tabId,
+                  cancelled ? { status: 'cancelled' } : { status: 'error', message }
+                )
+              }
             }
-          })
+          )
           .then((resolved) => {
             if (!exportExecutionsRef.current.has(tabId)) return
             handle.cancel = resolved.cancel
@@ -758,10 +813,14 @@ export const QueryWorkspace = forwardRef<
           <QueryResultsView
             run={activeTab.run}
             exportState={activeTab.exportState}
-            onExportLoaded={(format, resultSet) =>
-              void handleExportLoaded(activeTab.id, format, resultSet)
+            extractorSettings={extractorSettings}
+            onExtractorSettingsChange={updateExtractorSettings}
+            tableName={tableNameFor(activeTab)}
+            onTableNameChange={(tableName) =>
+              updateTab(activeTab.id, (t) => ({ ...t, tableNameOverride: tableName }))
             }
-            onExportAll={(format, resultSet) => handleExportAll(activeTab.id, format, resultSet)}
+            onExportLoaded={(request) => void handleExportLoaded(activeTab.id, request)}
+            onExportAll={(resultSet) => handleExportAll(activeTab.id, resultSet)}
             onCancelExport={() => handleCancelExport(activeTab.id)}
           />
         </div>

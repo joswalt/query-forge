@@ -39,6 +39,23 @@ describe('PreferencesStore', () => {
     expect(reloaded.get().theme).toBe('dark')
   })
 
+  it('persists the Active Extractor and Include header across a new PreferencesStore instance', () => {
+    new PreferencesStore(filePath).update({
+      extractor: { activeExtractorId: 'json', includeHeader: false }
+    })
+
+    const reloaded = new PreferencesStore(filePath)
+
+    expect(reloaded.get().extractor).toEqual({ activeExtractorId: 'json', includeHeader: false })
+  })
+
+  it('defaults the Active Extractor to CSV with the header included', () => {
+    expect(new PreferencesStore(filePath).get().extractor).toEqual({
+      activeExtractorId: 'csv',
+      includeHeader: true
+    })
+  })
+
   it('fills in defaults for keys missing from an on-disk file written by an older version', () => {
     writeFileSync(filePath, JSON.stringify({}), 'utf8')
 

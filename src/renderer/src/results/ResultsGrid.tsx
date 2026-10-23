@@ -6,11 +6,18 @@ import {
   type ColumnDef
 } from '@tanstack/react-table'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { computeColumnUnion } from '@shared/column-union'
+import { EXTRACTORS, type ExtractorId } from '@shared/extractors/extract'
 import { isRecord } from '@shared/is-record'
-import { buildRowCopyText, buildRowsCopyText, formatCellValue } from './cell-format'
+import { formatCellValue } from './cell-format'
+import { copyScopeForShortcut } from './copy-plan'
 
 const ROW_HEIGHT_PX = 28
+
+/** A copy the grid asks its parent to perform: a cell's raw value, or rows
+ * through an Extractor (`undefined` = the Active Extractor). */
+export type GridCopy =
+  | { scope: 'cell'; value: unknown }
+  | { scope: 'rows'; rows: unknown[]; extractorId?: ExtractorId }
 
 interface ContextMenuState {
   x: number
@@ -22,9 +29,10 @@ interface ContextMenuState {
  * The results grid (user stories 38-39): TanStack Table for column
  * model/resizing, TanStack Virtual for row virtualization (only visible
  * rows are mounted — `MAX_DISPLAY_ROWS` can hold tens of thousands of rows
- * without a proportional render cost). Columns are the union across all
- * retained rows (`computeColumnUnion`), not just row 0, since Cosmos
- * documents are heterogeneous.
+ * without a proportional render cost). `columns` comes from the parent (the
+ * union across all retained rows, `computeColumnUnion`, since Cosmos
+ * documents are heterogeneous) so copy and export use exactly the columns
+ * displayed here (user story 45).
  *
  * The header row is a `position: sticky` child of the *same* scroll
  * container the virtualized body scrolls in — not a separate element
@@ -33,23 +41,31 @@ interface ContextMenuState {
  * the scroll container would desync from resized/scrolled columns.
  *
  * Row/cell selection here is deliberately minimal: a click sets the
- * "active cell" (Cmd/Ctrl+C copies its value); clicking a row number
- * toggles that row into a multi-row selection (plain click replaces the
- * selection, Cmd/Ctrl-click extends it) for "copy selected rows." A
- * right-click context menu offers the same two actions explicitly. This
- * covers user story 39's "cell / selected rows / selected values" with two
- * concrete mechanisms (cell copy, row copy) rather than inventing a third,
- * undocumented selection model.
+ * "active cell"; clicking a row number toggles that row into a multi-row
+ * selection (plain click replaces the selection, Cmd/Ctrl-click extends
+ * it). Cmd/Ctrl+C copies the selected rows through the Active Extractor, or
+ * the active cell's raw value when no row is selected; Cmd/Ctrl+Shift+C
+ * copies every loaded row (copy-plan.ts decides which). The right-click
+ * menu offers the same explicitly, plus "Copy as ▸" for a one-off copy in
+ * any other Extractor. The copying itself (clipboard, toast, size guard)
+ * belongs to the parent via `onCopy`.
  */
 export function ResultsGrid({
   rows,
-  onExpandCell
+  columns,
+  streaming,
+  onExpandCell,
+  onCopy
 }: {
   rows: unknown[]
+  columns: string[]
+  /** The run is still appending rows: copying "all loaded" would silently
+   * get fewer rows than the run will produce (user story 48). */
+  streaming: boolean
   /** Open the JSON inspector for one cell's value (user story 41). */
   onExpandCell: (value: unknown) => void
+  onCopy: (copy: GridCopy) => void
 }): React.JSX.Element {
-  const columns = useMemo(() => computeColumnUnion(rows), [rows])
   const [activeCell, setActiveCell] = useState<{ rowIndex: number; columnId: string } | null>(
     null
   )
@@ -98,16 +114,17 @@ export function ResultsGrid({
         : isRecord(row)
           ? row[activeCell.columnId]
           : undefined
-    void navigator.clipboard.writeText(formatCellValue(value))
+    onCopy({ scope: 'cell', value })
   }
 
-  function copyRow(rowIndex: number): void {
-    void navigator.clipboard.writeText(buildRowCopyText(rows[rowIndex], columns))
+  function selectedRowValues(): unknown[] {
+    return [...selectedRows].sort((a, b) => a - b).map((i) => rows[i])
   }
 
-  function copySelectedRows(): void {
-    const ordered = [...selectedRows].sort((a, b) => a - b)
-    void navigator.clipboard.writeText(buildRowsCopyText(ordered.map((i) => rows[i]), columns))
+  /** The rows a context-menu copy acts on: the selection when the
+   * right-clicked row is part of it, otherwise just that row. */
+  function contextRows(rowIndex: number): unknown[] {
+    return selectedRows.has(rowIndex) ? selectedRowValues() : [rows[rowIndex]]
   }
 
   function toggleRowSelection(rowIndex: number, extend: boolean): void {
@@ -125,7 +142,13 @@ export function ResultsGrid({
       onKeyDown={(e) => {
         if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') {
           e.preventDefault()
-          copyActiveCell()
+          const scope = copyScopeForShortcut({
+            shift: e.shiftKey,
+            selectedRowCount: selectedRows.size
+          })
+          if (scope === 'cell') copyActiveCell()
+          else if (scope === 'selected') onCopy({ scope: 'rows', rows: selectedRowValues() })
+          else if (!streaming) onCopy({ scope: 'rows', rows })
         }
       }}
       onClick={() => setContextMenu(null)}
@@ -133,7 +156,11 @@ export function ResultsGrid({
       {selectedRows.size > 0 && (
         <div className="results-grid__toolbar">
           <span>{selectedRows.size} row(s) selected</span>
-          <button type="button" className="btn--ghost" onClick={copySelectedRows}>
+          <button
+            type="button"
+            className="btn--ghost"
+            onClick={() => onCopy({ scope: 'rows', rows: selectedRowValues() })}
+          >
             Copy selected rows
           </button>
         </div>
@@ -295,12 +322,39 @@ export function ResultsGrid({
             <button
               type="button"
               onClick={() => {
-                copyRow(contextMenu.rowIndex)
+                onCopy({ scope: 'rows', rows: contextRows(contextMenu.rowIndex) })
                 setContextMenu(null)
               }}
             >
-              Copy row
+              {selectedRows.has(contextMenu.rowIndex) && selectedRows.size > 1
+                ? `Copy ${selectedRows.size} selected rows`
+                : 'Copy row'}
             </button>
+          </li>
+          <li className="results-grid__submenu-host">
+            <button type="button" aria-haspopup="menu">
+              Copy as <span aria-hidden="true">▸</span>
+            </button>
+            <ul className="results-grid__context-menu results-grid__submenu" role="menu">
+              {EXTRACTORS.map((extractor) => (
+                <li key={extractor.id}>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      onCopy({
+                        scope: 'rows',
+                        rows: contextRows(contextMenu.rowIndex),
+                        extractorId: extractor.id
+                      })
+                      setContextMenu(null)
+                    }}
+                  >
+                    {extractor.label}
+                  </button>
+                </li>
+              ))}
+            </ul>
           </li>
         </ul>
       )}

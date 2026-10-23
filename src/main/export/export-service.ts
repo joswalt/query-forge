@@ -1,10 +1,13 @@
 import { computeColumnUnion } from '@shared/column-union'
 import type { ExecutionId, QueryOptions, ResultChunk } from '@shared/types/database-provider'
-import type { ExportFormat } from '@shared/types/export'
+import {
+  extract,
+  getExtractor,
+  type ExtractorId,
+  type ExtractorOptions
+} from '@shared/extractors/extract'
 import type { QueryExecutionClient } from '../query-execution/query-execution-client'
-import { csvDataRow, csvHeaderRow } from './csv-serialize'
 import type { ExportSink } from './export-sink'
-import { JsonArrayWriter } from './json-array-writer'
 
 /** `exportAll`'s parameters, bundled rather than seven positional
  * arguments — export-ipc.ts's `ExportAllRequest` (which also carries the
@@ -15,7 +18,8 @@ export interface ExportAllRequest {
   executionId: ExecutionId
   query: string
   options?: QueryOptions
-  format: ExportFormat
+  extractorId: ExtractorId
+  extractorOptions: ExtractorOptions
   /** Which Result Set of a multi-statement script to write (user story 61);
    * defaults to the first. The script is re-run in full regardless — only
    * rows of this set are written. */
@@ -23,8 +27,8 @@ export interface ExportAllRequest {
 }
 
 /**
- * Writes query result rows to an `ExportSink` in CSV or JSON (user stories
- * 45-49). Two entry points mirror the UI's explicit "loaded" vs "all
+ * Writes query result rows to an `ExportSink` through an Extractor (user
+ * stories 45-49; ADR 0003: the same shared code the renderer copies with). Two entry points mirror the UI's explicit "loaded" vs "all
  * matching" distinction (user story 47) — they have genuinely different
  * sources and memory characteristics, not just different labels on the
  * same code path:
@@ -44,16 +48,18 @@ export interface ExportAllRequest {
  *   executionId)`, identical to cancelling a live query, not a new
  *   mechanism.
  *
- * CSV's fixed header collides with Cosmos's schemaless documents: a CSV
- * header must be written before the first data row, but the full column
- * set isn't known until every row has been seen. For `exportLoadedRows`
- * this is free (the rows are already all in memory). For `exportAll` as
- * CSV, this implementation buffers every streamed row in memory to
- * compute the complete column union before writing a single line — a
- * deliberate, documented tradeoff of CSV's shape against Cosmos's
- * schemaless one, not an oversight. `exportAll` as JSON has no such
- * buffering (`JsonArrayWriter` writes each row as it arrives) and is the
- * recommended format for very large or highly heterogeneous Cosmos
+ * Column-based formats (CSV and the other delimited formats, Markdown,
+ * Pretty, One-row, the SQL formats) collide with Cosmos's schemaless
+ * documents: a header or column list must be written before the first data
+ * row, but the full column set isn't known until every row has been seen.
+ * For `exportLoadedRows` this is free (the rows are already all in memory,
+ * and the caller passes the grid's columns). For `exportAll`, an Extractor
+ * with `buffersAllRows` makes this implementation buffer every streamed row
+ * in memory to compute the complete column union before writing a single
+ * line — a deliberate, documented tradeoff of those formats' shape against
+ * Cosmos's schemaless one, not an oversight. JSON and JSON Lines have no
+ * such buffering (each row is written as it arrives) and are the
+ * recommended formats for very large or highly heterogeneous Cosmos
  * exports.
  *
  * Deliberate divergence from spec.md's literal wording: spec.md §6 says
@@ -79,19 +85,16 @@ export interface ExportAllRequest {
 export class ExportService {
   constructor(private readonly client: QueryExecutionClient) {}
 
-  async exportLoadedRows(rows: unknown[], format: ExportFormat, sink: ExportSink): Promise<void> {
-    if (format === 'json') {
-      const writer = new JsonArrayWriter(sink)
-      for (const row of rows) writer.writeRow(row)
-      writer.close()
-      return
-    }
-
-    const columns = computeColumnUnion(rows)
-    sink.write(csvHeaderRow(columns))
-    for (const row of rows) {
-      sink.write('\n' + csvDataRow(row, columns))
-    }
+  /** `columns` is the grid's displayed column list, so the file matches
+   * what the user sees (user story 45). */
+  async exportLoadedRows(
+    rows: unknown[],
+    columns: readonly string[],
+    extractorId: ExtractorId,
+    extractorOptions: ExtractorOptions,
+    sink: ExportSink
+  ): Promise<void> {
+    sink.write(extract(extractorId, rows, columns, extractorOptions))
   }
 
   async exportAll(
@@ -99,48 +102,39 @@ export class ExportService {
     sink: ExportSink,
     onProgress?: (rowsWritten: number) => void
   ): Promise<void> {
-    const { profileId, executionId, query, options, format, resultSet = 0 } = request
+    const { profileId, executionId, query, options, extractorId, extractorOptions, resultSet = 0 } =
+      request
+    const extractor = getExtractor(extractorId)
     const streamOptions: QueryOptions = { ...options, executionId }
     let rowsWritten = 0
     const rowsOf = (chunk: ResultChunk): unknown[] =>
       (chunk.resultSet ?? 0) === resultSet ? chunk.rows : []
+    const chunks = this.client.executeQuery(profileId, executionId, query, streamOptions)
 
-    if (format === 'json') {
-      const writer = new JsonArrayWriter(sink)
-      for await (const chunk of this.client.executeQuery(
-        profileId,
-        executionId,
-        query,
-        streamOptions
-      )) {
-        const rows = rowsOf(chunk)
-        for (const row of rows) writer.writeRow(row)
-        rowsWritten += rows.length
+    if (!extractor.buffersAllRows) {
+      // These formats ignore the column list, so each row is written as it
+      // arrives and memory stays flat however many rows match.
+      sink.write(extractor.begin([], extractorOptions))
+      for await (const chunk of chunks) {
+        for (const row of rowsOf(chunk)) {
+          sink.write(extractor.row(row, [], extractorOptions, rowsWritten))
+          rowsWritten += 1
+        }
         onProgress?.(rowsWritten)
       }
-      writer.close()
+      sink.write(extractor.end([], extractorOptions, rowsWritten))
       return
     }
 
-    // CSV: buffer every row first (see class doc) so the header can
-    // reflect every column that appears anywhere in the result.
+    // Buffer every row first (see class doc) so the column list reflects
+    // every column that appears anywhere in the result.
     const buffered: unknown[] = []
-    for await (const chunk of this.client.executeQuery(
-      profileId,
-      executionId,
-      query,
-      streamOptions
-    )) {
+    for await (const chunk of chunks) {
       const rows = rowsOf(chunk)
       buffered.push(...rows)
       rowsWritten += rows.length
       onProgress?.(rowsWritten)
     }
-
-    const columns = computeColumnUnion(buffered)
-    sink.write(csvHeaderRow(columns))
-    for (const row of buffered) {
-      sink.write('\n' + csvDataRow(row, columns))
-    }
+    sink.write(extract(extractorId, buffered, computeColumnUnion(buffered), extractorOptions))
   }
 }
