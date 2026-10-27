@@ -14,6 +14,7 @@ import { SidebarRail } from './SidebarRail'
 import { RAIL_WIDTH, useSidebarCollapsed } from './sidebar-collapsed'
 import { ENVIRONMENT_SHORT } from './connection-environment'
 import { markConnectionsLost, type ConnectionStatus } from './connection-status'
+import { formatLastUsed } from './last-used'
 import type { SavedQuery } from '@shared/types/saved-query'
 import { CosmosIcon, DatabaseIcon, MoonIcon, PlusIcon, SidebarIcon, SunIcon } from './icons'
 import logoOnDark from './assets/brand/queryforge-logo-dark.png'
@@ -176,7 +177,7 @@ export function App(): React.JSX.Element {
     try {
       await window.api.queryExecution.connect(id)
       setStatuses((prev) => ({ ...prev, [id]: 'connected' }))
-      // lastConnectedAt changed on the main side (recent connections, story 11).
+      // lastConnectedAt changed on the main side (the row's "last used", story 11).
       await refresh()
     } catch (err) {
       setStatuses((prev) => ({ ...prev, [id]: 'error' }))
@@ -244,11 +245,6 @@ export function App(): React.JSX.Element {
     })
   }
 
-  const recents = [...connections]
-    .filter((c) => c.lastConnectedAt)
-    .sort((a, b) => (b.lastConnectedAt ?? '').localeCompare(a.lastConnectedAt ?? ''))
-    .slice(0, 5)
-
   const groups = new Map<string, ConnectionProfile[]>()
   for (const connection of connections) {
     const key = connection.groupName ?? ''
@@ -283,6 +279,8 @@ export function App(): React.JSX.Element {
     const hasMetadata = metadataByConnection[connection.id] !== undefined
     const kindLabel = isCosmos ? 'Azure Cosmos DB' : 'Azure SQL Database'
     const needsAttention = status === 'connecting' || status === 'error'
+    const lastUsed =
+      status === 'disconnected' && connection.lastConnectedAt ? connection.lastConnectedAt : null
     return (
       <li
         key={connection.id}
@@ -350,7 +348,7 @@ export function App(): React.JSX.Element {
             shown when something needs attention, and stays readable to screen
             readers either way. */}
         <span className="visually-hidden">{needsAttention ? '' : status}</span>
-        {(connection.environment || connection.readOnly || needsAttention) && (
+        {(connection.environment || connection.readOnly || needsAttention || lastUsed) && (
           <div className="conn__badges">
             {connection.environment && (
               <span className="chip chip--env" data-env={connection.environment}>
@@ -362,6 +360,15 @@ export function App(): React.JSX.Element {
               <span className="conn__status-text" data-status={status}>
                 {status}
               </span>
+            )}
+            {lastUsed && (
+              <time
+                className="conn__last-used"
+                dateTime={lastUsed}
+                title={new Date(lastUsed).toLocaleString()}
+              >
+                {formatLastUsed(lastUsed)}
+              </time>
             )}
           </div>
         )}
@@ -486,23 +493,6 @@ export function App(): React.JSX.Element {
                       void refresh()
                     }}
                   />
-                </div>
-              )}
-
-              {recents.length > 0 && (
-                <div className="recents">
-                  <span className="recents__label">Recent</span>
-                  {recents.map((connection) => (
-                    <button
-                      key={connection.id}
-                      type="button"
-                      className="chip chip--button"
-                      disabled={(statuses[connection.id] ?? 'disconnected') !== 'disconnected'}
-                      onClick={() => void handleConnect(connection.id)}
-                    >
-                      {connection.name}
-                    </button>
-                  ))}
                 </div>
               )}
 
