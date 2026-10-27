@@ -188,6 +188,25 @@
   background: var(--qf-ring);
 }
 
+/* A tab on a prod connection trades the ring for solid red and carries a dot
+   even when inactive, so prod stays recognisable across the tab bar. */
+.query-tab[data-env='prod'].is-active::before {
+  inset-inline: -1px;
+  border-radius: 9px 9px 0 0;
+  background: var(--env-color);
+}
+
+.query-tab[data-env='prod'] .query-tab__title::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: var(--env-color);
+  vertical-align: 1px;
+}
+
 .query-tab button {
   border: 0;
   background: transparent;
@@ -265,6 +284,26 @@
 
 .query-workspace__connection {
   width: 260px;
+}
+
+.query-workspace__connection-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.query-workspace__connection-label .chip {
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+.query-workspace__connection[data-env='prod'] select {
+  border-color: var(--env-color);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--env-color) 16%, transparent);
+}
+
+.query-workspace__connection[data-env='prod'] select:focus-visible {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--env-color) 40%, transparent);
 }
 
 .query-workspace__container {

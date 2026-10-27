@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
+import { Fragment, forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import type { ConnectionProfile } from '@shared/types/connection-profile'
 import type {
   DatabaseMetadataObject,
@@ -11,6 +11,7 @@ import { QueryEditor, type QueryEditorHandle } from '../editor/QueryEditor'
 import { initialExportState, type ExportState } from '../results/export-state'
 import { useExtractorSettings } from '../results/extractor-settings'
 import { CloseIcon, PlayIcon, PlusIcon } from '../icons'
+import { ENVIRONMENT_LABEL, groupByEnvironment } from '../connection-environment'
 import { QueryResultsView, type ExportLoadedRequest } from './QueryResultsView'
 import { EditorResizer, useEditorHeight } from './EditorResizer'
 import {
@@ -634,6 +635,7 @@ export const QueryWorkspace = forwardRef<
             key={tab.id}
             className={`query-tab${tab.id === activeTabId ? ' is-active' : ''}`}
             data-running={tab.run.status === 'running' ? 'true' : undefined}
+            data-env={connections.find((c) => c.id === tab.connectionId)?.environment}
           >
             <button
               type="button"
@@ -671,8 +673,13 @@ export const QueryWorkspace = forwardRef<
         >
           <div className="query-workspace__toolbar">
             <div className="query-workspace__targets">
-              <label className="query-workspace__connection">
-                Connection
+              <label className="query-workspace__connection" data-env={activeConnection?.environment}>
+                <span className="query-workspace__connection-label">
+                  Connection
+                  {activeConnection?.environment === 'prod' && (
+                    <span className="chip chip--env">{ENVIRONMENT_LABEL.prod}</span>
+                  )}
+                </span>
                 <select
                   value={activeTab.connectionId ?? ''}
                   onChange={(e) =>
@@ -684,12 +691,23 @@ export const QueryWorkspace = forwardRef<
                     }))
                   }
                 >
-                  <option value="">Select a connection</option>
-                  {connections.map((connection) => (
-                    <option key={connection.id} value={connection.id}>
-                      {connection.name}
-                    </option>
-                  ))}
+                  <option value="" disabled>
+                    Select a connection
+                  </option>
+                  {groupByEnvironment(connections).map((group) => {
+                    const options = group.connections.map((connection) => (
+                      <option key={connection.id} value={connection.id}>
+                        {connection.name}
+                      </option>
+                    ))
+                    return group.label ? (
+                      <optgroup key={group.label} label={group.label}>
+                        {options}
+                      </optgroup>
+                    ) : (
+                      <Fragment key="ungrouped">{options}</Fragment>
+                    )
+                  })}
                 </select>
               </label>
 
