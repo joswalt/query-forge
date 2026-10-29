@@ -116,7 +116,7 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
     if (parsed.authMode === 'service-principal') setClientId(parsed.clientId ?? '')
     const followUp =
       parsed.authMode === 'entra-id'
-        ? ['Entra ID sign-in needs your app registration’s Client ID, Tenant ID and Redirect URI.']
+        ? ['Entra ID sign-in needs your app registration’s Client ID and Tenant ID.']
         : []
     setConnectionString('')
     setPasteOpen(false)
@@ -436,12 +436,11 @@ export function NewConnectionForm({ onCreated, editing, onCancel }: Props): Reac
             <input value={tenantId} onChange={(e) => setTenantId(e.target.value)} required />
           </label>
           <label>
-            Redirect URI
+            Redirect URI (optional)
             <input
               value={redirectUri}
               onChange={(e) => setRedirectUri(e.target.value)}
               placeholder="http://localhost"
-              required
             />
           </label>
         </fieldset>

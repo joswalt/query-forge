@@ -136,7 +136,7 @@ export class ConnectionManager {
     }
     if (!profile.config.entraId) {
       throw new Error(
-        `Connection "${profile.name}" uses Entra ID auth but has no clientId/tenantId/redirectUri configured`
+        `Connection "${profile.name}" uses Entra ID auth but has no clientId/tenantId configured`
       )
     }
     if (!this.authenticator) {

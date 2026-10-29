@@ -10,10 +10,11 @@ export type AzureSqlAuthMode = 'sql-credentials' | 'entra-id' | 'service-princip
  * browser + loopback redirect). Present only when `authMode === 'entra-id'`
  * — a user who will never register an Entra ID app simply leaves a
  * connection on `account-key`/`sql-credentials` and never fills these in;
- * nothing elsewhere assumes they're populated. `redirectUri` must be a
- * loopback address (`http://localhost:PORT`) — msal-node's loopback
- * redirect flow, not an embedded `BrowserWindow` (spec.md Out of Scope's
- * forbidden alternatives).
+ * nothing elsewhere assumes they're populated. `redirectUri` is an
+ * optional loopback address (`http://localhost[:PORT]`); only its port is
+ * used, and empty means any free port — msal-node's loopback redirect
+ * flow, not an embedded `BrowserWindow` (spec.md Out of Scope's forbidden
+ * alternatives).
  */
 export interface EntraIdAuthConfig {
   clientId: string

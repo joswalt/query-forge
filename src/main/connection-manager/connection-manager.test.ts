@@ -334,7 +334,7 @@ describe('ConnectionManager', () => {
       expect(tokenCacheRepository.delete).toHaveBeenCalledWith(profile.id)
     })
 
-    it('throws when an entra-id profile is missing its clientId/tenantId/redirectUri', async () => {
+    it('throws when an entra-id profile is missing its clientId/tenantId', async () => {
       const authenticator: EntraIdAuthenticator = { acquireToken: vi.fn() }
       const managerWithAuth = new ConnectionManager(
         new ConnectionProfileRepository(createTestDb()),

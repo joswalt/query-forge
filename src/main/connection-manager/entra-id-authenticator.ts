@@ -19,7 +19,7 @@ export interface PublicClientApplicationLike {
   }): Promise<{ accessToken: string }>
   acquireTokenInteractive(request: {
     scopes: string[]
-    redirectUri: string
+    preferredPort?: number
     openBrowser: BrowserOpener
   }): Promise<{ accessToken: string }>
 }
@@ -124,12 +124,27 @@ export class MsalEntraIdAuthenticator implements EntraIdAuthenticator {
       )
     }
 
+    // msal-node runs its own loopback server and rejects an explicit
+    // `redirectUri` (redirect_uri_not_supported); the profile's loopback
+    // URI only contributes its port, if it names one.
     const interactive = await app.acquireTokenInteractive({
       scopes,
-      redirectUri: entraId.redirectUri,
+      preferredPort: loopbackPortOf(entraId.redirectUri),
       openBrowser: this.openBrowser
     })
     return interactive.accessToken
+  }
+}
+
+/** The port of a loopback redirect URI like `http://localhost:51234`, or
+ * undefined (msal-node then picks a free port) when it names none or
+ * doesn't parse. */
+export function loopbackPortOf(redirectUri: string): number | undefined {
+  try {
+    const port = new URL(redirectUri).port
+    return port ? Number(port) : undefined
+  } catch {
+    return undefined
   }
 }
 

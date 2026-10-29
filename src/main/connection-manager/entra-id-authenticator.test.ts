@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { EntraIdAuthConfig } from '@shared/types/connection-profile'
 import {
+  loopbackPortOf,
   MsalEntraIdAuthenticator,
   type PublicClientApplicationFactory,
   type PublicClientApplicationLike
@@ -92,7 +93,10 @@ describe('MsalEntraIdAuthenticator', () => {
 
     expect(token).toBe('interactive-token')
     expect(app.acquireTokenInteractive).toHaveBeenCalledWith(
-      expect.objectContaining({ redirectUri: ENTRA_ID.redirectUri, scopes: ['scope-a'] })
+      expect.objectContaining({ preferredPort: 51234, scopes: ['scope-a'] })
+    )
+    expect(app.acquireTokenInteractive).toHaveBeenCalledWith(
+      expect.not.objectContaining({ redirectUri: expect.anything() })
     )
   })
 
@@ -174,5 +178,16 @@ describe('MsalEntraIdAuthenticator', () => {
     await authenticator.acquireToken(ENTRA_ID, ['scope-a'], 'profile-1')
 
     expect(factory).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('loopbackPortOf', () => {
+  it('returns the port a loopback redirect URI names', () => {
+    expect(loopbackPortOf('http://localhost:51234')).toBe(51234)
+  })
+
+  it('returns undefined for a portless or unparseable redirect URI', () => {
+    expect(loopbackPortOf('http://localhost')).toBeUndefined()
+    expect(loopbackPortOf('not a uri')).toBeUndefined()
   })
 })
