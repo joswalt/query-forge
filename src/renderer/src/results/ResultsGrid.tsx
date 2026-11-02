@@ -10,8 +10,12 @@ import { EXTRACTORS, type ExtractorId } from '@shared/extractors/extract'
 import { isRecord } from '@shared/is-record'
 import { formatCellValue } from './cell-format'
 import { copyScopeForShortcut } from './copy-plan'
+import { fitColumnWidth } from './column-fit'
 
 const ROW_HEIGHT_PX = 28
+/** `.results-grid__cell`'s left + right padding (results.css), plus a
+ * couple of pixels so a fitted value never clips to an ellipsis. */
+const CELL_PADDING_PX = 22
 
 /** A copy the grid asks its parent to perform: a cell's raw value, or rows
  * through an Extractor (`undefined` = the Active Extractor). */
@@ -23,6 +27,9 @@ interface ContextMenuState {
   x: number
   y: number
   rowIndex: number
+  /** The right-clicked data column ("Fit column to contents"); `null` on
+   * the row-number column. */
+  columnId: string | null
   /** Opened in the lower half / right part of the window: the menu (and
    * its "Copy as ▸" submenu, which lists every Extractor) grows up / opens
    * to the left so it stays on screen. */
@@ -55,7 +62,9 @@ const MENU_WITH_SUBMENU_WIDTH_PX = 340
  * the active cell's raw value when no row is selected; Cmd/Ctrl+Shift+C
  * copies every loaded row (copy-plan.ts decides which). The right-click
  * menu offers the same explicitly, plus "Copy as ▸" for a one-off copy in
- * any other Extractor. The copying itself (clipboard, toast, size guard)
+ * any other Extractor. To read a truncated value, double-click a column's
+ * right edge (or use the menu's "Fit column to contents") to widen it to
+ * its widest loaded value. The copying itself (clipboard, toast, size guard)
  * belongs to the parent via `onCopy`.
  */
 export function ResultsGrid({
@@ -80,6 +89,7 @@ export function ResultsGrid({
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set())
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const parentRef = useRef<HTMLDivElement>(null)
+  const measureCanvasRef = useRef<HTMLCanvasElement | null>(null)
 
   const tableColumns = useMemo<ColumnDef<unknown>[]>(() => {
     const rowNumberColumn: ColumnDef<unknown> = {
@@ -112,6 +122,39 @@ export function ResultsGrid({
     estimateSize: () => ROW_HEIGHT_PX,
     overscan: 10
   })
+
+  /** Text width in the font a rendered element of `selector` actually uses
+   * (falling back to `fallbackFont` before any such element is mounted). */
+  function textMeasurer(selector: string, fallbackFont: string): (text: string) => number {
+    measureCanvasRef.current ??= document.createElement('canvas')
+    const context = measureCanvasRef.current.getContext('2d')
+    if (!context) return (text) => text.length * 8
+    const sample = parentRef.current?.querySelector(selector)
+    context.font = sample ? getComputedStyle(sample).font : fallbackFont
+    return (text) => context.measureText(text).width
+  }
+
+  function fittedWidths(columnIds: string[]): Record<string, number> {
+    const measureHeader = textMeasurer('.results-grid__hcell', '620 12px sans-serif')
+    const measureCell = textMeasurer('.results-grid__cell:not(.is-rownum)', '12px monospace')
+    return Object.fromEntries(
+      columnIds.map((columnId) => [
+        columnId,
+        fitColumnWidth({
+          header: columnId,
+          values: rows.map((row) => (isRecord(row) ? row[columnId] : undefined)),
+          measureHeader,
+          measureCell,
+          paddingPx: CELL_PADDING_PX
+        })
+      ])
+    )
+  }
+
+  function fitColumns(columnIds: string[]): void {
+    const widths = fittedWidths(columnIds)
+    table.setColumnSizing((prev) => ({ ...prev, ...widths }))
+  }
 
   function copyActiveCell(): void {
     if (!activeCell) return
@@ -207,15 +250,11 @@ export function ResultsGrid({
                   <div
                     onMouseDown={header.getResizeHandler()}
                     onTouchStart={header.getResizeHandler()}
-                    className="results-grid__resize-handle"
-                    style={{
-                      position: 'absolute',
-                      right: 0,
-                      top: 0,
-                      height: '100%',
-                      width: 4,
-                      cursor: 'col-resize'
-                    }}
+                    onDoubleClick={() => fitColumns([header.column.id])}
+                    className={`results-grid__resize-handle${
+                      header.column.getIsResizing() ? ' is-resizing' : ''
+                    }`}
+                    title="Drag to resize, double-click to fit contents"
                   />
                 )}
               </div>
@@ -298,6 +337,7 @@ export function ResultsGrid({
                           x: e.clientX,
                           y: e.clientY,
                           rowIndex: virtualRow.index,
+                          columnId: isRowNumber ? null : cell.column.id,
                           openUp: e.clientY > window.innerHeight / 2,
                           openLeft: e.clientX > window.innerWidth - MENU_WITH_SUBMENU_WIDTH_PX
                         })
@@ -381,6 +421,31 @@ export function ResultsGrid({
                 </li>
               ))}
             </ul>
+          </li>
+          <li role="separator" className="results-grid__menu-separator" />
+          {contextMenu.columnId !== null && (
+            <li>
+              <button
+                type="button"
+                onClick={() => {
+                  if (contextMenu.columnId !== null) fitColumns([contextMenu.columnId])
+                  setContextMenu(null)
+                }}
+              >
+                Fit column to contents
+              </button>
+            </li>
+          )}
+          <li>
+            <button
+              type="button"
+              onClick={() => {
+                fitColumns(columns)
+                setContextMenu(null)
+              }}
+            >
+              Fit all columns
+            </button>
           </li>
         </ul>
       )}

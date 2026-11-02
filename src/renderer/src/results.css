@@ -329,9 +329,47 @@
   background: var(--qf-accent-soft);
 }
 
-.results-grid__resize-handle:hover,
-.results-grid__resize-handle:active {
+/* An 8px grab area at the header cell's right edge (drag to resize,
+   double-click to fit); only a 2px guide line shows, so the header text
+   isn't covered by a block of color. */
+.results-grid__resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.results-grid__resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  right: 0;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--qf-border-strong);
+  opacity: 0;
+}
+
+.results-grid__hcell:hover .results-grid__resize-handle::after {
+  opacity: 1;
+}
+
+.results-grid__resize-handle:hover::after,
+.results-grid__resize-handle.is-resizing::after {
+  top: 0;
+  bottom: 0;
   background: var(--qf-accent);
+  opacity: 1;
+}
+
+.results-grid__menu-separator {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--qf-border);
 }
 
 .results-grid__context-menu {
