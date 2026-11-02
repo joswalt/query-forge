@@ -48,6 +48,10 @@ _Avoid_: Page size (that is the SDK's `maxItemCount`, a fetch granularity, not a
 The rows produced by one row-returning statement of a query submission. A multi-statement SQL script yields several, in statement order; a single statement (and every Cosmos DB query) yields one. Result Chunks carry a zero-based `resultSet` index (omitted means 0) and never span two Result Sets; a zero-row chunk announces a statement that returned nothing. The results view shows one tab per Result Set.
 _Avoid_: Recordset (mssql's name for it — a driver term), Statement Result
 
+**Document Write**:
+Cosmos DB only. One create, replace, or delete of a single document, addressed by its `id` and partition key value. The only way QueryForge changes Cosmos data, since the Cosmos query language cannot write; refused on a read-only Connection Profile. Bulk DML produces many Document Writes.
+_Avoid_: Mutation, DML, Edit (Edit is the UI gesture; the Document Write is what it sends)
+
 **Database Metadata**:
 The shared, provider-agnostic shape `getMetadata()` returns — tables/columns for Azure SQL, containers/partition keys for Cosmos DB — consumed by the Object Explorer (§4.2). Distinct from editor-side autocomplete, which is out of scope for MVP (ticket 04).
 _Avoid_: Schema (implies a rigid relational shape Cosmos doesn't have)
