@@ -52,6 +52,14 @@ _Avoid_: Recordset (mssql's name for it — a driver term), Statement Result
 Cosmos DB only. One create, replace, or delete of a single document, addressed by its `id` and partition key value. The only way QueryForge changes Cosmos data, since the Cosmos query language cannot write; refused on a read-only Connection Profile. Bulk DML produces many Document Writes.
 _Avoid_: Mutation, DML, Edit (Edit is the UI gesture; the Document Write is what it sends)
 
+**Addressable Row**:
+Cosmos DB only. A result row that QueryForge can tie back to exactly one document: a JSON object with an `id` and a known partition key value for every partition key path of its container. A missing partition key property counts as known (the None value) only when the row is a full document, carrying the system properties; in a projection it is unknown. Only Addressable Rows can be edited or deleted.
+_Avoid_: Editable row (editability also depends on the Connection Profile not being read-only)
+
+**Concurrent Change**:
+Cosmos DB only. A change someone else made to a document after QueryForge read it for an Edit or Delete, detected when the Document Write is attempted. The write is refused rather than overwriting the newer version; the user's edits are kept, and they can compare against the current version before saving again. Distinct from an `id` clash on a new document, which is the only thing "conflict" means here.
+_Avoid_: Conflict, Write conflict (reserved for the `id` clash), 412, Precondition failure (HTTP/implementation terms)
+
 **Database Metadata**:
 The shared, provider-agnostic shape `getMetadata()` returns — tables/columns for Azure SQL, containers/partition keys for Cosmos DB — consumed by the Object Explorer (§4.2). Distinct from editor-side autocomplete, which is out of scope for MVP (ticket 04).
 _Avoid_: Schema (implies a rigid relational shape Cosmos doesn't have)
