@@ -21,7 +21,14 @@ const planningStarted: QueryRunAction = {
 
 const planned: QueryRunAction = {
   type: 'dmlPlanned',
-  summary: { planId: 'plan-1', verb: 'DELETE', matchCount: 3, drivingQueryRequestCharge: 4.5 },
+  summary: {
+    planId: 'plan-1',
+    verb: 'DELETE',
+    matchCount: 3,
+    drivingQueryRequestCharge: 4.5,
+    partitionKeyPaths: ['/customerId'],
+    sample: [{ id: 'a', partitionKey: 'c' }]
+  },
   at: 120
 }
 
@@ -80,7 +87,51 @@ describe('queryRunReducer DML phases', () => {
       container: 'customers',
       planId: 'plan-1',
       matchCount: 3,
-      drivingQueryRequestCharge: 4.5
+      drivingQueryRequestCharge: 4.5,
+      partitionKeyPaths: ['/customerId'],
+      sample: [{ id: 'a', partitionKey: 'c' }]
+    })
+  })
+
+  it('an UPDATE plan confirms with its sample of current → new values', () => {
+    const sample = [
+      {
+        id: 'a',
+        partitionKey: 'c',
+        changes: [
+          {
+            target: 'c.status',
+            current: { defined: true as const, value: 'active' },
+            next: { defined: true as const, value: 'archived' }
+          }
+        ]
+      }
+    ]
+    const state = fold([
+      { ...planningStarted, verb: 'UPDATE' } as QueryRunAction,
+      {
+        type: 'dmlPlanned',
+        summary: {
+          planId: 'plan-2',
+          verb: 'UPDATE',
+          matchCount: 40,
+          drivingQueryRequestCharge: 6,
+          partitionKeyPaths: ['/customerId'],
+          sample
+        },
+        at: 120
+      }
+    ])
+
+    expect(state.dml).toEqual({
+      phase: 'confirming',
+      verb: 'UPDATE',
+      container: 'customers',
+      planId: 'plan-2',
+      matchCount: 40,
+      drivingQueryRequestCharge: 6,
+      partitionKeyPaths: ['/customerId'],
+      sample
     })
   })
 
@@ -89,7 +140,13 @@ describe('queryRunReducer DML phases', () => {
       planningStarted,
       {
         type: 'dmlPlanned',
-        summary: { verb: 'DELETE', matchCount: 0, drivingQueryRequestCharge: 2.8 },
+        summary: {
+          verb: 'DELETE',
+          matchCount: 0,
+          drivingQueryRequestCharge: 2.8,
+          partitionKeyPaths: ['/customerId'],
+          sample: []
+        },
         at: 130
       }
     ])

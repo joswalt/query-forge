@@ -153,7 +153,9 @@ export class QueryExecutionService {
             ...(matchCount > 0 ? { planId: plan.planId } : {}),
             verb: plan.verb,
             matchCount,
-            drivingQueryRequestCharge: plan.drivingQueryRequestCharge
+            drivingQueryRequestCharge: plan.drivingQueryRequestCharge,
+            partitionKeyPaths: plan.partitionKeyPaths,
+            sample: plan.sample
           }
           send({ id: request.id, kind: 'result', value: summary, done: true })
           return

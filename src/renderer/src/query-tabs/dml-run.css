@@ -42,3 +42,15 @@
 .dml-bar { height: 6px; border-radius: 3px; background: var(--qf-hover); overflow: hidden; }
 .dml-bar span { display: block; height: 100%; background: var(--qf-accent); transition: width 0.1s linear; }
 .dml-counts { margin: 0; font-size: 12.5px; color: var(--qf-muted); }
+
+.dml-sample {
+  display: flex; flex-direction: column; gap: 8px; padding: 10px 12px;
+  border: 1px dashed var(--qf-border-strong); border-radius: var(--qf-r-panel); background: var(--qf-bg-elevated);
+}
+.dml-sample__head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; font-size: 13px; }
+.dml-sample__title { text-transform: uppercase; letter-spacing: 0.04em; font-size: 12px; }
+.dml-sample__scroll { overflow-x: auto; }
+.dml-sample__table { border-collapse: collapse; font-size: 12.5px; font-family: var(--qf-font-mono); }
+.dml-sample__table th { text-align: left; font-weight: 600; color: var(--qf-muted); padding: 2px 14px 4px 0; white-space: nowrap; }
+.dml-sample__table td { padding: 2px 14px 2px 0; white-space: nowrap; }
+.dml-sample__more { margin: 0; }

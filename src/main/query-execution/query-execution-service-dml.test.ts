@@ -235,7 +235,13 @@ describe('QueryExecutionService DML Statements', () => {
             planId: expect.any(String),
             verb: 'DELETE',
             matchCount: 3,
-            drivingQueryRequestCharge: 4.5
+            drivingQueryRequestCharge: 4.5,
+            partitionKeyPaths: ['/customerId'],
+            sample: [
+              { id: 'doc-1', partitionKey: 'cust-1' },
+              { id: 'doc-2', partitionKey: 'cust-2' },
+              { id: 'doc-3', partitionKey: 'cust-3' }
+            ]
           },
           done: true
         }
@@ -254,19 +260,6 @@ describe('QueryExecutionService DML Statements', () => {
       const responses = await call(service, planRequest({ statement: 'DELETE FROM c' }))
 
       expect(errorMessage(responses)).toContain('WHERE is required')
-      expect(provider.drivingQueries).toEqual([])
-    })
-
-    it('refuses an UPDATE for now, before the Driving Query runs', async () => {
-      const provider = new FakeCosmosProvider()
-      const service = await connected(provider)
-
-      const responses = await call(
-        service,
-        planRequest({ statement: 'UPDATE c SET c.flag = true WHERE true' })
-      )
-
-      expect(errorMessage(responses)).toContain('not supported yet')
       expect(provider.drivingQueries).toEqual([])
     })
 
@@ -306,7 +299,29 @@ describe('QueryExecutionService DML Statements', () => {
 
       const summary = planSummary(await call(service, planRequest()))
 
-      expect(summary).toEqual({ verb: 'DELETE', matchCount: 0, drivingQueryRequestCharge: 2.8 })
+      expect(summary).toEqual({
+        verb: 'DELETE',
+        matchCount: 0,
+        drivingQueryRequestCharge: 2.8,
+        partitionKeyPaths: ['/customerId'],
+        sample: []
+      })
+    })
+
+    it('samples the first 10 matches of a DELETE by address only', async () => {
+      const provider = new FakeCosmosProvider()
+      provider.pages = [
+        { rows: matches(1, 4), requestCharge: 1 },
+        { rows: matches(5, 12), requestCharge: 1 }
+      ]
+      const service = await connected(provider)
+
+      const summary = planSummary(await call(service, planRequest()))
+
+      expect(summary.matchCount).toBe(12)
+      expect(summary.sample).toEqual(
+        Array.from({ length: 10 }, (_, i) => ({ id: `doc-${i + 1}`, partitionKey: `cust-${i + 1}` }))
+      )
     })
 
     it('reads a missing partition key as the None value and a hierarchical key level by level', async () => {
@@ -511,6 +526,205 @@ describe('QueryExecutionService DML Statements', () => {
 
       expect(provider.maxInFlight).toBe(8)
       expect(outcomeRows(responses)).toHaveLength(40)
+    })
+  })
+
+  describe('UPDATE', () => {
+    const statement = 'UPDATE c SET c.status = "archived", c.legacy = undefined WHERE c.age > 3'
+
+    /** A Driving Query row of the UPDATE above for `doc-<n>`. */
+    function updateMatch(
+      n: number,
+      columns: Record<string, unknown> = {
+        __set1: 'archived',
+        __def1: true,
+        __cur1: 'active',
+        __def2: true,
+        __cur2: 'x'
+      }
+    ): Record<string, unknown> {
+      return { id: `doc-${n}`, _etag: `"e${n}"`, _rid: `r${n}`, __pkv1: `cust-${n}`, __pk1: true, ...columns }
+    }
+
+    it('writes one low-priority patch with ifMatch per document, setting the value Cosmos computed and removing the undefined path', async () => {
+      const provider = new FakeCosmosProvider()
+      provider.pages = [{ rows: [updateMatch(1)], requestCharge: 3 }]
+      const service = await connected(provider)
+      const planId = await plan(service, { statement, container: 'customers' })
+
+      const responses = await call(service, commitRequest(planId))
+
+      expect(provider.drivingQueries[0].query.query).toContain('("archived") AS __set1')
+      expect(provider.writes).toEqual([
+        {
+          write: {
+            kind: 'patch',
+            id: 'doc-1',
+            partitionKey: 'cust-1',
+            ifMatch: '"e1"',
+            operations: [
+              { op: 'set', path: '/status', value: 'archived' },
+              { op: 'remove', path: '/legacy' }
+            ],
+            container: 'customers'
+          },
+          options: { priorityLevel: 'Low' }
+        }
+      ])
+      expect(outcomeRows(responses)).toEqual([
+        { id: 'doc-1', customerId: 'cust-1', outcome: 'written', requestCharge: 5, message: '' }
+      ])
+      expect(summaryOf(responses)).toMatchObject({ verb: 'UPDATE', counts: { written: 1 } })
+    })
+    it('samples each match with every SET path’s current and new value', async () => {
+      const provider = new FakeCosmosProvider()
+      provider.pages = [
+        {
+          rows: [
+            updateMatch(1),
+            // status absent today; legacy already absent.
+            updateMatch(2, { __set1: 'archived', __def1: false, __def2: false }),
+            // the SET expression came back undefined.
+            updateMatch(3, { __def1: true, __cur1: { nested: true }, __def2: true, __cur2: null })
+          ],
+          requestCharge: 1
+        }
+      ]
+      const service = await connected(provider)
+
+      const summary = planSummary(await call(service, planRequest({ statement })))
+
+      expect(summary.verb).toBe('UPDATE')
+      expect(summary.sample).toEqual([
+        {
+          id: 'doc-1',
+          partitionKey: 'cust-1',
+          changes: [
+            { target: 'c.status', current: { defined: true, value: 'active' }, next: { defined: true, value: 'archived' } },
+            { target: 'c.legacy', current: { defined: true, value: 'x' }, next: { defined: false } }
+          ]
+        },
+        {
+          id: 'doc-2',
+          partitionKey: 'cust-2',
+          changes: [
+            { target: 'c.status', current: { defined: false }, next: { defined: true, value: 'archived' } },
+            { target: 'c.legacy', current: { defined: false }, next: { defined: false } }
+          ]
+        },
+        {
+          id: 'doc-3',
+          partitionKey: 'cust-3',
+          changes: [
+            { target: 'c.status', current: { defined: true, value: { nested: true } }, next: { defined: false } },
+            { target: 'c.legacy', current: { defined: true, value: null }, next: { defined: false } }
+          ]
+        }
+      ])
+    })
+
+    it('drops a remove whose path is already absent from a patch that still sets something', async () => {
+      const provider = new FakeCosmosProvider()
+      provider.pages = [
+        { rows: [updateMatch(1, { __set1: 'archived', __def1: true, __cur1: 'active', __def2: false })], requestCharge: 1 }
+      ]
+      const service = await connected(provider)
+      const planId = await plan(service, { statement })
+
+      const responses = await call(service, commitRequest(planId))
+
+      expect(provider.writes.map((w) => w.write)).toMatchObject([
+        { kind: 'patch', id: 'doc-1', operations: [{ op: 'set', path: '/status', value: 'archived' }] }
+      ])
+      expect(outcomeRows(responses).map((r) => r.outcome)).toEqual(['written'])
+    })
+    it('a document whose only changes are removes of already-absent paths ends unchanged with nothing sent', async () => {
+      const provider = new FakeCosmosProvider()
+      provider.pages = [
+        { rows: [updateMatch(1, { __def1: false }), updateMatch(2, { __def1: true, __cur1: 1 })], requestCharge: 1 }
+      ]
+      const service = await connected(provider)
+      const planId = await plan(service, { statement: 'UPDATE c SET c.legacy = undefined WHERE true' })
+
+      const responses = await call(service, commitRequest(planId))
+
+      expect(provider.writes.map((w) => w.write)).toMatchObject([
+        { kind: 'patch', id: 'doc-2', operations: [{ op: 'remove', path: '/legacy' }] }
+      ])
+      const rows = outcomeRows(responses).sort((a, b) => a.id.localeCompare(b.id))
+      expect(rows.map(({ id, outcome, requestCharge }) => ({ id, outcome, requestCharge }))).toEqual([
+        { id: 'doc-1', outcome: 'unchanged', requestCharge: 0 },
+        { id: 'doc-2', outcome: 'written', requestCharge: 5 }
+      ])
+      expect(rows[0].message).toContain('already absent')
+      expect(summaryOf(responses)?.counts).toMatchObject({ written: 1, unchanged: 1 })
+    })
+    it('a non-literal SET that came back undefined ends expression-undefined with nothing sent', async () => {
+      const provider = new FakeCosmosProvider()
+      // Cosmos leaves an undefined projection out of the row: no __set1.
+      provider.pages = [
+        { rows: [updateMatch(1, { __def1: true, __cur1: 'a', __def2: true, __cur2: 'x' })], requestCharge: 1 }
+      ]
+      const service = await connected(provider)
+      const planId = await plan(service, {
+        statement: 'UPDATE c SET c.status = c.missing, c.legacy = undefined WHERE true'
+      })
+
+      const responses = await call(service, commitRequest(planId))
+
+      expect(provider.writes).toEqual([])
+      const [row] = outcomeRows(responses)
+      expect(row).toMatchObject({ id: 'doc-1', outcome: 'expression-undefined', requestCharge: 0 })
+      expect(row.message).toContain('c.status')
+      expect(summaryOf(responses)?.counts['expression-undefined']).toBe(1)
+    })
+    it('reports an UPDATE Write Outcome per document: 404 is not-found, 412 a Concurrent Change, a patch 400 failed with a scrubbed message', async () => {
+      const provider = new FakeCosmosProvider()
+      provider.pages = [{ rows: [1, 2, 3].map((n) => updateMatch(n)), requestCharge: 2 }]
+      provider.onWrite = async (write) => {
+        switch (write.id) {
+          case 'doc-1':
+            return { outcome: 'not-found', requestCharge: 1.2 }
+          case 'doc-2':
+            return { outcome: 'precondition-failed', requestCharge: 1.3 }
+          default:
+            throw new Error('Bad request: path /legacy/x does not exist; key=super-secret')
+        }
+      }
+      const service = await connected(provider)
+      const planId = await plan(service, { statement })
+
+      const responses = await call(service, commitRequest(planId))
+
+      const rows = outcomeRows(responses).sort((a, b) => a.id.localeCompare(b.id))
+      expect(rows).toEqual([
+        {
+          id: 'doc-1',
+          customerId: 'cust-1',
+          outcome: 'not-found',
+          requestCharge: 1.2,
+          message: expect.stringContaining('deleted after the DML Plan was made')
+        },
+        {
+          id: 'doc-2',
+          customerId: 'cust-2',
+          outcome: 'concurrent-change',
+          requestCharge: 1.3,
+          message: expect.stringContaining('changed after the DML Plan was made')
+        },
+        {
+          id: 'doc-3',
+          customerId: 'cust-3',
+          outcome: 'failed',
+          requestCharge: 0,
+          message: 'Bad request: path /legacy/x does not exist; key=***'
+        }
+      ])
+      expect(summaryOf(responses)?.counts).toMatchObject({
+        'not-found': 1,
+        'concurrent-change': 1,
+        failed: 1
+      })
     })
   })
 

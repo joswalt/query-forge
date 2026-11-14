@@ -226,7 +226,8 @@ export function queryRunReducer(state: QueryRunState, action: QueryRunAction): Q
     case 'dmlPlanned': {
       if (state.dml?.phase !== 'planning') return state
       const { verb, container } = state.dml
-      const { planId, matchCount, drivingQueryRequestCharge } = action.summary
+      const { planId, matchCount, drivingQueryRequestCharge, partitionKeyPaths, sample } =
+        action.summary
       if (planId === undefined || matchCount === 0) {
         return {
           ...state,
@@ -237,7 +238,16 @@ export function queryRunReducer(state: QueryRunState, action: QueryRunAction): Q
       }
       return {
         ...state,
-        dml: { phase: 'confirming', verb, container, planId, matchCount, drivingQueryRequestCharge }
+        dml: {
+          phase: 'confirming',
+          verb,
+          container,
+          planId,
+          matchCount,
+          drivingQueryRequestCharge,
+          partitionKeyPaths,
+          sample
+        }
       }
     }
 
