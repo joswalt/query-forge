@@ -111,6 +111,9 @@ export type QueryRunAction =
   /** The document at `address` no longer exists. Both document actions
    * apply only to a run of the same `target` container. */
   | { type: 'documentGone'; target: DocumentTarget; address: DocumentAddress }
+  /** A drawer delete removed the document at `address` (or found it
+   * already deleted): its rows leave the grid. */
+  | { type: 'documentDeleted'; target: DocumentTarget; address: DocumentAddress }
   | { type: 'chunk'; chunk: ResultChunk }
   | { type: 'done'; finishedAt: number }
   | {
@@ -154,6 +157,10 @@ export function queryRunReducer(state: QueryRunState, action: QueryRunAction): Q
     case 'documentGone':
       if (!sameTarget(state.documentTarget, action.target)) return state
       return markRows(state, action.address, 'gone', (row) => row)
+
+    case 'documentDeleted':
+      if (!sameTarget(state.documentTarget, action.target)) return state
+      return removeRows(state, action.address)
 
     case 'chunk': {
       const ru = action.chunk.meta?.ru
@@ -311,6 +318,34 @@ function markRows(
     return { ...set, rows, rowMarks }
   })
   return changed ? { ...state, resultSets } : state
+}
+
+/** Removes every retained row whose address is `address`, moving later
+ * row marks up with their rows and counting the rows out of `rowCount`. */
+function removeRows(state: QueryRunState, address: DocumentAddress): QueryRunState {
+  let removedTotal = 0
+  const resultSets = state.resultSets.map((set) => {
+    const rows: unknown[] = []
+    const rowMarks: Record<number, RowMark> = {}
+    set.rows.forEach((row, index) => {
+      const check = addressOf(row, state.partitionKeyPaths)
+      if (check.addressable && sameAddress(check.address, address)) return
+      const mark = set.rowMarks?.[index]
+      if (mark) rowMarks[rows.length] = mark
+      rows.push(row)
+    })
+    const removed = set.rows.length - rows.length
+    if (removed === 0) return set
+    removedTotal += removed
+    return {
+      ...set,
+      rows,
+      rowCount: Math.max(0, set.rowCount - removed),
+      rowMarks: set.rowMarks ? rowMarks : undefined
+    }
+  })
+  if (removedTotal === 0) return state
+  return { ...state, resultSets, rowCount: Math.max(0, state.rowCount - removedTotal) }
 }
 
 /**

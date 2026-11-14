@@ -4,10 +4,13 @@ import {
   editSessionsReducer,
   hasUnsavedEdits,
   initialEditSessionsState,
+  deletePreviewText,
   openEditSession,
+  planDelete,
   planSave,
   type EditSession,
-  type EditSessionsAction
+  type EditSessionsAction,
+  type EditSessionsState
 } from './edit-session'
 
 const target = { connectionId: 'profile-1', database: 'orders-db', container: 'orders' }
@@ -301,5 +304,199 @@ describe('hasUnsavedEdits', () => {
   it('is false for the freshly read server copy and true once the body changes', () => {
     expect(hasUnsavedEdits(editing())).toBe(false)
     expect(hasUnsavedEdits(editing(stored, { name: 'Grace' }))).toBe(true)
+  })
+})
+
+function openedForDelete(row: unknown = { id: 'a1', customerId: 'c9', name: 'Ada' }): EditSession {
+  return openEditSession({
+    key: 1,
+    target,
+    partitionKeyPaths: ['/customerId'],
+    address: { id: 'a1', partitionKey: 'c9' },
+    row,
+    mode: 'delete'
+  })
+}
+
+describe('deleting a document', () => {
+  it('opens Delete reading the latest version, then previews that version read-only and copyable', () => {
+    const reading = openedForDelete()
+    expect(reading).toMatchObject({ mode: 'delete', phase: 'reading' })
+
+    const read = editSessionReducer(reading, { type: 'readSucceeded', document: stored })
+    expect(read).toMatchObject({ mode: 'delete', phase: 'editing', etag: '"etag-1"' })
+    expect(JSON.parse(deletePreviewText(read))).toEqual({ id: 'a1', customerId: 'c9', name: 'Ada' })
+  })
+
+  function previewing(): EditSession {
+    return editSessionReducer(openedForDelete(), { type: 'readSucceeded', document: stored })
+  }
+
+  it('sends a delete Document Write carrying the session etag', () => {
+    expect(planDelete(previewing())).toEqual({
+      ok: true,
+      write: {
+        kind: 'delete',
+        id: 'a1',
+        partitionKey: 'c9',
+        ifMatch: '"etag-1"',
+        database: 'orders-db',
+        container: 'orders'
+      }
+    })
+  })
+
+  it('sends nothing before the latest version has been read', () => {
+    expect(planDelete(openedForDelete())).toMatchObject({ ok: false })
+  })
+
+  function deletingIn(): EditSessionsState {
+    const state = editSessionsReducer(initialEditSessionsState, {
+      type: 'opened',
+      key: 1,
+      target,
+      partitionKeyPaths: ['/customerId'],
+      address: { id: 'a1', partitionKey: 'c9' },
+      row: { id: 'a1', customerId: 'c9' },
+      mode: 'delete'
+    })
+    return [
+      { type: 'readSucceeded', document: stored } as const,
+      { type: 'deleteStarted' } as const
+    ].reduce((s, event) => editSessionsReducer(s, { type: 'session', key: 1, event }), state)
+  }
+
+  it('is busy while the delete is in flight', () => {
+    expect(deletingIn().sessions[0]).toMatchObject({ saving: true, notice: undefined })
+  })
+
+  it('closes the edit session once deleted and toasts the id and RU charge', () => {
+    const state = editSessionsReducer(deletingIn(), {
+      type: 'session',
+      key: 1,
+      event: { type: 'deleteSucceeded', requestCharge: 5.71 }
+    })
+    expect(state).toMatchObject({ sessions: [], activeKey: undefined, toast: { key: 1, message: 'Deleted a1 · 5.71 RU' } })
+  })
+
+  it('treats a 404 on delete as done, noting the document was already deleted', () => {
+    const state = editSessionsReducer(deletingIn(), {
+      type: 'session',
+      key: 1,
+      event: { type: 'deleteOutcome', outcome: 'not-found', requestCharge: 1.1 }
+    })
+    expect(state).toMatchObject({
+      sessions: [],
+      toast: { key: 1, message: 'This document was already deleted.' }
+    })
+  })
+
+  it('clears the toast once shown', () => {
+    const deleted = editSessionsReducer(deletingIn(), {
+      type: 'session',
+      key: 1,
+      event: { type: 'deleteSucceeded', requestCharge: 5.71 }
+    })
+    expect(editSessionsReducer(deleted, { type: 'toastShown', key: 1 }).toast).toBeUndefined()
+  })
+
+  function changedBeforeDelete(): EditSession {
+    return [
+      { type: 'deleteStarted' } as const,
+      { type: 'deleteOutcome', outcome: 'precondition-failed', requestCharge: 1.24 } as const
+    ].reduce(editSessionReducer, previewing())
+  }
+
+  it('aborts the delete on a Concurrent Change and offers no delete anyway', () => {
+    const refused = changedBeforeDelete()
+    expect(refused).toMatchObject({
+      mode: 'delete',
+      phase: 'editing',
+      saving: false,
+      notice: { kind: 'concurrent-change-on-delete' }
+    })
+    expect(planDelete(refused)).toMatchObject({ ok: false })
+  })
+
+  it('Review current version reads the current version into the preview, and Delete then carries its etag', () => {
+    const reviewing = editSessionReducer(changedBeforeDelete(), { type: 'reviewRequested' })
+    expect(reviewing).toMatchObject({ mode: 'delete', phase: 'reading', notice: undefined })
+
+    const current = { ...stored, name: 'Ada Byron', _etag: '"etag-3"' }
+    const reviewed = editSessionReducer(reviewing, { type: 'readSucceeded', document: current })
+    expect(JSON.parse(deletePreviewText(reviewed))).toMatchObject({ name: 'Ada Byron' })
+    expect(planDelete(reviewed)).toMatchObject({ ok: true, write: { kind: 'delete', ifMatch: '"etag-3"' } })
+  })
+
+  it('keeps the preview and shows the scrubbed message of an unexpected delete error', () => {
+    const failed = [
+      { type: 'deleteStarted' } as const,
+      { type: 'deleteFailed', message: 'Request timed out' } as const
+    ].reduce(editSessionReducer, previewing())
+    expect(failed).toMatchObject({ phase: 'editing', saving: false, notice: { kind: 'error', message: 'Request timed out' } })
+    expect(planDelete(failed)).toMatchObject({ ok: true })
+  })
+
+  it('Edit instead edits the version just read, saving with its etag', () => {
+    const editingInstead = editSessionReducer(previewing(), { type: 'editRequested' })
+    expect(editingInstead).toMatchObject({ mode: 'edit', phase: 'editing' })
+    const changed = editSessionReducer(editingInstead, {
+      type: 'draftChanged',
+      text: JSON.stringify({ name: 'Grace' })
+    })
+    expect(planSave(changed)).toMatchObject({ ok: true, write: { kind: 'replace', ifMatch: '"etag-1"' } })
+  })
+})
+
+describe('Edit and Delete on a document already open in the drawer', () => {
+  const open = (key: number, mode: 'edit' | 'delete'): EditSessionsAction => ({
+    type: 'opened',
+    key,
+    target,
+    partitionKeyPaths: ['/customerId'],
+    address: { id: 'a1', partitionKey: 'c9' },
+    row: { id: 'a1', customerId: 'c9' },
+    mode
+  })
+  const read: EditSessionsAction = {
+    type: 'session',
+    key: 1,
+    event: { type: 'readSucceeded', document: stored }
+  }
+
+  it('Delete turns the open edit session into a Delete that reads the latest version again', () => {
+    const state = [open(1, 'edit'), read, open(2, 'delete')].reduce(
+      editSessionsReducer,
+      initialEditSessionsState
+    )
+    expect(state.sessions).toHaveLength(1)
+    expect(state.sessions[0]).toMatchObject({ key: 1, mode: 'delete', phase: 'reading', etag: undefined })
+    expect(state.activeKey).toBe(1)
+  })
+
+  it('Delete keeps an edit session with unsaved edits as it is and says why', () => {
+    const draft: EditSessionsAction = {
+      type: 'session',
+      key: 1,
+      event: { type: 'draftChanged', text: JSON.stringify({ name: 'Grace' }) }
+    }
+    const state = [open(1, 'edit'), read, draft, open(2, 'delete')].reduce(
+      editSessionsReducer,
+      initialEditSessionsState
+    )
+    expect(state.sessions[0]).toMatchObject({
+      mode: 'edit',
+      phase: 'editing',
+      notice: { kind: 'error', message: 'Save or discard your edits before deleting this document.' }
+    })
+    expect(JSON.parse(state.sessions[0].draft)).toEqual({ name: 'Grace' })
+  })
+
+  it('Edit turns an open Delete into editing the version already read', () => {
+    const state = [open(1, 'delete'), read, open(2, 'edit')].reduce(
+      editSessionsReducer,
+      initialEditSessionsState
+    )
+    expect(state.sessions[0]).toMatchObject({ key: 1, mode: 'edit', phase: 'editing', etag: '"etag-1"' })
   })
 })

@@ -11,13 +11,15 @@ import { FALLBACK_TABLE_NAME } from '@shared/extractors/sql-extractors'
 import { QueryEditor, type QueryEditorHandle } from '../editor/QueryEditor'
 import { initialExportState, type ExportState } from '../results/export-state'
 import { useExtractorSettings } from '../results/extractor-settings'
-import { addressOf } from '../results/addressable-row'
+import { addressOf, type DocumentAddress } from '../results/addressable-row'
 import {
   editSessionsReducer,
   findEditSession,
   initialEditSessionsState,
+  planDelete,
   planSave,
   type DocumentTarget,
+  type EditSessionMode,
   type EditSessionEvent,
   type EditSessionsAction,
   type EditSessionsState
@@ -320,9 +322,10 @@ export const QueryWorkspace = forwardRef<
     dispatchEdit(tabId, { type: 'session', key, event })
   }
 
-  /** Edit document… (stories 15 to 19): open the drawer at once, then read
-   * the latest version of the document. A row's own data is never edited. */
-  function handleEditDocument(tabId: string, row: unknown): void {
+  /** Edit document… (stories 15 to 19) and Delete document… (story 2):
+   * open the drawer at once, then read the latest version of the document.
+   * A row's own data is never edited or deleted. */
+  function handleEditDocument(tabId: string, row: unknown, mode: EditSessionMode = 'edit'): void {
     const tab = tabs.find((t) => t.id === tabId)
     const target = tab?.run.documentTarget
     const partitionKeyPaths = tab?.run.partitionKeyPaths
@@ -332,12 +335,23 @@ export const QueryWorkspace = forwardRef<
     const { address } = check
 
     const existing = findEditSession(tab.editSessions, target, address)
-    if (existing) {
-      dispatchEdit(tabId, { type: 'selected', key: existing.key })
-      return
-    }
-    const key = nextEditSessionKeyRef.current++
-    dispatchEdit(tabId, { type: 'opened', key, target, partitionKeyPaths, address, row })
+    const key = existing?.key ?? nextEditSessionKeyRef.current++
+    const action: EditSessionsAction = { type: 'opened', key, target, partitionKeyPaths, address, row, mode }
+    // An open session is focused; switching it to Delete reads it again.
+    const next = editSessionsReducer(tab.editSessions, action).sessions.find((s) => s.key === key)
+    dispatchEdit(tabId, action)
+    if (existing && (existing.phase === 'reading' || next?.phase !== 'reading')) return
+    readLatestVersion(tabId, key, target, address)
+  }
+
+  /** Point-reads an edit session's document; a document found deleted
+   * strikes its rows through. */
+  function readLatestVersion(
+    tabId: string,
+    key: number,
+    target: DocumentTarget,
+    address: DocumentAddress
+  ): void {
     window.api.documents
       .read(target.connectionId, { ...address, database: target.database, container: target.container })
       .then((result) => {
@@ -351,6 +365,51 @@ export const QueryWorkspace = forwardRef<
       .catch((err) =>
         dispatchSession(tabId, key, { type: 'readFailed', message: remoteErrorMessage(err) })
       )
+  }
+
+  /** Delete document (stories 30, 34, 43, 44, 48): a delete with the
+   * session's etag. Done (or already deleted): the rows leave the grid and a
+   * toast follows. A Concurrent Change aborts it. */
+  function handleDeleteDocument(tabId: string, key: number): void {
+    const session = tabs.find((t) => t.id === tabId)?.editSessions.sessions.find((s) => s.key === key)
+    if (!session || session.saving) return
+    const plan = planDelete(session)
+    if (!plan.ok) {
+      dispatchSession(tabId, key, { type: 'saveRefused', notice: plan.notice })
+      return
+    }
+    const { target, address } = session
+    dispatchSession(tabId, key, { type: 'deleteStarted' })
+    window.api.documents
+      .write(target.connectionId, plan.write)
+      .then((result) => {
+        if (result.outcome === 'success') {
+          dispatchSession(tabId, key, { type: 'deleteSucceeded', requestCharge: result.requestCharge })
+        } else if (result.outcome === 'conflict') {
+          dispatchSession(tabId, key, {
+            type: 'deleteFailed',
+            message: 'The server refused the delete as an id clash.'
+          })
+          return
+        } else {
+          dispatchSession(tabId, key, {
+            type: 'deleteOutcome',
+            outcome: result.outcome,
+            requestCharge: result.requestCharge
+          })
+          if (result.outcome === 'precondition-failed') return
+        }
+        dispatchRun(tabId, { type: 'documentDeleted', target, address })
+      })
+      .catch((err) => dispatchSession(tabId, key, { type: 'deleteFailed', message: remoteErrorMessage(err) }))
+  }
+
+  /** Review current version: read the document again into the drawer. */
+  function handleReviewDocument(tabId: string, key: number): void {
+    const session = tabs.find((t) => t.id === tabId)?.editSessions.sessions.find((s) => s.key === key)
+    if (!session || session.saving) return
+    dispatchSession(tabId, key, { type: 'reviewRequested' })
+    readLatestVersion(tabId, key, session.target, session.address)
   }
 
   /** Save (stories 22, 24, 29, 33 to 36): a replace with the session's
@@ -1108,7 +1167,13 @@ export const QueryWorkspace = forwardRef<
                     onClose: (key) => dispatchEdit(activeTab.id, { type: 'closed', key }),
                     onDraftChange: (key, text) =>
                       dispatchSession(activeTab.id, key, { type: 'draftChanged', text }),
-                    onSave: (key) => handleSaveDocument(activeTab.id, key)
+                    onSave: (key) => handleSaveDocument(activeTab.id, key),
+                    onRequestDelete: (row) => handleEditDocument(activeTab.id, row, 'delete'),
+                    onDelete: (key) => handleDeleteDocument(activeTab.id, key),
+                    onReview: (key) => handleReviewDocument(activeTab.id, key),
+                    onEditInstead: (key) =>
+                      dispatchSession(activeTab.id, key, { type: 'editRequested' }),
+                    onToastShown: (key) => dispatchEdit(activeTab.id, { type: 'toastShown', key })
                   }
                 : undefined
             }

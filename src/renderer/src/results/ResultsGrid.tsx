@@ -106,6 +106,17 @@ export function ResultsGrid({
   )
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set())
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
+  // Selection is by row index: when rows leave the grid (a drawer delete),
+  // the indexes would point at other rows, so drop them.
+  const [seenRowCount, setSeenRowCount] = useState(rows.length)
+  if (rows.length !== seenRowCount) {
+    if (rows.length < seenRowCount) {
+      setSelectedRows(new Set())
+      setActiveCell(null)
+      setContextMenu(null)
+    }
+    setSeenRowCount(rows.length)
+  }
   const parentRef = useRef<HTMLDivElement>(null)
   const measureCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const hasGutterAction = rowGutterAction !== undefined
