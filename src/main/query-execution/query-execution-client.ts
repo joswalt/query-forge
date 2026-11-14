@@ -16,12 +16,24 @@ import type {
   ReadDocumentRequest,
   ReadDocumentResult
 } from '@shared/types/document-writer'
+import type { DmlPlanningProgress, DmlPlanSummary } from '@shared/types/dml-run'
 import type { QueryExecutionRequest, QueryExecutionResponse } from './protocol'
 import { AsyncQueue } from './async-queue'
 
 interface PendingResult {
   resolve: (value: unknown) => void
   reject: (err: Error) => void
+  /** `planDml` only: Driving Query progress before the result. */
+  onProgress?: (progress: DmlPlanningProgress) => void
+}
+
+export interface PlanDmlRequest {
+  profileId: string
+  tabId: string
+  executionId: ExecutionId
+  statement: string
+  database?: string
+  container?: string
 }
 
 /**
@@ -114,6 +126,37 @@ export class QueryExecutionClient {
     })
   }
 
+  /** Plans a DML Statement run (ADR 0004 amendments): `onProgress` sees
+   * the Driving Query's progress, the promise resolves with the plan's
+   * numbers (no `planId` when nothing matched). Cancellable by Execution ID. */
+  planDml(
+    request: PlanDmlRequest,
+    onProgress: (progress: DmlPlanningProgress) => void
+  ): Promise<DmlPlanSummary> {
+    return this.sendForResult<DmlPlanSummary>(
+      { id: randomUUID(), method: 'planDml', ...request },
+      onProgress
+    )
+  }
+
+  /** Writes exactly the held DML Plan, streaming one Write Outcome row per
+   * document. Cancellable by Execution ID. */
+  commitDml(planId: string, executionId: ExecutionId): AsyncIterable<ResultChunk> {
+    const id = randomUUID()
+    const queue = new AsyncQueue<ResultChunk>()
+    this.pendingStreams.set(id, queue)
+    this.ensureChild().postMessage({ id, method: 'commitDml', planId, executionId })
+    return queue
+  }
+
+  async discardPlan(planId: string): Promise<void> {
+    await this.sendForResult({ id: randomUUID(), method: 'discardPlan', planId })
+  }
+
+  async releaseTab(tabId: string): Promise<void> {
+    await this.sendForResult({ id: randomUUID(), method: 'releaseTab', tabId })
+  }
+
   /** Fire-and-forget by design, mirroring `DatabaseProvider.cancel()`'s own
    * synchronous void signature — a failed cancel has nothing meaningful to
    * surface back to a caller that isn't awaiting anything. */
@@ -194,9 +237,16 @@ export class QueryExecutionClient {
     this.pendingStreams.clear()
   }
 
-  private sendForResult<T>(request: QueryExecutionRequest): Promise<T> {
+  private sendForResult<T>(
+    request: QueryExecutionRequest,
+    onProgress?: (progress: DmlPlanningProgress) => void
+  ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      this.pendingResults.set(request.id, { resolve: resolve as (value: unknown) => void, reject })
+      this.pendingResults.set(request.id, {
+        resolve: resolve as (value: unknown) => void,
+        reject,
+        onProgress
+      })
       this.ensureChild().postMessage(request)
     })
   }
@@ -204,6 +254,11 @@ export class QueryExecutionClient {
   private onMessage(response: QueryExecutionResponse): void {
     if (response.kind === 'refreshSecret') {
       void this.answerSecretRefresh(response.id, response.profileId)
+      return
+    }
+
+    if (response.kind === 'progress') {
+      this.pendingResults.get(response.id)?.onProgress?.(response.value)
       return
     }
 

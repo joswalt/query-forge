@@ -1,4 +1,11 @@
 import type { ResultChunk } from '@shared/types/database-provider'
+import {
+  dmlAfterDone,
+  dmlAfterFailure,
+  withCommitChunkMeta,
+  type DmlRunAction,
+  type DmlRunState
+} from './dml-run-state'
 
 /**
  * Upper bound on rows retained for display per query run, summed across all
@@ -53,6 +60,9 @@ export interface QueryRunState {
   finishedAt: number | undefined
   /** Set only for a genuine failure, never for a user-requested cancel. */
   errorMessage: string | undefined
+  /** Set while (and after) the run is a Cosmos DB DML Statement: its phase
+   * from planning to done (see dml-run-state.ts). Undefined for a query. */
+  dml?: DmlRunState
 }
 
 export const initialQueryRunState: QueryRunState = {
@@ -84,6 +94,7 @@ export type QueryRunAction =
        */
       cancelled: boolean
     }
+  | DmlRunAction
 
 /**
  * Pure state machine for one query tab's in-flight/most-recent execution.
@@ -114,20 +125,103 @@ export function queryRunReducer(state: QueryRunState, action: QueryRunAction): Q
         resultSets,
         rowCount: state.rowCount + action.chunk.rows.length,
         ruTotal: ru === undefined ? state.ruTotal : (state.ruTotal ?? 0) + ru,
-        stoppedAtRowLimit: state.stoppedAtRowLimit || action.chunk.meta?.truncated === true
+        stoppedAtRowLimit: state.stoppedAtRowLimit || action.chunk.meta?.truncated === true,
+        dml: withCommitChunkMeta(state.dml, action.chunk.meta)
       }
     }
 
-    case 'done':
-      return { ...state, status: 'success', finishedAt: action.finishedAt }
+    case 'done': {
+      const dml = dmlAfterDone(state.dml)
+      return {
+        ...state,
+        status: dml?.phase === 'stopped' ? 'cancelled' : 'success',
+        finishedAt: action.finishedAt,
+        dml
+      }
+    }
 
     case 'failed':
       return {
         ...state,
         status: action.cancelled ? 'cancelled' : 'error',
         finishedAt: action.finishedAt,
-        errorMessage: action.cancelled ? undefined : action.message
+        errorMessage: action.cancelled ? undefined : action.message,
+        dml: dmlAfterFailure(state.dml, action.cancelled)
       }
+
+    case 'dmlPlanningStarted':
+      return {
+        ...initialQueryRunState,
+        status: 'running',
+        startedAt: action.startedAt,
+        dml: {
+          phase: 'planning',
+          verb: action.verb,
+          container: action.container,
+          matched: 0,
+          requestCharge: 0
+        }
+      }
+
+    case 'dmlPlanningProgress':
+      if (state.dml?.phase !== 'planning') return state
+      return {
+        ...state,
+        dml: {
+          ...state.dml,
+          matched: action.progress.matched,
+          requestCharge: action.progress.requestCharge
+        }
+      }
+
+    case 'dmlPlanned': {
+      if (state.dml?.phase !== 'planning') return state
+      const { verb, container } = state.dml
+      const { planId, matchCount, drivingQueryRequestCharge } = action.summary
+      if (planId === undefined || matchCount === 0) {
+        return {
+          ...state,
+          status: 'success',
+          finishedAt: action.at,
+          dml: { phase: 'zero-matches', verb, container, drivingQueryRequestCharge }
+        }
+      }
+      return {
+        ...state,
+        dml: { phase: 'confirming', verb, container, planId, matchCount, drivingQueryRequestCharge }
+      }
+    }
+
+    case 'dmlDiscarded':
+      if (state.dml?.phase !== 'confirming') return state
+      return {
+        ...state,
+        status: 'cancelled',
+        finishedAt: action.finishedAt,
+        dml: { phase: 'discarded', verb: state.dml.verb, container: state.dml.container }
+      }
+
+    case 'dmlCommitStarted': {
+      if (state.dml?.phase !== 'confirming') return state
+      const { verb, container, matchCount, drivingQueryRequestCharge } = state.dml
+      return {
+        ...state,
+        dml: {
+          phase: 'committing',
+          verb,
+          container,
+          matchCount,
+          drivingQueryRequestCharge,
+          progress: { completed: 0, total: matchCount, requestCharge: 0 },
+          stopRequested: false,
+          summary: undefined
+        }
+      }
+    }
+
+    case 'dmlStopRequested':
+      if (state.dml?.phase !== 'committing') return state
+      return { ...state, dml: { ...state.dml, stopRequested: true } }
 
     default:
       return state
