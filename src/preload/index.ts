@@ -13,6 +13,12 @@ import type {
   ResultChunk,
   TestResult
 } from '@shared/types/database-provider'
+import type {
+  DocumentWrite,
+  DocumentWriteResult,
+  ReadDocumentRequest,
+  ReadDocumentResult
+} from '@shared/types/document-writer'
 import type { ExtractorId, ExtractorOptions } from '@shared/extractors/extract'
 import type { QueryHistoryEntry } from '@shared/types/query-history'
 import type { Preferences } from '@shared/types/preferences'
@@ -66,6 +72,23 @@ const queryExecutionApi = {
 }
 
 export type QueryExecutionApi = typeof queryExecutionApi
+
+/**
+ * The renderer's path to Cosmos DB Document Writes and point-reads (ADR
+ * 0004), proxied through main to the Query Execution Service. Expected
+ * failures (`conflict`, `precondition-failed`, `not-found`) resolve as typed
+ * results; a read-only refusal or an unexpected error rejects with a
+ * scrubbed message. A read-only Connection Profile is refused in the Query
+ * Execution Service whatever the renderer shows.
+ */
+const documentsApi = {
+  write: (profileId: string, write: DocumentWrite): Promise<DocumentWriteResult> =>
+    ipcRenderer.invoke('document:write', { profileId, write }),
+  read: (profileId: string, request: ReadDocumentRequest): Promise<ReadDocumentResult> =>
+    ipcRenderer.invoke('document:read', { profileId, ...request })
+}
+
+export type DocumentsApi = typeof documentsApi
 
 export interface QueryExecutionHandle {
   /** The id main minted for this run — exposed so the renderer can
@@ -301,6 +324,7 @@ const api = {
   connections: connectionsApi,
   queryExecution: queryExecutionApi,
   queryStream: queryStreamApi,
+  documents: documentsApi,
   export: exportApi,
   history: historyApi,
   preferences: preferencesApi,

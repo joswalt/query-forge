@@ -7,6 +7,12 @@ import type {
   TestResult,
   DatabaseMetadata
 } from '@shared/types/database-provider'
+import type {
+  DocumentWrite,
+  DocumentWriteResult,
+  ReadDocumentRequest,
+  ReadDocumentResult
+} from '@shared/types/document-writer'
 
 /**
  * Correlation id for one request/response exchange over the main↔utility
@@ -36,6 +42,11 @@ export type QueryExecutionRequest =
     }
   | { id: RequestId; method: 'cancel'; profileId: string; executionId: ExecutionId }
   | { id: RequestId; method: 'getMetadata'; profileId: string }
+  /** One Document Write (ADR 0004); refused on a read-only profile. */
+  | { id: RequestId; method: 'writeDocument'; profileId: string; write: DocumentWrite }
+  /** A point-read of one document; a read, so read-only doesn't refuse it.
+   * The address is nested because `id` is already the Request ID here. */
+  | { id: RequestId; method: 'readDocument'; profileId: string; document: ReadDocumentRequest }
   /** Main's answer to a `refreshSecret` response (same `id`): the renewed
    * Decrypted Secret, or why it couldn't be renewed. */
   | { id: RequestId; method: 'refreshSecretResult'; secret?: DecryptedSecret; error?: string }
@@ -52,7 +63,12 @@ export type QueryExecutionRequest =
  */
 export type QueryExecutionResponse =
   | { id: RequestId; kind: 'chunk'; value: ResultChunk; done: false }
-  | { id: RequestId; kind: 'result'; value: TestResult | DatabaseMetadata | undefined; done: true }
+  | {
+      id: RequestId
+      kind: 'result'
+      value: TestResult | DatabaseMetadata | DocumentWriteResult | ReadDocumentResult | undefined
+      done: true
+    }
   | { id: RequestId; kind: 'error'; message: string; done: true }
   /**
    * Utility → main: a connected Provider needs a newer access token for

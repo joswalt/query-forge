@@ -1,7 +1,9 @@
 import type { ConnectionConfig, ConnectionProfile } from '@shared/types/connection-profile'
 import { randomUUID } from 'node:crypto'
 import type { DatabaseProvider, DecryptedSecret } from '@shared/types/database-provider'
-import { assertReadOnlyQuery } from './read-only-guard'
+import { isDocumentWriter } from '@shared/types/document-writer'
+import type { DocumentWriter } from '@shared/types/document-writer'
+import { assertReadOnlyQuery, DocumentWriteRefusedError } from './read-only-guard'
 import { toExecutionErrorMessage } from './scrub-error-message'
 import type { QueryExecutionRequest, QueryExecutionResponse } from './protocol'
 
@@ -90,6 +92,27 @@ export class QueryExecutionService {
           return
         }
 
+        case 'writeDocument': {
+          // Read-only is a real boundary for Document Writes too (user
+          // story 50): refused here, before the provider is touched.
+          if (this.profiles.get(request.profileId)?.readOnly) {
+            throw new DocumentWriteRefusedError()
+          }
+          const result = await this.requireDocumentWriter(request.profileId).writeDocument(
+            request.write
+          )
+          send({ id: request.id, kind: 'result', value: result, done: true })
+          return
+        }
+
+        case 'readDocument': {
+          const result = await this.requireDocumentWriter(request.profileId).readDocument(
+            request.document
+          )
+          send({ id: request.id, kind: 'result', value: result, done: true })
+          return
+        }
+
         case 'executeQuery': {
           const provider = this.requireProvider(request.profileId)
           // Read-only enforcement lives here, in the process that owns the
@@ -125,6 +148,16 @@ export class QueryExecutionService {
       this.pendingRefreshes.set(id, { resolve, reject })
       send({ id, kind: 'refreshSecret', profileId })
     })
+  }
+
+  /** The DocumentWriter capability check (ADR 0004): only the Cosmos DB
+   * Provider implements it; the Database Provider Interface stays as is. */
+  private requireDocumentWriter(profileId: string): DocumentWriter {
+    const provider = this.requireProvider(profileId)
+    if (!isDocumentWriter(provider)) {
+      throw new Error('Document Writes are only supported on Cosmos DB connections.')
+    }
+    return provider
   }
 
   private requireProvider(profileId: string): DatabaseProvider {

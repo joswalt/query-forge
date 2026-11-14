@@ -48,6 +48,11 @@ export interface ResultChunk {
     /** Cosmos DB only: set on the final chunk of a run that stopped at
      * `QueryOptions.maxRows` with more rows still available server-side. */
     truncated?: boolean
+    /** Cosmos DB only: set on the first chunk of a query, the queried
+     * container's partition key paths (e.g. `['/customerId']`), so the
+     * renderer can tell which rows are Addressable Rows. Absent means no
+     * row is addressable. */
+    partitionKeyPaths?: string[]
   }
 }
 

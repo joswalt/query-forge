@@ -6,6 +6,13 @@ import type {
   SecretRefresher,
   TestResult
 } from '@shared/types/database-provider'
+import type {
+  DocumentWrite,
+  DocumentWriteResult,
+  DocumentWriter,
+  ReadDocumentRequest,
+  ReadDocumentResult
+} from '@shared/types/document-writer'
 import { QueryExecutionService } from './query-execution-service'
 import type { QueryExecutionResponse } from './protocol'
 
@@ -291,5 +298,190 @@ describe('QueryExecutionService', () => {
     expect(responses[0]).toMatchObject({ kind: 'chunk' })
     expect(responses[1]).toMatchObject({ kind: 'error', done: true })
     expect((responses[1] as { message: string }).message).toContain('interrupted')
+  })
+
+  describe('Document Writes', () => {
+    /** A Cosmos-shaped fake: a Database Provider that also implements the
+     * DocumentWriter capability, recording every write and read it gets. */
+    class FakeDocumentWriterProvider extends FakeProvider implements DocumentWriter {
+      writes: DocumentWrite[] = []
+      reads: ReadDocumentRequest[] = []
+      writeResult: DocumentWriteResult = {
+        outcome: 'success',
+        document: { id: 'doc-1', _etag: '"2"' },
+        requestCharge: 6.2
+      }
+      readResult: ReadDocumentResult = {
+        outcome: 'success',
+        document: { id: 'doc-1', _etag: '"1"' },
+        requestCharge: 1
+      }
+      async writeDocument(write: DocumentWrite): Promise<DocumentWriteResult> {
+        this.writes.push(write)
+        return this.writeResult
+      }
+      async readDocument(request: ReadDocumentRequest): Promise<ReadDocumentResult> {
+        this.reads.push(request)
+        return this.readResult
+      }
+    }
+
+    const replace: DocumentWrite = {
+      kind: 'replace',
+      id: 'doc-1',
+      partitionKey: 'cust-1',
+      body: { id: 'doc-1', customerId: 'cust-1', total: 5 },
+      ifMatch: '"1"'
+    }
+
+    async function connected(
+      provider: DatabaseProvider,
+      readOnly = false
+    ): Promise<QueryExecutionService> {
+      const service = new QueryExecutionService(() => provider)
+      await service.handle(
+        { id: 'c', method: 'connect', profile: { ...makeProfile(), readOnly }, secret: undefined },
+        () => {}
+      )
+      return service
+    }
+
+    it('writeDocument: a read-only profile refuses every Document Write without touching the provider', async () => {
+      const provider = new FakeDocumentWriterProvider()
+      const service = await connected(provider, true)
+      const writes: DocumentWrite[] = [
+        { kind: 'create', id: 'n', partitionKey: null, body: { id: 'n' } },
+        replace,
+        { kind: 'patch', id: 'doc-1', partitionKey: {}, ifMatch: '"1"', operations: [{ op: 'remove', path: '/x' }] },
+        { kind: 'delete', id: 'doc-1', partitionKey: ['a', 1], ifMatch: '"1"' }
+      ]
+
+      for (const write of writes) {
+        const { send, responses } = collectResponses()
+        await service.handle({ id: 'w', method: 'writeDocument', profileId: 'profile-1', write }, send)
+        expect(responses).toHaveLength(1)
+        expect(responses[0]).toMatchObject({ kind: 'error', done: true })
+        expect((responses[0] as { message: string }).message).toContain('read-only')
+      }
+      expect(provider.writes).toEqual([])
+    })
+
+    it('writeDocument: dispatches the Document Write to the provider and replies with the stored document', async () => {
+      const provider = new FakeDocumentWriterProvider()
+      const service = await connected(provider)
+
+      const { send, responses } = collectResponses()
+      await service.handle(
+        { id: 'w', method: 'writeDocument', profileId: 'profile-1', write: replace },
+        send
+      )
+
+      expect(provider.writes).toEqual([replace])
+      expect(responses).toEqual([
+        {
+          id: 'w',
+          kind: 'result',
+          value: { outcome: 'success', document: { id: 'doc-1', _etag: '"2"' }, requestCharge: 6.2 },
+          done: true
+        }
+      ])
+    })
+
+    it('writeDocument: a Concurrent Change comes back as a typed result, not an error', async () => {
+      const provider = new FakeDocumentWriterProvider()
+      provider.writeResult = { outcome: 'precondition-failed', requestCharge: 1.2 }
+      const service = await connected(provider)
+
+      const { send, responses } = collectResponses()
+      await service.handle(
+        { id: 'w', method: 'writeDocument', profileId: 'profile-1', write: replace },
+        send
+      )
+
+      expect(responses).toEqual([
+        {
+          id: 'w',
+          kind: 'result',
+          value: { outcome: 'precondition-failed', requestCharge: 1.2 },
+          done: true
+        }
+      ])
+    })
+
+    it('writeDocument: an unexpected provider error is reported with a scrubbed message', async () => {
+      const provider = new FakeDocumentWriterProvider()
+      provider.writeDocument = async () => {
+        throw new Error('Request failed: key=super-secret')
+      }
+      const service = await connected(provider)
+
+      const { send, responses } = collectResponses()
+      await service.handle(
+        { id: 'w', method: 'writeDocument', profileId: 'profile-1', write: replace },
+        send
+      )
+
+      expect(responses).toEqual([
+        { id: 'w', kind: 'error', message: 'Request failed: key=***', done: true }
+      ])
+    })
+
+    it('writeDocument: refuses a provider without the DocumentWriter capability', async () => {
+      const service = await connected(new FakeProvider())
+
+      const { send, responses } = collectResponses()
+      await service.handle(
+        { id: 'w', method: 'writeDocument', profileId: 'profile-1', write: replace },
+        send
+      )
+
+      expect(responses).toHaveLength(1)
+      expect(responses[0]).toMatchObject({ kind: 'error', done: true })
+      expect((responses[0] as { message: string }).message).toContain('Cosmos DB')
+    })
+
+    it('readDocument: dispatches the point-read, even on a read-only profile', async () => {
+      const provider = new FakeDocumentWriterProvider()
+      const service = await connected(provider, true)
+      const address: ReadDocumentRequest = {
+        id: 'doc-1',
+        partitionKey: ['tenant-a', null],
+        database: 'other-db',
+        container: 'other'
+      }
+
+      const { send, responses } = collectResponses()
+      await service.handle(
+        { id: 'r', method: 'readDocument', profileId: 'profile-1', document: address },
+        send
+      )
+
+      expect(provider.reads).toEqual([address])
+      expect(responses).toEqual([
+        {
+          id: 'r',
+          kind: 'result',
+          value: { outcome: 'success', document: { id: 'doc-1', _etag: '"1"' }, requestCharge: 1 },
+          done: true
+        }
+      ])
+    })
+
+    it('readDocument: refuses a provider without the DocumentWriter capability', async () => {
+      const service = await connected(new FakeProvider())
+
+      const { send, responses } = collectResponses()
+      await service.handle(
+        {
+          id: 'r',
+          method: 'readDocument',
+          profileId: 'profile-1',
+          document: { id: 'doc-1', partitionKey: 'cust-1' }
+        },
+        send
+      )
+
+      expect(responses[0]).toMatchObject({ kind: 'error', done: true })
+    })
   })
 })
