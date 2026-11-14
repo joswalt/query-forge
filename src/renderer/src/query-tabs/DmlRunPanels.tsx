@@ -1,5 +1,10 @@
 import { useEffect, useRef } from 'react'
-import { WRITE_OUTCOMES, writeOutcomeLabel } from '@shared/types/dml-run'
+import {
+  WRITE_OUTCOMES,
+  writeOutcomeLabel,
+  type DmlSampleDocument,
+  type DmlSampleValue
+} from '@shared/types/dml-run'
 import type { DmlRunState } from './dml-run-state'
 import './dml-run.css'
 
@@ -99,6 +104,8 @@ export function DmlRunReport({
           </button>
         </div>
       )
+    case 'confirming':
+      return <DmlSample dml={dml} />
     case 'zero-matches':
       return (
         <div className="dml-notice" role="status">
@@ -180,6 +187,81 @@ function CommitReport({
             .map((o) => `${writeOutcomeLabel(o, dml.verb)}: ${count(counts?.[o] ?? 0)}`)
             .join(' · ')}
         </p>
+      )}
+    </div>
+  )
+}
+
+/** Longest rendering of one sampled value before it is cut short. */
+const SAMPLE_VALUE_CHARS = 60
+
+function sampleValue(value: DmlSampleValue): string {
+  if (!value.defined) return '(absent)'
+  const text = JSON.stringify(value.value) ?? String(value.value)
+  return text.length > SAMPLE_VALUE_CHARS ? `${text.slice(0, SAMPLE_VALUE_CHARS - 1)}…` : text
+}
+
+/** One partition key level of a sampled address; `{}` is the None value. */
+function partitionKeyLevel(level: unknown): string {
+  return level !== null && typeof level === 'object' ? '(none)' : JSON.stringify(level)
+}
+
+/**
+ * While confirming, the first matches of the held DML Plan (stories 85 to
+ * 87): the address of each, and for `UPDATE` current → new for each `SET`
+ * path. Nothing is written yet.
+ */
+function DmlSample({
+  dml
+}: {
+  dml: Extract<DmlRunState, { phase: 'confirming' }>
+}): React.JSX.Element | null {
+  const { sample, partitionKeyPaths } = dml
+  if (sample.length === 0) return null
+  const targets = sample[0].changes?.map((change) => change.target) ?? []
+  const levels = (document: DmlSampleDocument): unknown[] =>
+    partitionKeyPaths.length === 1 ? [document.partitionKey] : (document.partitionKey as unknown[])
+  return (
+    <div className="dml-sample" role="region" aria-label="Sample of matching documents">
+      <div className="dml-sample__head">
+        <b className="dml-sample__title">Will {dml.verb === 'DELETE' ? 'delete' : 'update'}</b>
+        <span className="dml-muted">
+          first {count(sample.length)} of {count(dml.matchCount)} matches · nothing written yet
+        </span>
+      </div>
+      <div className="dml-sample__scroll">
+        <table className="dml-sample__table">
+          <thead>
+            <tr>
+              <th>id</th>
+              {partitionKeyPaths.map((path) => (
+                <th key={path}>{path.replace(/^\//, '')}</th>
+              ))}
+              {targets.map((target) => (
+                <th key={target}>{target}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {sample.map((document) => (
+              <tr key={`${document.id}\u0000${JSON.stringify(document.partitionKey)}`}>
+                <td>{document.id}</td>
+                {levels(document).map((level, i) => (
+                  <td key={partitionKeyPaths[i]}>{partitionKeyLevel(level)}</td>
+                ))}
+                {document.changes?.map((change) => (
+                  <td key={change.target}>
+                    <span className="dml-muted">{sampleValue(change.current)}</span> →{' '}
+                    <b>{sampleValue(change.next)}</b>
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {dml.matchCount > sample.length && (
+        <p className="dml-muted dml-sample__more">…and {count(dml.matchCount - sample.length)} more.</p>
       )}
     </div>
   )

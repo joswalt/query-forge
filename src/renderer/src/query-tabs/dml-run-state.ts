@@ -3,7 +3,8 @@ import type {
   DmlCommitProgress,
   DmlCommitSummary,
   DmlPlanningProgress,
-  DmlPlanSummary
+  DmlPlanSummary,
+  DmlSampleDocument
 } from '@shared/types/dml-run'
 
 /**
@@ -22,6 +23,10 @@ export type DmlRunState =
       planId: string
       matchCount: number
       drivingQueryRequestCharge: number
+      /** Names the address columns of `sample`. */
+      partitionKeyPaths: string[]
+      /** The first matches, shown under "WILL DELETE / WILL UPDATE". */
+      sample: DmlSampleDocument[]
     }
   | {
       phase: 'committing'
