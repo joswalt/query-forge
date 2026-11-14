@@ -6,6 +6,7 @@ import type {
 } from '@shared/types/database-provider'
 import { getExtractor, type ExtractorId, type ExtractorOptions } from '@shared/extractors/extract'
 import { inferTableName } from '@shared/extractors/infer-table-name'
+import { detectDmlStatement, parseDmlStatement } from '@shared/dml/dml-statement'
 import { FALLBACK_TABLE_NAME } from '@shared/extractors/sql-extractors'
 import { QueryEditor, type QueryEditorHandle } from '../editor/QueryEditor'
 import { initialExportState, type ExportState } from '../results/export-state'
@@ -321,6 +322,26 @@ export const QueryWorkspace = forwardRef<
         type: 'failed',
         message: 'Select a connection before running a query.',
         finishedAt: Date.now(),
+        cancelled: false
+      })
+      return
+    }
+
+    // A DML Statement in a Cosmos tab (stories 71-73) never reaches
+    // `queryStream.execute`: a malformed one shows its syntax error before
+    // anything is sent. Partition key paths aren't known here, so SET on a
+    // partition key path is left to the Query Execution Service's re-parse.
+    const engine = connections.find((c) => c.id === tab.connectionId)?.config.kind
+    if (engine === 'cosmos-db' && detectDmlStatement(queryText)) {
+      const parsed = parseDmlStatement(queryText)
+      const now = Date.now()
+      dispatchRun(tabId, { type: 'started', startedAt: now })
+      dispatchRun(tabId, {
+        type: 'failed',
+        message: parsed.ok
+          ? 'DML Statements are not yet supported.'
+          : `DML syntax error: ${parsed.error.message}`,
+        finishedAt: now,
         cancelled: false
       })
       return
