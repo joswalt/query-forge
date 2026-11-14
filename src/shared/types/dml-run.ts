@@ -77,6 +77,27 @@ export type DmlOutcomeRow = Record<string, unknown> & {
   message: string
 }
 
+/** A Write Outcome's plain label (spec "Renderer DML run state"), shared
+ * by the run report and the Query History stats line. */
+export function writeOutcomeLabel(outcome: WriteOutcome, verb: DmlVerb): string {
+  switch (outcome) {
+    case 'written':
+      return verb === 'DELETE' ? 'Deleted' : 'Updated'
+    case 'unchanged':
+      return 'Unchanged'
+    case 'concurrent-change':
+      return 'Changed by someone else'
+    case 'not-found':
+      return 'Already deleted'
+    case 'expression-undefined':
+      return 'SET was undefined'
+    case 'failed':
+      return 'Failed'
+    case 'not-attempted':
+      return 'Not attempted'
+  }
+}
+
 export function emptyOutcomeCounts(): Record<WriteOutcome, number> {
   return Object.fromEntries(WRITE_OUTCOMES.map((o) => [o, 0])) as Record<WriteOutcome, number>
 }

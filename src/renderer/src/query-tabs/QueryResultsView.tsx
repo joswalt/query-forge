@@ -132,13 +132,17 @@ export function QueryResultsView({
     else writeClipboard(plan)
   }
   const truncated = retainedRowCount(run) < run.rowCount
+  // A DML Statement run reports itself above the results (DmlRunReport);
+  // until its commit streams outcome rows there is nothing to show here.
+  const dmlBeforeCommit =
+    run.dml !== undefined && !['committing', 'done', 'stopped', 'error'].includes(run.dml.phase)
   const hasRows = multiSet
     ? run.resultSets.some((set) => set.rowCount > 0)
     : currentRows.length > 0
 
   return (
     <div className="query-results">
-      {run.status !== 'idle' && (
+      {run.status !== 'idle' && !dmlBeforeCommit && (
         <div className="query-results__status" data-status={run.status}>
           <span className="status-pill" data-status={run.status}>
             {run.status}
@@ -167,7 +171,7 @@ export function QueryResultsView({
       )}
 
       {run.status === 'error' && run.errorMessage && <p role="alert">{run.errorMessage}</p>}
-      {run.status === 'cancelled' && <p className="empty">Query cancelled.</p>}
+      {run.status === 'cancelled' && !run.dml && <p className="empty">Query cancelled.</p>}
       {run.stoppedAtRowLimit && run.status !== 'running' && (
         <p className="query-results__notice" role="status">
           Stopped after {run.rowCount.toLocaleString()} rows to save request units — more rows
@@ -283,23 +287,26 @@ export function QueryResultsView({
                 Export loaded…
               </button>
             </span>
-            <span className="query-results__export-group query-results__export-group--all">
-              <button
-                type="button"
-                title={
-                  `Runs the query again and writes every matching row of the selected result as ${activeExtractor.label}. Cosmos DB charges request units for the second run.` +
-                  (activeExtractor.buffersAllRows
-                    ? ` ${activeExtractor.label} holds every row in memory before writing; JSON or JSON Lines stream instead.`
-                    : '')
-                }
-                onClick={() => onExportAll(setIndex)}
-              >
-                Export all matching…
-              </button>
-              {activeExtractor.buffersAllRows && (
-                <span className="query-results__export-label">holds all rows in memory</span>
-              )}
-            </span>
+            {/* Outcome rows can't be re-run; Export loaded already has all of them. */}
+            {!run.dml && (
+              <span className="query-results__export-group query-results__export-group--all">
+                <button
+                  type="button"
+                  title={
+                    `Runs the query again and writes every matching row of the selected result as ${activeExtractor.label}. Cosmos DB charges request units for the second run.` +
+                    (activeExtractor.buffersAllRows
+                      ? ` ${activeExtractor.label} holds every row in memory before writing; JSON or JSON Lines stream instead.`
+                      : '')
+                  }
+                  onClick={() => onExportAll(setIndex)}
+                >
+                  Export all matching…
+                </button>
+                {activeExtractor.buffersAllRows && (
+                  <span className="query-results__export-label">holds all rows in memory</span>
+                )}
+              </span>
+            )}
           </div>
 
           {pendingCopy && (
@@ -390,7 +397,7 @@ export function QueryResultsView({
         </>
       )}
 
-      {!hasRows && run.status === 'success' && (
+      {!hasRows && run.status === 'success' && !run.dml && (
         <p className="empty">The query ran but returned no rows.</p>
       )}
 
