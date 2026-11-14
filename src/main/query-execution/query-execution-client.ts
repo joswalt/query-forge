@@ -10,6 +10,12 @@ import type {
   ResultChunk,
   TestResult
 } from '@shared/types/database-provider'
+import type {
+  DocumentWrite,
+  DocumentWriteResult,
+  ReadDocumentRequest,
+  ReadDocumentResult
+} from '@shared/types/document-writer'
 import type { QueryExecutionRequest, QueryExecutionResponse } from './protocol'
 import { AsyncQueue } from './async-queue'
 
@@ -84,6 +90,27 @@ export class QueryExecutionClient {
       id: randomUUID(),
       method: 'getMetadata',
       profileId
+    })
+  }
+
+  /** One Document Write (ADR 0004). Expected failures (`conflict`,
+   * `precondition-failed`, `not-found`) resolve as typed results; only
+   * unexpected ones, and a read-only refusal, reject. */
+  async writeDocument(profileId: string, write: DocumentWrite): Promise<DocumentWriteResult> {
+    return this.sendForResult<DocumentWriteResult>({
+      id: randomUUID(),
+      method: 'writeDocument',
+      profileId,
+      write
+    })
+  }
+
+  async readDocument(profileId: string, document: ReadDocumentRequest): Promise<ReadDocumentResult> {
+    return this.sendForResult<ReadDocumentResult>({
+      id: randomUUID(),
+      method: 'readDocument',
+      profileId,
+      document
     })
   }
 

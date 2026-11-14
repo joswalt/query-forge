@@ -16,6 +16,12 @@ import type {
   QueryOptions,
   TestResult
 } from '@shared/types/database-provider'
+import type {
+  DocumentWrite,
+  DocumentWriteResult,
+  ReadDocumentRequest,
+  ReadDocumentResult
+} from '@shared/types/document-writer'
 
 /**
  * Registers the Query Execution Service's connection-lifecycle IPC surface
@@ -77,6 +83,24 @@ export function registerQueryExecutionIpcHandlers(
   ipcMain.handle(
     'connection:getMetadata',
     async (_event, profileId: string): Promise<DatabaseMetadata> => client.getMetadata(profileId)
+  )
+
+  // Document Writes and point-reads (Cosmos DB, ADR 0004). Plain
+  // request/response: a single Document Write can't be cancelled and
+  // records no Query History Entry. Read-only is enforced in the Query
+  // Execution Service, not here.
+  ipcMain.handle(
+    'document:write',
+    async (_event, request: { profileId: string; write: DocumentWrite }): Promise<DocumentWriteResult> =>
+      client.writeDocument(request.profileId, request.write)
+  )
+
+  ipcMain.handle(
+    'document:read',
+    async (
+      _event,
+      { profileId, ...document }: { profileId: string } & ReadDocumentRequest
+    ): Promise<ReadDocumentResult> => client.readDocument(profileId, document)
   )
 
   // Execution ID minting (GLOSSARY.md: "an opaque identifier the Query
