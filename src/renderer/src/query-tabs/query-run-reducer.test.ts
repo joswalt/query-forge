@@ -216,6 +216,7 @@ describe('queryRunReducer with Addressable Rows', () => {
     const saved = { id: 'a2', customerId: 'c1', name: 'Grace Hopper', ...system, _etag: '"e2"' }
     const next = queryRunReducer(run, {
       type: 'documentSaved',
+      target,
       address: { id: 'a2', partitionKey: 'c1' },
       document: saved,
       previous: run.resultSets[0].rows[1] as Record<string, unknown>
@@ -235,6 +236,7 @@ describe('queryRunReducer with Addressable Rows', () => {
     const saved = { id: 'a1', customerId: 'c1', name: 'Ada Lovelace', city: 'Paris', ...system }
     const next = queryRunReducer(run, {
       type: 'documentSaved',
+      target,
       address: { id: 'a1', partitionKey: 'c1' },
       document: saved,
       previous
@@ -244,7 +246,7 @@ describe('queryRunReducer with Addressable Rows', () => {
     expect(next.resultSets[0].rows).toEqual([{ id: 'a1', customerId: 'c1', name: 'Ada Lovelace', total: 3 }])
   })
 
-  it('strikes through every row of a document found deleted by someone else', () => {
+  it('strikes through the row of a document found deleted by someone else', () => {
     const run = cosmosRun(
       [
         { id: 'a1', customerId: 'c1' },
@@ -252,15 +254,30 @@ describe('queryRunReducer with Addressable Rows', () => {
       ],
       ['/customerId']
     )
-    const next = queryRunReducer(run, { type: 'documentGone', address: { id: 'a1', partitionKey: 'c1' } })
+    const next = queryRunReducer(run, {
+      type: 'documentGone',
+      target,
+      address: { id: 'a1', partitionKey: 'c1' }
+    })
     expect(next.resultSets[0].rows).toEqual(run.resultSets[0].rows)
     expect(next.resultSets[0].rowMarks).toEqual({ 0: 'gone' })
+  })
+
+  it('leaves rows from another container alone, even with the same address', () => {
+    const run = cosmosRun([{ id: 'a1', customerId: 'c1' }], ['/customerId'])
+    const next = queryRunReducer(run, {
+      type: 'documentGone',
+      target: { ...target, container: 'archive' },
+      address: { id: 'a1', partitionKey: 'c1' }
+    })
+    expect(next).toEqual(run)
   })
 
   it('changes nothing when no row has the saved address', () => {
     const run = cosmosRun([{ id: 'a1', customerId: 'c1' }], ['/customerId'])
     const next = queryRunReducer(run, {
       type: 'documentSaved',
+      target,
       address: { id: 'zz', partitionKey: 'c1' },
       document: { id: 'zz', customerId: 'c1' },
       previous: { id: 'zz', customerId: 'c1' }

@@ -6,7 +6,7 @@ import {
   sameAddress,
   type DocumentAddress
 } from '../results/addressable-row'
-import type { DocumentTarget } from '../results/edit-session'
+import { sameTarget, type DocumentTarget } from '../results/edit-session'
 
 /**
  * Upper bound on rows retained for display per query run, summed across all
@@ -93,12 +93,14 @@ export type QueryRunAction =
    * place. `previous` is the server copy the save started from. */
   | {
       type: 'documentSaved'
+      target: DocumentTarget
       address: DocumentAddress
       document: StoredDocument
       previous: StoredDocument
     }
-  /** The document at `address` no longer exists. */
-  | { type: 'documentGone'; address: DocumentAddress }
+  /** The document at `address` no longer exists. Both document actions
+   * apply only to a run of the same `target` container. */
+  | { type: 'documentGone'; target: DocumentTarget; address: DocumentAddress }
   | { type: 'chunk'; chunk: ResultChunk }
   | { type: 'done'; finishedAt: number }
   | {
@@ -133,11 +135,13 @@ export function queryRunReducer(state: QueryRunState, action: QueryRunAction): Q
       }
 
     case 'documentSaved':
+      if (!sameTarget(state.documentTarget, action.target)) return state
       return markRows(state, action.address, 'edited', (row) =>
         rowAfterSave(row, action.document, action.previous)
       )
 
     case 'documentGone':
+      if (!sameTarget(state.documentTarget, action.target)) return state
       return markRows(state, action.address, 'gone', (row) => row)
 
     case 'chunk': {

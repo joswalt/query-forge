@@ -204,12 +204,16 @@ export function findEditSession(
   target: DocumentTarget,
   address: DocumentAddress
 ): EditSession | undefined {
-  return state.sessions.find(
-    (s) =>
-      s.target.connectionId === target.connectionId &&
-      s.target.database === target.database &&
-      s.target.container === target.container &&
-      sameAddress(s.address, address)
+  return state.sessions.find((s) => sameTarget(s.target, target) && sameAddress(s.address, address))
+}
+
+export function sameTarget(a: DocumentTarget | undefined, b: DocumentTarget | undefined): boolean {
+  return (
+    a !== undefined &&
+    b !== undefined &&
+    a.connectionId === b.connectionId &&
+    a.database === b.database &&
+    a.container === b.container
   )
 }
 

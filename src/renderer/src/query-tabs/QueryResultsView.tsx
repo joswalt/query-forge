@@ -6,16 +6,26 @@ import {
   type ExtractorId,
   type ExtractorOptions
 } from '@shared/extractors/extract'
+import { addressOf, notAddressableReason, sameAddress } from '../results/addressable-row'
 import { CellInspector } from '../results/CellInspector'
+import { DocumentDrawer, type DocumentDrawerProps } from '../results/DocumentDrawer'
 import { planCopy, type CopyPlan } from '../results/copy-plan'
 import type { ExportState } from '../results/export-state'
 import type { ExtractorSettings } from '../results/extractor-settings'
-import { ResultsGrid, type GridCopy } from '../results/ResultsGrid'
+import { ResultsGrid, type GridCopy, type GridRowAction } from '../results/ResultsGrid'
 import { ResultsJsonView } from '../results/ResultsJsonView'
 import brandMark from '../assets/brand/queryforge-icon-transparent-1024.png'
 import { retainedRowCount, type QueryRunState } from './query-run-reducer'
 
 type ViewMode = 'table' | 'json'
+
+export interface DocumentEditingProps extends DocumentDrawerProps {
+  /** Opens (or focuses) an edit session for an Addressable Row. */
+  onEdit: (row: unknown) => void
+}
+
+const EDIT_DOCUMENT = 'Edit document…'
+const GONE_REASON = 'This document no longer exists. Re-run the query to refresh the results.'
 
 const TOAST_MS = 2500
 
@@ -52,8 +62,13 @@ export function QueryResultsView({
   onTableNameChange,
   onExportLoaded,
   onExportAll,
-  onCancelExport
+  onCancelExport,
+  documentEditing
 }: {
+  /** Cosmos DB on a writable Connection Profile only: Edit document… on
+   * Addressable Rows and the drawer. Absent hides every write action
+   * (Azure SQL, read-only profiles). */
+  documentEditing?: DocumentEditingProps
   run: QueryRunState
   exportState: ExportState
   extractorSettings: ExtractorSettings
@@ -131,6 +146,41 @@ export function QueryResultsView({
     if (plan.needsSizeConfirmation) setPendingCopy({ plan, rows: copy.rows, extractorId })
     else writeClipboard(plan)
   }
+  const rowMarks = current?.rowMarks
+  const activeSession = documentEditing?.state.sessions.find(
+    (s) => s.key === documentEditing.state.activeKey
+  )
+
+  /** Edit document… for a row: enabled only on a live Addressable Row. */
+  function editAction(rowIndex: number): GridRowAction | undefined {
+    if (!documentEditing) return undefined
+    const row = currentRows[rowIndex]
+    const onSelect = (): void => documentEditing.onEdit(row)
+    if (rowMarks?.[rowIndex] === 'gone') {
+      return { label: EDIT_DOCUMENT, onSelect, disabledReason: GONE_REASON }
+    }
+    const check = addressOf(row, run.partitionKeyPaths)
+    return check.addressable
+      ? { label: EDIT_DOCUMENT, onSelect }
+      : {
+          label: EDIT_DOCUMENT,
+          onSelect,
+          disabledReason: notAddressableReason(run.partitionKeyPaths, check.missing)
+        }
+  }
+
+  function editRowClassName(rowIndex: number): string | undefined {
+    const mark = rowMarks?.[rowIndex]
+    const classes = [mark ? `is-${mark}` : '']
+    if (activeSession) {
+      const check = addressOf(currentRows[rowIndex], run.partitionKeyPaths)
+      if (check.addressable && sameAddress(check.address, activeSession.address)) {
+        classes.push('is-editing')
+      }
+    }
+    return classes.filter(Boolean).join(' ') || undefined
+  }
+
   const truncated = retainedRowCount(run) < run.rowCount
   const hasRows = multiSet
     ? run.resultSets.some((set) => set.rowCount > 0)
@@ -371,6 +421,16 @@ export function QueryResultsView({
               columns={columns}
               streaming={streaming}
               onCopy={handleCopy}
+              rowActions={
+                documentEditing
+                  ? (rowIndex) => {
+                      const action = editAction(rowIndex)
+                      return action ? [action] : []
+                    }
+                  : undefined
+              }
+              rowGutterAction={documentEditing ? editAction : undefined}
+              rowClassName={editRowClassName}
               onExpandCell={(value) => {
                 setInspectedCell(value)
                 setInspection((n) => n + 1)
@@ -407,6 +467,8 @@ export function QueryResultsView({
           {toast.message}
         </div>
       )}
+
+      {documentEditing && <DocumentDrawer {...documentEditing} />}
 
       {inspectorOpen && (
         <CellInspector

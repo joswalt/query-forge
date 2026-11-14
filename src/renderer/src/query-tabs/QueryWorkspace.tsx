@@ -11,6 +11,18 @@ import { FALLBACK_TABLE_NAME } from '@shared/extractors/sql-extractors'
 import { QueryEditor, type QueryEditorHandle } from '../editor/QueryEditor'
 import { initialExportState, type ExportState } from '../results/export-state'
 import { useExtractorSettings } from '../results/extractor-settings'
+import { addressOf } from '../results/addressable-row'
+import {
+  editSessionsReducer,
+  findEditSession,
+  initialEditSessionsState,
+  planSave,
+  type DocumentTarget,
+  type EditSessionEvent,
+  type EditSessionsAction,
+  type EditSessionsState
+} from '../results/edit-session'
+import { remoteErrorMessage } from '../results/remote-error'
 import { CloseIcon, PlayIcon, PlusIcon } from '../icons'
 import { ENVIRONMENT_LABEL, groupByEnvironment } from '../connection-environment'
 import { QueryResultsView, type ExportLoadedRequest } from './QueryResultsView'
@@ -46,6 +58,9 @@ interface QueryTabState {
   tableNameOverride: string | undefined
   run: QueryRunState
   exportState: ExportState
+  /** Documents open in the drawer (Cosmos DB). Kept per tab and across
+   * re-runs: a session is tied to its document's address, not a row. */
+  editSessions: EditSessionsState
 }
 
 /** The table name inferred for a tab, if any (Extractors story 38): the Cosmos
@@ -54,6 +69,13 @@ interface QueryTabState {
  * changes until the user edits the Table field. */
 function inferredTableName(tab: QueryTabState): string | undefined {
   return tab.options?.container ?? inferTableName(tab.queryText)
+}
+
+/** Whether the Connection Profile a run's rows came from takes Document
+ * Writes: it still exists and isn't read-only. */
+function isWritableProfile(connections: ConnectionProfile[], connectionId: string | undefined): boolean {
+  const profile = connections.find((c) => c.id === connectionId)
+  return profile !== undefined && !profile.readOnly
 }
 
 function tableNameFor(tab: QueryTabState): string {
@@ -101,7 +123,8 @@ function createTab(index: number, seed?: OpenQuerySeed): QueryTabState {
     rowLimit: DEFAULT_ROW_LIMIT,
     tableNameOverride: undefined,
     run: initialQueryRunState,
-    exportState: initialExportState
+    exportState: initialExportState,
+    editSessions: initialEditSessionsState
   }
 }
 
@@ -228,6 +251,7 @@ export const QueryWorkspace = forwardRef<
   const nextIndexRef = useRef(restored.tabs.length + 1)
   const executionsRef = useRef(new Map<string, ExecutionHandle>())
   const exportExecutionsRef = useRef(new Map<string, ExecutionHandle>())
+  const nextEditSessionKeyRef = useRef(1)
   const [extractorSettings, updateExtractorSettings] = useExtractorSettings()
   const editorRef = useRef<QueryEditorHandle>(null)
   const editorHeight = useEditorHeight()
@@ -281,6 +305,89 @@ export const QueryWorkspace = forwardRef<
    * execution reducer and write the result back. */
   function dispatchRun(tabId: string, action: QueryRunAction): void {
     updateTab(tabId, (t) => ({ ...t, run: queryRunReducer(t.run, action) }))
+  }
+
+  function dispatchEdit(tabId: string, action: EditSessionsAction): void {
+    updateTab(tabId, (t) => ({ ...t, editSessions: editSessionsReducer(t.editSessions, action) }))
+  }
+
+  function dispatchSession(tabId: string, key: number, event: EditSessionEvent): void {
+    dispatchEdit(tabId, { type: 'session', key, event })
+  }
+
+  /** Edit document… (stories 15 to 19): open the drawer at once, then read
+   * the latest version of the document. A row's own data is never edited. */
+  function handleEditDocument(tabId: string, row: unknown): void {
+    const tab = tabs.find((t) => t.id === tabId)
+    const target = tab?.run.documentTarget
+    const partitionKeyPaths = tab?.run.partitionKeyPaths
+    if (!tab || !target || !partitionKeyPaths) return
+    const check = addressOf(row, partitionKeyPaths)
+    if (!check.addressable) return
+    const { address } = check
+
+    const existing = findEditSession(tab.editSessions, target, address)
+    if (existing) {
+      dispatchEdit(tabId, { type: 'selected', key: existing.key })
+      return
+    }
+    const key = nextEditSessionKeyRef.current++
+    dispatchEdit(tabId, { type: 'opened', key, target, partitionKeyPaths, address, row })
+    window.api.documents
+      .read(target.connectionId, { ...address, database: target.database, container: target.container })
+      .then((result) => {
+        if (result.outcome === 'success') {
+          dispatchSession(tabId, key, { type: 'readSucceeded', document: result.document })
+        } else {
+          dispatchSession(tabId, key, { type: 'readNotFound' })
+          dispatchRun(tabId, { type: 'documentGone', target, address })
+        }
+      })
+      .catch((err) =>
+        dispatchSession(tabId, key, { type: 'readFailed', message: remoteErrorMessage(err) })
+      )
+  }
+
+  /** Save (stories 22, 24, 29, 33 to 36): a replace with the session's
+   * etag; the grid row updates in place on success. */
+  function handleSaveDocument(tabId: string, key: number): void {
+    const session = tabs.find((t) => t.id === tabId)?.editSessions.sessions.find((s) => s.key === key)
+    if (!session || session.saving || !session.serverCopy) return
+    const plan = planSave(session)
+    if (!plan.ok) {
+      dispatchSession(tabId, key, { type: 'saveRefused', notice: plan.notice })
+      return
+    }
+    const { target, address, serverCopy: previous } = session
+    dispatchSession(tabId, key, { type: 'saveStarted' })
+    window.api.documents
+      .write(target.connectionId, plan.write)
+      .then((result) => {
+        if (result.outcome === 'success') {
+          if (!result.document) {
+            dispatchSession(tabId, key, {
+              type: 'saveFailed',
+              message: 'The server did not return the saved document.'
+            })
+            return
+          }
+          const document = result.document
+          dispatchSession(tabId, key, {
+            type: 'saveSucceeded',
+            document,
+            requestCharge: result.requestCharge
+          })
+          dispatchRun(tabId, { type: 'documentSaved', target, address, document, previous })
+          return
+        }
+        dispatchSession(tabId, key, {
+          type: 'saveOutcome',
+          outcome: result.outcome,
+          requestCharge: result.requestCharge
+        })
+        if (result.outcome === 'not-found') dispatchRun(tabId, { type: 'documentGone', target, address })
+      })
+      .catch((err) => dispatchSession(tabId, key, { type: 'saveFailed', message: remoteErrorMessage(err) }))
   }
 
   function handleNewTab(): void {
@@ -349,7 +456,17 @@ export const QueryWorkspace = forwardRef<
 
     const startedAt = Date.now()
     updateTab(tabId, (t) => ({ ...t, lastExecutedQuery: queryText }))
-    dispatchRun(tabId, { type: 'started', startedAt })
+    // Document Writes from these rows go to the container they came from,
+    // even if the Container picker changes later.
+    const documentTarget: DocumentTarget | undefined =
+      engine === 'cosmos-db'
+        ? {
+            connectionId: tab.connectionId,
+            database: tab.options?.database,
+            container: tab.options?.container
+          }
+        : undefined
+    dispatchRun(tabId, { type: 'started', startedAt, documentTarget })
 
     // Placeholder registered *before* the `query:start` round-trip below
     // resolves — without it, a Cancel click during that (brief, but real)
@@ -863,6 +980,21 @@ export const QueryWorkspace = forwardRef<
             onExportLoaded={(request) => void handleExportLoaded(activeTab.id, request)}
             onExportAll={(resultSet) => handleExportAll(activeTab.id, resultSet)}
             onCancelExport={() => handleCancelExport(activeTab.id)}
+            documentEditing={
+              // Write actions are hidden on a read-only Connection Profile
+              // (story 13); the Query Execution Service refuses regardless.
+              isWritableProfile(connections, activeTab.run.documentTarget?.connectionId)
+                ? {
+                    state: activeTab.editSessions,
+                    onEdit: (row) => handleEditDocument(activeTab.id, row),
+                    onSelect: (key) => dispatchEdit(activeTab.id, { type: 'selected', key }),
+                    onClose: (key) => dispatchEdit(activeTab.id, { type: 'closed', key }),
+                    onDraftChange: (key, text) =>
+                      dispatchSession(activeTab.id, key, { type: 'draftChanged', text }),
+                    onSave: (key) => handleSaveDocument(activeTab.id, key)
+                  }
+                : undefined
+            }
           />
         </div>
       )}
