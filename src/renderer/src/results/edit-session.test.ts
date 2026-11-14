@@ -2,13 +2,16 @@ import { describe, expect, it } from 'vitest'
 import {
   editSessionReducer,
   editSessionsReducer,
+  findEditSession,
   hasUnsavedEdits,
   initialEditSessionsState,
   openEditSession,
   openNewDocumentSession,
   planSave,
   type EditSession,
-  type EditSessionsAction
+  type EditSessionEvent,
+  type EditSessionsAction,
+  type EditSessionsState
 } from './edit-session'
 
 const target = { connectionId: 'profile-1', database: 'orders-db', container: 'orders' }
@@ -317,6 +320,58 @@ describe('New document', () => {
       etag: undefined
     })
     expect(JSON.parse(state.sessions[0].draft)).toEqual({})
+    expect(hasUnsavedEdits(state.sessions[0])).toBe(false)
+  })
+
+  it('"Different address? New document" opens a New document prefilled with the current body and address', () => {
+    let state = editSessionsReducer(initialEditSessionsState, {
+      type: 'opened',
+      key: 1,
+      target,
+      partitionKeyPaths: ['/customerId'],
+      address: { id: 'a1', partitionKey: 'c9' },
+      row: stored
+    })
+    state = editSessionsReducer(state, { type: 'session', key: 1, event: { type: 'readSucceeded', document: stored } })
+    state = editSessionsReducer(state, {
+      type: 'session',
+      key: 1,
+      event: { type: 'draftChanged', text: '{"name":"Ada, unsaved"}' }
+    })
+    const before = state.sessions[0]
+    state = editSessionsReducer(state, newDocument(2, 1))
+
+    expect(state.activeKey).toBe(2)
+    expect(state.sessions[0]).toBe(before)
+    expect(state.sessions[1]).toMatchObject({
+      newDocument: { id: 'a1', partitionKey: ['c9'] },
+      draft: '{"name":"Ada, unsaved"}',
+      target
+    })
+    expect(planSave(state.sessions[1])).toMatchObject({
+      ok: true,
+      write: { kind: 'create', id: 'a1', partitionKey: 'c9', body: { name: 'Ada, unsaved' } }
+    })
+  })
+
+  it.each([
+    ['a plain string', 'c9', 'c9'],
+    ['a string that reads as a number', '72712', '"72712"'],
+    ['a number', 72712, '72712'],
+    ['JSON null', null, 'null'],
+    ['the None value', {}, '']
+  ])('prefills a partition key field holding %s so that it reads back the same', (_label, value, text) => {
+    const doc = { ...stored, customerId: value }
+    let state = editSessionsReducer(initialEditSessionsState, {
+      type: 'opened',
+      key: 1,
+      target,
+      partitionKeyPaths: ['/customerId'],
+      address: { id: 'a1', partitionKey: value as never },
+      row: doc
+    })
+    state = editSessionsReducer(state, newDocument(2, 1))
+    expect(state.sessions[1].newDocument).toEqual({ id: 'a1', partitionKey: [text] })
   })
 
   it('gives a hierarchical partition key one field per level', () => {
@@ -435,6 +490,134 @@ describe('planSave for a New document', () => {
       ok: false,
       notice: { kind: 'invalid-body' }
     })
+  })
+})
+
+describe('creating a New document', () => {
+  const created = {
+    id: 'n1',
+    customerId: 'c9',
+    name: 'Grace',
+    _rid: 'rid-9',
+    _self: 's',
+    _etag: '"etag-new"',
+    _attachments: 'attachments/',
+    _ts: 1_700_000_200
+  }
+
+  function creating(): EditSession {
+    return editSessionReducer(newDocumentDraft('n1', ['c9'], { name: 'Grace' }), {
+      type: 'saveStarted',
+      address: { id: 'n1', partitionKey: 'c9' }
+    })
+  }
+
+  it('becomes an edit session of the created document, showing its RU charge', () => {
+    const session = editSessionReducer(creating(), {
+      type: 'saveSucceeded',
+      document: created,
+      requestCharge: 6.29
+    })
+    expect(session).toMatchObject({
+      newDocument: undefined,
+      phase: 'editing',
+      saving: false,
+      address: { id: 'n1', partitionKey: 'c9' },
+      etag: '"etag-new"',
+      serverCopy: created,
+      notice: { kind: 'created', requestCharge: 6.29 }
+    })
+    expect(JSON.parse(session.draft)).toEqual({ name: 'Grace' })
+    expect(hasUnsavedEdits(session)).toBe(false)
+
+    const edited = editSessionReducer(session, { type: 'draftChanged', text: '{"name":"Grace Hopper"}' })
+    expect(planSave(edited)).toMatchObject({ ok: true, write: { kind: 'replace', ifMatch: '"etag-new"' } })
+  })
+
+  it('keeps the draft and fields on an id clash and names the address that clashed', () => {
+    const session = editSessionReducer(creating(), {
+      type: 'saveOutcome',
+      outcome: 'conflict',
+      requestCharge: 1.1
+    })
+    expect(session).toMatchObject({
+      saving: false,
+      newDocument: { id: 'n1', partitionKey: ['c9'] },
+      notice: { kind: 'id-clash', address: { id: 'n1', partitionKey: 'c9' } }
+    })
+    expect(JSON.parse(session.draft)).toEqual({ name: 'Grace' })
+    expect(hasUnsavedEdits(session)).toBe(true)
+  })
+})
+
+describe('edit sessions after an id clash', () => {
+  const clash = { id: 'a1', partitionKey: 'c9' }
+
+  function clashed(): EditSessionsState {
+    let state = editSessionsReducer(initialEditSessionsState, {
+      type: 'newDocumentOpened',
+      key: 1,
+      target,
+      partitionKeyPaths: ['/customerId']
+    })
+    const events: EditSessionEvent[] = [
+      { type: 'newDocumentFieldsChanged', fields: { id: 'a1', partitionKey: ['c9'] } },
+      { type: 'draftChanged', text: '{"name":"Mine"}' },
+      { type: 'saveStarted', address: clash },
+      { type: 'saveOutcome', outcome: 'conflict', requestCharge: 1 }
+    ]
+    for (const event of events) state = editSessionsReducer(state, { type: 'session', key: 1, event })
+    return state
+  }
+
+  it('Open existing opens the clashing document in a new edit session tab next to the draft', () => {
+    const before = clashed()
+    const state = editSessionsReducer(before, {
+      type: 'opened',
+      key: 2,
+      target,
+      partitionKeyPaths: ['/customerId'],
+      address: clash,
+      row: undefined
+    })
+    expect(state.sessions.map((s) => s.key)).toEqual([1, 2])
+    expect(state.activeKey).toBe(2)
+    expect(state.sessions[1]).toMatchObject({ phase: 'reading', address: clash })
+    expect(state.sessions[1].newDocument).toBeUndefined()
+    expect(state.sessions[0]).toBe(before.sessions[0])
+  })
+
+  it("switching tabs keeps each session's draft and notice", () => {
+    let state = editSessionsReducer(clashed(), {
+      type: 'opened',
+      key: 2,
+      target,
+      partitionKeyPaths: ['/customerId'],
+      address: clash,
+      row: undefined
+    })
+    state = editSessionsReducer(state, {
+      type: 'session',
+      key: 2,
+      event: { type: 'readSucceeded', document: stored }
+    })
+    state = editSessionsReducer(state, {
+      type: 'session',
+      key: 2,
+      event: { type: 'draftChanged', text: '{"name":"Theirs, edited"}' }
+    })
+    state = editSessionsReducer(state, { type: 'selected', key: 1 })
+    state = editSessionsReducer(state, { type: 'selected', key: 2 })
+    state = editSessionsReducer(state, { type: 'selected', key: 1 })
+
+    expect(state.activeKey).toBe(1)
+    const [draft, existing] = state.sessions
+    expect(draft).toMatchObject({ draft: '{"name":"Mine"}', notice: { kind: 'id-clash' } })
+    expect(existing).toMatchObject({ draft: '{"name":"Theirs, edited"}', etag: '"etag-1"' })
+  })
+
+  it('a New document draft is never mistaken for the document at its attempted address', () => {
+    expect(findEditSession(clashed(), target, clash)).toBeUndefined()
   })
 })
 

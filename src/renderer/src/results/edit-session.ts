@@ -68,7 +68,9 @@ export interface NewDocumentFields {
 
 /** What the drawer shows above the editor. */
 export type EditNotice =
-  | { kind: 'saved'; requestCharge: number }
+  | { kind: 'saved' | 'created'; requestCharge: number }
+  /** A create found a document already at this address (409). */
+  | { kind: 'id-clash'; address: DocumentAddress }
   /** Save refused: the draft changes `id` or a partition key field. */
   | { kind: 'address-changed'; fields: string[] }
   /** Save refused: the draft isn't a JSON object. */
@@ -89,7 +91,9 @@ export type EditSessionEvent =
   /** New document's `id` / partition key fields were edited. */
   | { type: 'newDocumentFieldsChanged'; fields: NewDocumentFields }
   | { type: 'saveRefused'; notice: EditNotice }
-  | { type: 'saveStarted' }
+  /** `address`: where a create is sent (New document), recorded so an `id`
+   * clash can name it. */
+  | { type: 'saveStarted'; address?: DocumentAddress }
   | { type: 'saveSucceeded'; document: StoredDocument; requestCharge: number }
   | {
       type: 'saveOutcome'
@@ -122,13 +126,24 @@ export function openEditSession(input: {
 }
 
 /** A New document session (stories 4, 26): editable `id` and partition key
- * fields above the body. */
+ * fields above the body. Opened `from` an Edit ("Different address? New
+ * document", story 21), it starts with that session's address in the
+ * fields and its current draft, unsaved edits included, as the body. */
 export function openNewDocumentSession(input: {
   key: number
   target: DocumentTarget
   partitionKeyPaths: readonly string[]
   from?: EditSession
 }): EditSession {
+  const { from } = input
+  const fields: NewDocumentFields = from
+    ? (from.newDocument ?? {
+        id: from.address.id,
+        partitionKey: partitionKeyLevels(from.address.partitionKey, from.partitionKeyPaths.length).map(
+          partitionKeyInputText
+        )
+      })
+    : { id: '', partitionKey: input.partitionKeyPaths.map(() => '') }
   return {
     key: input.key,
     target: input.target,
@@ -138,12 +153,21 @@ export function openNewDocumentSession(input: {
     phase: 'editing',
     serverCopy: undefined,
     etag: undefined,
-    draft: '{}',
+    draft: from?.draft || '{}',
     revision: 0,
     saving: false,
     notice: undefined,
-    newDocument: { id: '', partitionKey: input.partitionKeyPaths.map(() => '') }
+    newDocument: fields
   }
+}
+
+/** A partition key value as New document's field text, the inverse of
+ * `parsePartitionKeyInput`: a string that would read back as another value
+ * is quoted; the None value (no property) leaves the field empty. */
+export function partitionKeyInputText(level: PartitionKeyLevelValue): string {
+  if (isNoneValue(level)) return ''
+  if (typeof level !== 'string') return JSON.stringify(level)
+  return parsePartitionKeyInput(level) === level ? level : JSON.stringify(level)
 }
 
 export function editSessionReducer(session: EditSession, event: EditSessionEvent): EditSession {
@@ -171,19 +195,24 @@ export function editSessionReducer(session: EditSession, event: EditSessionEvent
     case 'saveRefused':
       return { ...session, saving: false, notice: event.notice }
     case 'saveStarted':
-      return { ...session, saving: true, notice: undefined }
+      return { ...session, address: event.address ?? session.address, saving: true, notice: undefined }
     case 'saveSucceeded':
+      // A created document is edited from here on like any other.
       return {
         ...session,
+        newDocument: undefined,
         saving: false,
         serverCopy: event.document,
         etag: etagOf(event.document),
         draft: editorText(event.document, session.partitionKeyPaths),
         revision: session.revision + 1,
-        notice: { kind: 'saved', requestCharge: event.requestCharge }
+        notice: {
+          kind: session.newDocument ? 'created' : 'saved',
+          requestCharge: event.requestCharge
+        }
       }
     case 'saveOutcome':
-      return { ...session, saving: false, notice: noticeForOutcome(event.outcome) }
+      return { ...session, saving: false, notice: noticeForOutcome(event.outcome, session.address) }
     case 'saveFailed':
       return { ...session, saving: false, notice: { kind: 'error', message: event.message } }
   }
@@ -263,7 +292,9 @@ export function findEditSession(
   target: DocumentTarget,
   address: DocumentAddress
 ): EditSession | undefined {
-  return state.sessions.find((s) => sameTarget(s.target, target) && sameAddress(s.address, address))
+  return state.sessions.find(
+    (s) => !s.newDocument && sameTarget(s.target, target) && sameAddress(s.address, address)
+  )
 }
 
 export function sameTarget(a: DocumentTarget | undefined, b: DocumentTarget | undefined): boolean {
@@ -434,19 +465,28 @@ function setPath(target: Record<string, unknown>, segments: readonly string[], v
 
 /** Concurrent Change handling beyond the notice (Compare, Reload, Save as
  * new document) is ticket 18. */
-function noticeForOutcome(outcome: 'precondition-failed' | 'not-found' | 'conflict'): EditNotice {
+function noticeForOutcome(
+  outcome: 'precondition-failed' | 'not-found' | 'conflict',
+  address: DocumentAddress
+): EditNotice {
   switch (outcome) {
     case 'precondition-failed':
       return { kind: 'concurrent-change' }
     case 'not-found':
       return { kind: 'deleted-while-editing' }
     case 'conflict':
-      return { kind: 'error', message: 'The server refused the write as an id clash.' }
+      // Only a create can clash; the draft is kept for another id.
+      return { kind: 'id-clash', address }
   }
 }
 
-/** True when the draft differs from the server copy's editor text. */
+/** True when the draft differs from the server copy's editor text; for a
+ * New document, once anything has been typed. */
 export function hasUnsavedEdits(session: EditSession): boolean {
+  if (session.newDocument) {
+    const { id, partitionKey } = session.newDocument
+    return id !== '' || partitionKey.some((text) => text !== '') || session.draft.replace(/\s/g, '') !== '{}'
+  }
   return (
     session.serverCopy !== undefined &&
     session.draft !== editorText(session.serverCopy, session.partitionKeyPaths)
