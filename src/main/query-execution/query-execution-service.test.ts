@@ -10,6 +10,7 @@ import type {
   DocumentWrite,
   DocumentWriteResult,
   DocumentWriter,
+  DrivingQueryPage,
   ReadDocumentRequest,
   ReadDocumentResult
 } from '@shared/types/document-writer'
@@ -324,6 +325,10 @@ describe('QueryExecutionService', () => {
         this.reads.push(request)
         return this.readResult
       }
+      async readPartitionKeyPaths(): Promise<string[]> {
+        return ['/customerId']
+      }
+      async *runDrivingQuery(): AsyncIterable<DrivingQueryPage> {}
     }
 
     const replace: DocumentWrite = {

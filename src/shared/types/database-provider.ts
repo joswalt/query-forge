@@ -1,4 +1,5 @@
 import type { ConnectionProfile } from './connection-profile'
+import type { DmlCommitProgress, DmlCommitSummary } from './dml-run'
 
 /**
  * The plaintext form of a credential (GLOSSARY.md: "Decrypted Secret"). Exists
@@ -53,6 +54,10 @@ export interface ResultChunk {
      * renderer can tell which rows are Addressable Rows. Absent means no
      * row is addressable. */
     partitionKeyPaths?: string[]
+    /** Cosmos DB DML commit only: progress so far, on every chunk. */
+    dmlProgress?: DmlCommitProgress
+    /** Cosmos DB DML commit only: the run's summary, on the last chunk. */
+    dmlSummary?: DmlCommitSummary
   }
 }
 

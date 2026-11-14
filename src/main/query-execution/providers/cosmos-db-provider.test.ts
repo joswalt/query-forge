@@ -41,7 +41,13 @@ class FakeCosmosClient implements CosmosClientLike {
   queryPages: Array<{ resources: unknown[]; requestCharge: number; hasMoreResults?: boolean }> =
     []
   pagesServed = 0
-  lastQuery: { query: string; abortSignal?: AbortSignal } | undefined
+  lastQuery:
+    | {
+        query: string | { query: string; parameters?: Array<{ name: string; value: unknown }> }
+        abortSignal?: AbortSignal
+        priorityLevel?: 'Low'
+      }
+    | undefined
   lastTarget: { database: string; container: string } | undefined
   containerReads = 0
   containerReadError: Error | undefined
@@ -90,8 +96,12 @@ class FakeCosmosClient implements CosmosClientLike {
         items: {
           create: (body, options) =>
             this.pointOp({ op: 'create', database: id, container: containerId, body, options }),
-          query: (query: string, options?: { abortSignal?: AbortSignal }) => {
-            this.lastQuery = { query, abortSignal: options?.abortSignal }
+          query: (query, options) => {
+            this.lastQuery = {
+              query,
+              abortSignal: options?.abortSignal,
+              ...(options?.priorityLevel ? { priorityLevel: options.priorityLevel } : {})
+            }
             this.lastTarget = { database: id, container: containerId }
             const pages = this.queryPages
             const onServed = (): void => {
@@ -817,6 +827,73 @@ describe('CosmosDbProvider as a DocumentWriter', () => {
     expect(client.pointOps[0].options).toEqual({
       accessCondition: { type: 'IfMatch', condition: '"1"' },
       priorityLevel: 'Low'
+    })
+  })
+
+  describe('Driving Queries (DML Statement planning)', () => {
+    it("reads the container's partition key paths from its cached definition", async () => {
+      const client = new FakeCosmosClient()
+      client.containerPartitionKeyPaths = ['/tenant', '/region']
+      const provider = await connected(client)
+
+      expect(await provider.readPartitionKeyPaths({ container: 'customers' })).toEqual([
+        '/tenant',
+        '/region'
+      ])
+      expect(await provider.readPartitionKeyPaths({ container: 'customers' })).toEqual([
+        '/tenant',
+        '/region'
+      ])
+      expect(client.containerReads).toBe(1)
+    })
+
+    it('runs the Driving Query with its parameters at low priority, page by page', async () => {
+      const client = new FakeCosmosClient()
+      client.queryPages = [
+        { resources: [{ id: '1', _etag: '"a"' }], requestCharge: 2.5 },
+        { resources: [{ id: '2', _etag: '"b"' }], requestCharge: 1.5 }
+      ]
+      const provider = await connected(client)
+      const drivingQuery = {
+        query: 'SELECT c.id, c._etag FROM c WHERE c.id IN (@id1)',
+        parameters: [{ name: '@id1', value: '1' }]
+      }
+
+      const pages = []
+      for await (const page of provider.runDrivingQuery(drivingQuery, {
+        database: 'other-db',
+        container: 'customers'
+      })) {
+        pages.push(page)
+      }
+
+      expect(pages).toEqual([
+        { rows: [{ id: '1', _etag: '"a"' }], requestCharge: 2.5 },
+        { rows: [{ id: '2', _etag: '"b"' }], requestCharge: 1.5 }
+      ])
+      expect(client.lastTarget).toEqual({ database: 'other-db', container: 'customers' })
+      expect(client.lastQuery).toMatchObject({ query: drivingQuery, priorityLevel: 'Low' })
+    })
+
+    it('cancel() abandons a running Driving Query by its Execution ID', async () => {
+      const client = new FakeCosmosClient()
+      client.queryPages = [
+        { resources: [{ id: '1' }], requestCharge: 1 },
+        { resources: [{ id: '2' }], requestCharge: 1 },
+        { resources: [{ id: '3' }], requestCharge: 1 }
+      ]
+      const provider = await connected(client)
+
+      const pages = []
+      for await (const page of provider.runDrivingQuery(
+        { query: 'SELECT c.id FROM c WHERE true', parameters: [] },
+        { executionId: 'plan-1' }
+      )) {
+        pages.push(page)
+        if (pages.length === 1) provider.cancel('plan-1')
+      }
+
+      expect(pages.length).toBeLessThan(3)
     })
   })
 })

@@ -12,7 +12,11 @@ import type {
   TestResult
 } from '@shared/types/database-provider'
 import { MAX_PATCH_OPERATIONS } from '@shared/types/document-writer'
+import type { DrivingQuery } from '@shared/dml/dml-statement'
 import type {
+  ContainerTarget,
+  DrivingQueryOptions,
+  DrivingQueryPage,
   DocumentPatchOperation,
   DocumentWrite,
   DocumentWriteOptions,
@@ -89,6 +93,12 @@ export interface CosmosItemLike {
   delete(options?: CosmosItemOptionsLike): Promise<CosmosItemResponseLike>
 }
 
+/** The SDK's `SqlQuerySpec`: query text plus named parameters. */
+export interface CosmosQuerySpecLike {
+  query: string
+  parameters?: Array<{ name: string; value: unknown }>
+}
+
 export interface CosmosContainerLike {
   read(): Promise<{ resource?: { partitionKey?: { paths?: string[] } } }>
   /** Always called with an explicit partition key: the SDK targets the
@@ -97,8 +107,8 @@ export interface CosmosContainerLike {
   readonly items: {
     create(body: object, options?: CosmosItemOptionsLike): Promise<CosmosItemResponseLike>
     query(
-      query: string,
-      options?: { maxItemCount?: number; abortSignal?: AbortSignal }
+      query: string | CosmosQuerySpecLike,
+      options?: { maxItemCount?: number; abortSignal?: AbortSignal; priorityLevel?: 'Low' }
     ): { getAsyncIterator(): AsyncIterable<CosmosFeedResponseLike> }
   }
 }
@@ -448,6 +458,36 @@ export class CosmosDbProvider implements DatabaseProvider, DocumentWriter {
     // of throwing.
     if (resource === undefined) return { outcome: 'not-found', requestCharge }
     return { outcome: 'success', document: resource as StoredDocument, requestCharge }
+  }
+
+  readPartitionKeyPaths(target: ContainerTarget): Promise<string[]> {
+    return this.partitionKeyPathsOf(target)
+  }
+
+  async *runDrivingQuery(
+    query: DrivingQuery,
+    options: DrivingQueryOptions
+  ): AsyncIterable<DrivingQueryPage> {
+    const container = this.requireContainer(options)
+    const controller = new AbortController()
+    if (options.executionId) this.abortControllers.set(options.executionId, controller)
+    try {
+      // No `maxRows`: a Driving Query is never capped by a Row Limit; the
+      // Query Execution Service stops iterating at its ceiling instead.
+      // Low priority so bulk work yields to the application's traffic
+      // (ignored by accounts without priority-based execution).
+      const iterator = container.items
+        .query(
+          { query: query.query, parameters: query.parameters },
+          { maxItemCount: DEFAULT_PAGE_SIZE, abortSignal: controller.signal, priorityLevel: 'Low' }
+        )
+        .getAsyncIterator()
+      for await (const page of iterator) {
+        yield { rows: page.resources, requestCharge: page.requestCharge }
+      }
+    } finally {
+      if (options.executionId) this.abortControllers.delete(options.executionId)
+    }
   }
 
   /** The container's partition key paths from its cached definition. A
