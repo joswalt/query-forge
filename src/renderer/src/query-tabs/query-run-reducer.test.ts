@@ -3,7 +3,8 @@ import {
   initialQueryRunState,
   MAX_DISPLAY_ROWS,
   queryRunReducer,
-  retainedRowCount
+  retainedRowCount,
+  type QueryRunState
 } from './query-run-reducer'
 
 describe('queryRunReducer', () => {
@@ -175,5 +176,112 @@ describe('queryRunReducer', () => {
 
     expect(cancelled.status).toBe('cancelled')
     expect(cancelled.errorMessage).toBeUndefined()
+  })
+})
+
+describe('queryRunReducer with Addressable Rows', () => {
+  const target = { connectionId: 'profile-1', database: 'orders-db', container: 'orders' }
+  const system = { _rid: 'r1', _self: 's1', _etag: '"e1"', _ts: 1 }
+
+  function cosmosRun(rows: unknown[], partitionKeyPaths?: string[]): QueryRunState {
+    const started = queryRunReducer(initialQueryRunState, {
+      type: 'started',
+      startedAt: 1,
+      documentTarget: target
+    })
+    return queryRunReducer(started, {
+      type: 'chunk',
+      chunk: { rows, meta: partitionKeyPaths ? { partitionKeyPaths, ru: 2.5 } : { ru: 2.5 } }
+    })
+  }
+
+  it('keeps the container the rows came from and its partition key paths from the first chunk', () => {
+    const first = cosmosRun([{ id: 'a1', customerId: 'c1' }], ['/customerId'])
+    const second = queryRunReducer(first, { type: 'chunk', chunk: { rows: [{ id: 'a2' }] } })
+    expect(second).toMatchObject({ documentTarget: target, partitionKeyPaths: ['/customerId'] })
+
+    const rerun = queryRunReducer(second, { type: 'started', startedAt: 2 })
+    expect(rerun.partitionKeyPaths).toBeUndefined()
+    expect(rerun.documentTarget).toBeUndefined()
+  })
+
+  it('updates a saved full-document row in place and marks it edited, without a re-run', () => {
+    const run = cosmosRun(
+      [
+        { id: 'a1', customerId: 'c1', name: 'Ada', ...system },
+        { id: 'a2', customerId: 'c1', name: 'Grace', ...system }
+      ],
+      ['/customerId']
+    )
+    const saved = { id: 'a2', customerId: 'c1', name: 'Grace Hopper', ...system, _etag: '"e2"' }
+    const next = queryRunReducer(run, {
+      type: 'documentSaved',
+      target,
+      address: { id: 'a2', partitionKey: 'c1' },
+      document: saved,
+      previous: run.resultSets[0].rows[1] as Record<string, unknown>
+    })
+    expect(next.resultSets[0].rows).toEqual([run.resultSets[0].rows[0], saved])
+    expect(next.resultSets[0].rowMarks).toEqual({ 1: 'edited' })
+    expect(next.status).toBe(run.status)
+    expect(next.ruTotal).toBe(2.5)
+  })
+
+  it('refreshes only the projected columns of a saved projection row', () => {
+    const run = cosmosRun(
+      [{ id: 'a1', customerId: 'c1', name: 'Ada', nickname: 'A', total: 3 }],
+      ['/customerId']
+    )
+    const previous = { id: 'a1', customerId: 'c1', name: 'Ada', nickname: 'A', city: 'London', ...system }
+    const saved = { id: 'a1', customerId: 'c1', name: 'Ada Lovelace', city: 'Paris', ...system }
+    const next = queryRunReducer(run, {
+      type: 'documentSaved',
+      target,
+      address: { id: 'a1', partitionKey: 'c1' },
+      document: saved,
+      previous
+    })
+    // `nickname` was removed by the save; `total` is not a document property
+    // (an alias or computed value), so it is left as it was.
+    expect(next.resultSets[0].rows).toEqual([{ id: 'a1', customerId: 'c1', name: 'Ada Lovelace', total: 3 }])
+  })
+
+  it('strikes through the row of a document found deleted by someone else', () => {
+    const run = cosmosRun(
+      [
+        { id: 'a1', customerId: 'c1' },
+        { id: 'a2', customerId: 'c1' }
+      ],
+      ['/customerId']
+    )
+    const next = queryRunReducer(run, {
+      type: 'documentGone',
+      target,
+      address: { id: 'a1', partitionKey: 'c1' }
+    })
+    expect(next.resultSets[0].rows).toEqual(run.resultSets[0].rows)
+    expect(next.resultSets[0].rowMarks).toEqual({ 0: 'gone' })
+  })
+
+  it('leaves rows from another container alone, even with the same address', () => {
+    const run = cosmosRun([{ id: 'a1', customerId: 'c1' }], ['/customerId'])
+    const next = queryRunReducer(run, {
+      type: 'documentGone',
+      target: { ...target, container: 'archive' },
+      address: { id: 'a1', partitionKey: 'c1' }
+    })
+    expect(next).toEqual(run)
+  })
+
+  it('changes nothing when no row has the saved address', () => {
+    const run = cosmosRun([{ id: 'a1', customerId: 'c1' }], ['/customerId'])
+    const next = queryRunReducer(run, {
+      type: 'documentSaved',
+      target,
+      address: { id: 'zz', partitionKey: 'c1' },
+      document: { id: 'zz', customerId: 'c1' },
+      previous: { id: 'zz', customerId: 'c1' }
+    })
+    expect(next).toEqual(run)
   })
 })
