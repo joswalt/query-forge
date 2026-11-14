@@ -1,4 +1,12 @@
 import type { ResultChunk } from '@shared/types/database-provider'
+import type { StoredDocument } from '@shared/types/document-writer'
+import {
+  addressOf,
+  isFullDocument,
+  sameAddress,
+  type DocumentAddress
+} from '../results/addressable-row'
+import { sameTarget, type DocumentTarget } from '../results/edit-session'
 import {
   dmlAfterDone,
   dmlAfterFailure,
@@ -42,7 +50,13 @@ export interface ResultSetState {
   rows: unknown[]
   /** True row count of this set, uncapped. */
   rowCount: number
+  /** Rows changed by a Document Write since the run, by row index: `edited`
+   * after a save (tinted), `gone` when found deleted (struck through).
+   * Absent until the first one. */
+  rowMarks?: Record<number, RowMark>
 }
+
+export type RowMark = 'edited' | 'gone'
 
 export interface QueryRunState {
   status: QueryRunStatus
@@ -60,6 +74,13 @@ export interface QueryRunState {
   finishedAt: number | undefined
   /** Set only for a genuine failure, never for a user-requested cancel. */
   errorMessage: string | undefined
+  /** Cosmos DB only: where this run's rows came from, captured at Run time,
+   * so a Document Write goes to that container even if the tab's Container
+   * picker changes afterwards. Never set for a DML Statement run. */
+  documentTarget?: DocumentTarget
+  /** Cosmos DB only: the container's partition key paths, from the first
+   * Result Chunk that carried them. Absent means no row is addressable. */
+  partitionKeyPaths?: string[]
   /** Set while (and after) the run is a Cosmos DB DML Statement: its phase
    * from planning to done (see dml-run-state.ts). Undefined for a query. */
   dml?: DmlRunState
@@ -77,7 +98,19 @@ export const initialQueryRunState: QueryRunState = {
 }
 
 export type QueryRunAction =
-  | { type: 'started'; startedAt: number }
+  | { type: 'started'; startedAt: number; documentTarget?: DocumentTarget }
+  /** A drawer save stored `document` at `address`: matching rows update in
+   * place. `previous` is the server copy the save started from. */
+  | {
+      type: 'documentSaved'
+      target: DocumentTarget
+      address: DocumentAddress
+      document: StoredDocument
+      previous: StoredDocument
+    }
+  /** The document at `address` no longer exists. Both document actions
+   * apply only to a run of the same `target` container. */
+  | { type: 'documentGone'; target: DocumentTarget; address: DocumentAddress }
   | { type: 'chunk'; chunk: ResultChunk }
   | { type: 'done'; finishedAt: number }
   | {
@@ -105,7 +138,22 @@ export type QueryRunAction =
 export function queryRunReducer(state: QueryRunState, action: QueryRunAction): QueryRunState {
   switch (action.type) {
     case 'started':
-      return { ...initialQueryRunState, status: 'running', startedAt: action.startedAt }
+      return {
+        ...initialQueryRunState,
+        status: 'running',
+        startedAt: action.startedAt,
+        documentTarget: action.documentTarget
+      }
+
+    case 'documentSaved':
+      if (!sameTarget(state.documentTarget, action.target)) return state
+      return markRows(state, action.address, 'edited', (row) =>
+        rowAfterSave(row, action.document, action.previous)
+      )
+
+    case 'documentGone':
+      if (!sameTarget(state.documentTarget, action.target)) return state
+      return markRows(state, action.address, 'gone', (row) => row)
 
     case 'chunk': {
       const ru = action.chunk.meta?.ru
@@ -126,6 +174,7 @@ export function queryRunReducer(state: QueryRunState, action: QueryRunAction): Q
         rowCount: state.rowCount + action.chunk.rows.length,
         ruTotal: ru === undefined ? state.ruTotal : (state.ruTotal ?? 0) + ru,
         stoppedAtRowLimit: state.stoppedAtRowLimit || action.chunk.meta?.truncated === true,
+        partitionKeyPaths: state.partitionKeyPaths ?? action.chunk.meta?.partitionKeyPaths,
         dml: withCommitChunkMeta(state.dml, action.chunk.meta)
       }
     }
@@ -226,6 +275,52 @@ export function queryRunReducer(state: QueryRunState, action: QueryRunAction): Q
     default:
       return state
   }
+}
+
+/** Replaces and marks every retained row whose address is `address`. Index
+ * based, so rows never shift under an open context menu or selection. */
+function markRows(
+  state: QueryRunState,
+  address: DocumentAddress,
+  mark: RowMark,
+  update: (row: Record<string, unknown>) => unknown
+): QueryRunState {
+  let changed = false
+  const resultSets = state.resultSets.map((set) => {
+    let rows = set.rows
+    let rowMarks = set.rowMarks
+    set.rows.forEach((row, index) => {
+      const check = addressOf(row, state.partitionKeyPaths)
+      if (!check.addressable || !sameAddress(check.address, address)) return
+      if (rows === set.rows) rows = [...set.rows]
+      rows[index] = update(row as Record<string, unknown>)
+      rowMarks = { ...rowMarks, [index]: mark }
+    })
+    if (rows === set.rows) return set
+    changed = true
+    return { ...set, rows, rowMarks }
+  })
+  return changed ? { ...state, resultSets } : state
+}
+
+/**
+ * A saved row as the grid should now show it. A full document becomes the
+ * stored document. A projection keeps its own columns: those the document
+ * has are refreshed, those the save removed are dropped, and any other
+ * column (an alias or computed value, not a document property) stays.
+ */
+function rowAfterSave(
+  row: Record<string, unknown>,
+  document: StoredDocument,
+  previous: StoredDocument
+): unknown {
+  if (isFullDocument(row)) return document
+  const next: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(row)) {
+    if (Object.hasOwn(document, key)) next[key] = document[key]
+    else if (!Object.hasOwn(previous, key)) next[key] = value
+  }
+  return next
 }
 
 /** Rows currently held for display, across every Result Set. */
