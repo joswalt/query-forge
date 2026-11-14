@@ -1,3 +1,6 @@
+import type { DrivingQuery } from '../dml/dml-statement'
+import type { ExecutionId } from './database-provider'
+
 /**
  * One level of a Cosmos DB partition key value: a scalar, JSON `null` (the
  * `null` partition), or `{}` (the None value: the document has no such
@@ -113,13 +116,47 @@ export interface DocumentWriteOptions {
 export interface DocumentWriter {
   writeDocument(write: DocumentWrite, options?: DocumentWriteOptions): Promise<DocumentWriteResult>
   readDocument(request: ReadDocumentRequest): Promise<ReadDocumentResult>
+  /**
+   * The container's partition key paths (e.g. `['/customerId']`), from the
+   * provider's cached container definition. The Query Execution Service
+   * needs them to translate a DML Statement (ADR 0004 amendment, Tab
+   * identity and Driving Queries).
+   */
+  readPartitionKeyPaths(target: ContainerTarget): Promise<string[]>
+  /**
+   * Runs a Driving Query (with its parameters) to the end at
+   * `priorityLevel: 'Low'`, one page at a time. Never capped by a Row Limit;
+   * the caller stops iterating at its ceiling. Abandoned through
+   * `DatabaseProvider.cancel(executionId)` like any query.
+   */
+  runDrivingQuery(query: DrivingQuery, options: DrivingQueryOptions): AsyncIterable<DrivingQueryPage>
+}
+
+/** Which container a request targets; each falls back to the Connection
+ * Profile's, as `QueryOptions` does. */
+export interface ContainerTarget {
+  database?: string
+  container?: string
+}
+
+export interface DrivingQueryOptions extends ContainerTarget {
+  executionId?: ExecutionId
+}
+
+/** One page of Driving Query matches with its RU charge. */
+export interface DrivingQueryPage {
+  rows: unknown[]
+  requestCharge: number
 }
 
 export function isDocumentWriter(provider: unknown): provider is DocumentWriter {
+  const candidate = provider as Partial<DocumentWriter> | null
   return (
     typeof provider === 'object' &&
-    provider !== null &&
-    typeof (provider as Partial<DocumentWriter>).writeDocument === 'function' &&
-    typeof (provider as Partial<DocumentWriter>).readDocument === 'function'
+    candidate !== null &&
+    typeof candidate.writeDocument === 'function' &&
+    typeof candidate.readDocument === 'function' &&
+    typeof candidate.readPartitionKeyPaths === 'function' &&
+    typeof candidate.runDrivingQuery === 'function'
   )
 }

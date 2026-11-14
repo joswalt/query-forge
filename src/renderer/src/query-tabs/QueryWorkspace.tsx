@@ -27,6 +27,7 @@ import { CloseIcon, PlayIcon, PlusIcon } from '../icons'
 import { ENVIRONMENT_LABEL, groupByEnvironment } from '../connection-environment'
 import { QueryResultsView, type ExportLoadedRequest } from './QueryResultsView'
 import { EditorResizer, useEditorHeight } from './EditorResizer'
+import { DmlConfirmStrip, DmlRunReport } from './DmlRunPanels'
 import {
   initialQueryRunState,
   MAX_DISPLAY_ROWS,
@@ -252,6 +253,10 @@ export const QueryWorkspace = forwardRef<
   const executionsRef = useRef(new Map<string, ExecutionHandle>())
   const exportExecutionsRef = useRef(new Map<string, ExecutionHandle>())
   const nextEditSessionKeyRef = useRef(1)
+  /** Tabs that planned a DML Statement, so closing one sends `releaseTab`. */
+  const dmlTabsRef = useRef(new Set<string>())
+  /** Bumped each time Cmd/Ctrl+Enter is swallowed at a DML confirmation. */
+  const [blockedShortcut, setBlockedShortcut] = useState(0)
   const [extractorSettings, updateExtractorSettings] = useExtractorSettings()
   const editorRef = useRef<QueryEditorHandle>(null)
   const editorHeight = useEditorHeight()
@@ -405,6 +410,9 @@ export const QueryWorkspace = forwardRef<
       execution.cancel()
     }
     executionsRef.current.delete(id)
+    // Drops anything the Query Execution Service holds for this tab (a
+    // DML Plan at the confirmation). Only tabs that ran DML hold anything.
+    if (dmlTabsRef.current.delete(id)) window.api.dml.releaseTab(id).catch(() => {})
 
     // Computed from the current render's `tabs`/`activeTabId` directly
     // (not via a `setTabs` functional updater) — this handler runs once per
@@ -424,6 +432,14 @@ export const QueryWorkspace = forwardRef<
     const tab = tabs.find((t) => t.id === tabId)
     if (!tab) return
 
+    // One run at a time per tab (story 111). Cmd/Ctrl+Enter reaches here
+    // even while Run is disabled; at a DML confirmation it is swallowed
+    // with a hint, so repeating Run never commits a bulk write (story 91).
+    if (tab.run.status === 'running') {
+      if (tab.run.dml?.phase === 'confirming') setBlockedShortcut((n) => n + 1)
+      return
+    }
+
     if (!tab.connectionId) {
       dispatchRun(tabId, {
         type: 'failed',
@@ -438,15 +454,20 @@ export const QueryWorkspace = forwardRef<
     // `queryStream.execute`: a malformed one shows its syntax error before
     // anything is sent. Partition key paths aren't known here, so SET on a
     // partition key path is left to the Query Execution Service's re-parse.
-    const engine = connections.find((c) => c.id === tab.connectionId)?.config.kind
-    if (engine === 'cosmos-db' && detectDmlStatement(queryText)) {
+    const connection = connections.find((c) => c.id === tab.connectionId)
+    if (connection?.config.kind === 'cosmos-db' && detectDmlStatement(queryText)) {
       const parsed = parseDmlStatement(queryText)
+      if (parsed.ok && parsed.statement.verb === 'DELETE') {
+        const container = tab.options?.container ?? connection.config.container ?? ''
+        handlePlanDml(tab, tab.connectionId, queryText, container)
+        return
+      }
       const now = Date.now()
       dispatchRun(tabId, { type: 'started', startedAt: now })
       dispatchRun(tabId, {
         type: 'failed',
         message: parsed.ok
-          ? 'DML Statements are not yet supported.'
+          ? 'UPDATE statements are not supported yet. Only DELETE can run for now.'
           : `DML syntax error: ${parsed.error.message}`,
         finishedAt: now,
         cancelled: false
@@ -459,7 +480,7 @@ export const QueryWorkspace = forwardRef<
     // Document Writes from these rows go to the container they came from,
     // even if the Container picker changes later.
     const documentTarget: DocumentTarget | undefined =
-      engine === 'cosmos-db'
+      connection?.config.kind === 'cosmos-db'
         ? {
             connectionId: tab.connectionId,
             database: tab.options?.database,
@@ -517,7 +538,95 @@ export const QueryWorkspace = forwardRef<
       })
   }
 
+  /** Plans a DML Statement (stories 75, 76): the Query Execution Service
+   * runs its Driving Query and holds a DML Plan for this tab. */
+  function handlePlanDml(
+    tab: QueryTabState,
+    connectionId: string,
+    statement: string,
+    container: string
+  ): void {
+    const tabId = tab.id
+    const verb = 'DELETE'
+    dmlTabsRef.current.add(tabId)
+    // A DML run leaves nothing for "Export all matching rows" to re-run.
+    updateTab(tabId, (t) => ({ ...t, lastExecutedQuery: undefined }))
+    dispatchRun(tabId, { type: 'dmlPlanningStarted', startedAt: Date.now(), verb, container })
+
+    const handle: ExecutionHandle = { cancel: () => {}, cancelRequested: false }
+    executionsRef.current.set(tabId, handle)
+    window.api.dml
+      .plan(connectionId, tabId, statement, tab.options, {
+        onProgress: (progress) => dispatchRun(tabId, { type: 'dmlPlanningProgress', progress }),
+        onPlanned: (summary) => {
+          executionsRef.current.delete(tabId)
+          dispatchRun(tabId, { type: 'dmlPlanned', summary, at: Date.now() })
+        },
+        onError: (message) => {
+          const cancelled = executionsRef.current.get(tabId)?.cancelRequested ?? false
+          executionsRef.current.delete(tabId)
+          dispatchRun(tabId, { type: 'failed', message, finishedAt: Date.now(), cancelled })
+        }
+      })
+      .then((resolved) => attachCancel(tabId, handle, resolved.cancel))
+      .catch((err) => failSetup(tabId, err))
+  }
+
+  /** Confirm at the strip: writes exactly the held DML Plan (story 95). */
+  function handleConfirmDml(tabId: string): void {
+    const tab = tabs.find((t) => t.id === tabId)
+    const dml = tab?.run.dml
+    if (!tab?.connectionId || dml?.phase !== 'confirming') return
+    dispatchRun(tabId, { type: 'dmlCommitStarted' })
+
+    const handle: ExecutionHandle = { cancel: () => {}, cancelRequested: false }
+    executionsRef.current.set(tabId, handle)
+    window.api.dml
+      .commit(tab.connectionId, dml.planId, {
+        onChunk: (chunk) => dispatchRun(tabId, { type: 'chunk', chunk }),
+        onDone: () => {
+          executionsRef.current.delete(tabId)
+          dispatchRun(tabId, { type: 'done', finishedAt: Date.now() })
+        },
+        onError: (message) => {
+          executionsRef.current.delete(tabId)
+          dispatchRun(tabId, { type: 'failed', message, finishedAt: Date.now(), cancelled: false })
+        }
+      })
+      .then((resolved) => attachCancel(tabId, handle, resolved.cancel))
+      .catch((err) => failSetup(tabId, err))
+  }
+
+  /** Swaps a placeholder handle's `cancel` for the real one, honoring a
+   * cancel requested during the `query:start` round trip. */
+  function attachCancel(tabId: string, handle: ExecutionHandle, cancel: () => void): void {
+    if (!executionsRef.current.has(tabId)) return
+    handle.cancel = cancel
+    if (handle.cancelRequested) cancel()
+  }
+
+  function failSetup(tabId: string, err: unknown): void {
+    executionsRef.current.delete(tabId)
+    dispatchRun(tabId, {
+      type: 'failed',
+      message: err instanceof Error ? err.message : String(err),
+      finishedAt: Date.now(),
+      cancelled: false
+    })
+  }
+
+  /** Cancel (toolbar or strip/report) means: stop planning, discard a
+   * DML Plan at the confirmation (story 94), or Stop a commit after its
+   * in-flight writes (story 99), or cancel a query. */
   function handleCancel(tabId: string): void {
+    const dml = tabs.find((t) => t.id === tabId)?.run.dml
+    if (dml?.phase === 'confirming') {
+      window.api.dml.discard(dml.planId).catch(() => {})
+      dispatchRun(tabId, { type: 'dmlDiscarded', finishedAt: Date.now() })
+      return
+    }
+    if (dml?.phase === 'committing') dispatchRun(tabId, { type: 'dmlStopRequested' })
+
     const execution = executionsRef.current.get(tabId)
     if (!execution) return
     execution.cancelRequested = true
@@ -957,6 +1066,14 @@ export const QueryWorkspace = forwardRef<
             </form>
           )}
 
+          <DmlConfirmStrip
+            key={activeTab.run.dml?.phase === 'confirming' ? activeTab.run.dml.planId : undefined}
+            dml={activeTab.run.dml}
+            blockedShortcut={blockedShortcut}
+            onConfirm={() => handleConfirmDml(activeTab.id)}
+            onCancel={() => handleCancel(activeTab.id)}
+          />
+
           <QueryEditor
             key={activeTab.id}
             ref={editorRef}
@@ -967,6 +1084,8 @@ export const QueryWorkspace = forwardRef<
           />
 
           <EditorResizer {...editorHeight} />
+
+          <DmlRunReport dml={activeTab.run.dml} onCancel={() => handleCancel(activeTab.id)} />
 
           <QueryResultsView
             run={activeTab.run}

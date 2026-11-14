@@ -2,7 +2,10 @@ import { ipcMain } from 'electron'
 import type { WebContents } from 'electron'
 import { randomUUID } from 'node:crypto'
 import type { ConnectionManager } from '../connection-manager/connection-manager'
-import type { QueryExecutionClient } from '../query-execution/query-execution-client'
+import type {
+  PlanDmlRequest,
+  QueryExecutionClient
+} from '../query-execution/query-execution-client'
 import type {
   QueryHistoryRepository,
   QueryHistoryStatus,
@@ -130,6 +133,64 @@ export function registerQueryExecutionIpcHandlers(
     cancelledExecutionIds.add(request.executionId)
     client.cancel(request.profileId, request.executionId)
   })
+
+  // DML Statement runs (Cosmos DB, ADR 0004 amendments). Both take an
+  // Execution ID minted by `query:start` and are cancelled through
+  // `query:cancel`. Planning streams progress on `dml:progress:<id>` and
+  // ends on `dml:planned:<id>` or `query:error:<id>`; a commit streams its
+  // outcome rows on the same channels as a query. Query History for DML
+  // runs is recorded in these handlers by a later slice.
+  ipcMain.on('dml:plan', (event, request: PlanDmlRequest) => {
+    const { sender } = event
+    const { executionId } = request
+    client
+      .planDml(request, (progress) => {
+        if (!sender.isDestroyed()) sender.send(`dml:progress:${executionId}`, progress)
+      })
+      .then(
+        (summary) => {
+          if (!sender.isDestroyed()) sender.send(`dml:planned:${executionId}`, summary)
+        },
+        (err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err)
+          if (!sender.isDestroyed()) sender.send(`query:error:${executionId}`, message)
+        }
+      )
+      .finally(() => cancelledExecutionIds.delete(executionId))
+  })
+
+  ipcMain.on('dml:commit', (event, request: { planId: string; executionId: ExecutionId }) => {
+    void streamCommit(client, event.sender, request).finally(() =>
+      cancelledExecutionIds.delete(request.executionId)
+    )
+  })
+
+  ipcMain.handle('dml:discard', async (_event, planId: string): Promise<void> =>
+    client.discardPlan(planId)
+  )
+
+  ipcMain.handle('dml:releaseTab', async (_event, tabId: string): Promise<void> =>
+    client.releaseTab(tabId)
+  )
+}
+
+/** Forwards a commit's outcome rows to the renderer on the query channels.
+ * Keeps draining after the sender is gone: the commit still runs to its
+ * end in the Query Execution Service. */
+async function streamCommit(
+  client: QueryExecutionClient,
+  sender: WebContents,
+  { planId, executionId }: { planId: string; executionId: ExecutionId }
+): Promise<void> {
+  try {
+    for await (const chunk of client.commitDml(planId, executionId)) {
+      if (!sender.isDestroyed()) sender.send(`query:chunk:${executionId}`, chunk)
+    }
+    if (!sender.isDestroyed()) sender.send(`query:done:${executionId}`)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    if (!sender.isDestroyed()) sender.send(`query:error:${executionId}`, message)
+  }
 }
 
 interface QueryExecuteRequest {

@@ -3,8 +3,10 @@ import { randomUUID } from 'node:crypto'
 import type { DatabaseProvider, DecryptedSecret } from '@shared/types/database-provider'
 import { isDocumentWriter } from '@shared/types/document-writer'
 import type { DocumentWriter } from '@shared/types/document-writer'
+import type { DmlPlanSummary } from '@shared/types/dml-run'
 import { assertReadOnlyQuery, DocumentWriteRefusedError } from './read-only-guard'
 import { toExecutionErrorMessage } from './scrub-error-message'
+import { buildDmlPlan, commitDmlPlan, DmlPlanStore, type DmlRun } from './dml-execution'
 import type { QueryExecutionRequest, QueryExecutionResponse } from './protocol'
 
 export type ProviderFactory = (config: ConnectionConfig) => DatabaseProvider
@@ -29,6 +31,12 @@ export class QueryExecutionService {
     string,
     { resolve: (secret: DecryptedSecret) => void; reject: (err: Error) => void }
   >()
+
+  /** Held DML Plans, at most one per tab (ADR 0004 amendments). */
+  private readonly dmlPlans = new DmlPlanStore()
+  /** Planning and commit runs in progress, by Execution ID, so `cancel`
+   * can stop a commit the service itself is dispatching. */
+  private readonly dmlRuns = new Map<string, DmlRun>()
 
   constructor(private readonly providerFactory: ProviderFactory) {}
 
@@ -68,6 +76,7 @@ export class QueryExecutionService {
             this.providers.delete(request.profileId)
           }
           this.profiles.delete(request.profileId)
+          this.dmlPlans.dropProfile(request.profileId)
           send({ id: request.id, kind: 'result', value: undefined, done: true })
           return
         }
@@ -87,6 +96,8 @@ export class QueryExecutionService {
         }
 
         case 'cancel': {
+          const dmlRun = this.dmlRuns.get(request.executionId)
+          if (dmlRun) dmlRun.cancelled = true
           this.requireProvider(request.profileId).cancel(request.executionId)
           send({ id: request.id, kind: 'result', value: undefined, done: true })
           return
@@ -113,6 +124,74 @@ export class QueryExecutionService {
           return
         }
 
+        case 'planDml': {
+          // Read-only covers bulk writes too (story 74): refused before the
+          // Driving Query runs. A new plan replaces the tab's held one.
+          if (this.profiles.get(request.profileId)?.readOnly) {
+            throw new DocumentWriteRefusedError()
+          }
+          this.dmlPlans.dropTab(request.tabId)
+          const writer = this.requireDocumentWriter(request.profileId)
+          const plan = await this.trackDmlRun(request.executionId, (run) =>
+            buildDmlPlan(
+              writer,
+              {
+                profileId: request.profileId,
+                tabId: request.tabId,
+                executionId: request.executionId,
+                statement: request.statement,
+                target: { database: request.database, container: request.container }
+              },
+              run,
+              (progress) => send({ id: request.id, kind: 'progress', value: progress, done: false })
+            )
+          )
+          const matchCount = plan.documents.length
+          // Zero matches: nothing to confirm, so nothing is held.
+          if (matchCount > 0) this.dmlPlans.hold(plan)
+          const summary: DmlPlanSummary = {
+            ...(matchCount > 0 ? { planId: plan.planId } : {}),
+            verb: plan.verb,
+            matchCount,
+            drivingQueryRequestCharge: plan.drivingQueryRequestCharge
+          }
+          send({ id: request.id, kind: 'result', value: summary, done: true })
+          return
+        }
+
+        case 'commitDml': {
+          const plan = this.dmlPlans.get(request.planId)
+          if (!plan) {
+            throw new Error(
+              'This DML Plan is no longer held (it was discarded, replaced, or its connection closed). ' +
+                'Run the statement again.'
+            )
+          }
+          if (this.profiles.get(plan.profileId)?.readOnly) throw new DocumentWriteRefusedError()
+          const writer = this.requireDocumentWriter(plan.profileId)
+          // A plan is written once: committing drops it.
+          this.dmlPlans.drop(plan.planId)
+          await this.trackDmlRun(request.executionId, (run) =>
+            commitDmlPlan(writer, plan, run, (chunk) =>
+              send({ id: request.id, kind: 'chunk', value: chunk, done: false })
+            )
+          )
+          send({ id: request.id, kind: 'result', value: undefined, done: true })
+          return
+        }
+
+        case 'discardPlan': {
+          this.dmlPlans.drop(request.planId)
+          send({ id: request.id, kind: 'result', value: undefined, done: true })
+          return
+        }
+
+        case 'releaseTab': {
+          this.dmlPlans.dropTab(request.tabId)
+          send({ id: request.id, kind: 'result', value: undefined, done: true })
+          return
+        }
+
         case 'executeQuery': {
           const provider = this.requireProvider(request.profileId)
           // Read-only enforcement lives here, in the process that owns the
@@ -136,6 +215,16 @@ export class QueryExecutionService {
         message: toExecutionErrorMessage(err),
         done: true
       })
+    }
+  }
+
+  private async trackDmlRun<T>(executionId: string, work: (run: DmlRun) => Promise<T>): Promise<T> {
+    const run: DmlRun = { cancelled: false }
+    this.dmlRuns.set(executionId, run)
+    try {
+      return await work(run)
+    } finally {
+      this.dmlRuns.delete(executionId)
     }
   }
 
