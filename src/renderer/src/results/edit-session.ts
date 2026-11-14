@@ -53,6 +53,17 @@ export interface EditSession {
   /** A Document Write is in flight. */
   saving: boolean
   notice: EditNotice | undefined
+  /** Set while this is a New document session (until its create succeeds):
+   * the `id` and partition key fields as typed. `address` is then the
+   * prefill or the last create attempt, not a stored document. */
+  newDocument?: NewDocumentFields
+}
+
+/** New document's editable address fields: the `id`, and one partition key
+ * field per level (see `parsePartitionKeyInput`). */
+export interface NewDocumentFields {
+  id: string
+  partitionKey: string[]
 }
 
 /** What the drawer shows above the editor. */
@@ -62,6 +73,9 @@ export type EditNotice =
   | { kind: 'address-changed'; fields: string[] }
   /** Save refused: the draft isn't a JSON object. */
   | { kind: 'invalid-body'; message: string }
+  /** Create refused: New document's address fields are empty or disagree
+   * with the body. */
+  | { kind: 'invalid-address'; message: string }
   /** The etag no longer matches: someone else changed the document. */
   | { kind: 'concurrent-change' }
   | { kind: 'deleted-while-editing' }
@@ -72,6 +86,8 @@ export type EditSessionEvent =
   | { type: 'readNotFound' }
   | { type: 'readFailed'; message: string }
   | { type: 'draftChanged'; text: string }
+  /** New document's `id` / partition key fields were edited. */
+  | { type: 'newDocumentFieldsChanged'; fields: NewDocumentFields }
   | { type: 'saveRefused'; notice: EditNotice }
   | { type: 'saveStarted' }
   | { type: 'saveSucceeded'; document: StoredDocument; requestCharge: number }
@@ -105,6 +121,31 @@ export function openEditSession(input: {
   }
 }
 
+/** A New document session (stories 4, 26): editable `id` and partition key
+ * fields above the body. */
+export function openNewDocumentSession(input: {
+  key: number
+  target: DocumentTarget
+  partitionKeyPaths: readonly string[]
+  from?: EditSession
+}): EditSession {
+  return {
+    key: input.key,
+    target: input.target,
+    partitionKeyPaths: input.partitionKeyPaths,
+    address: { id: '', partitionKey: null },
+    rowRid: undefined,
+    phase: 'editing',
+    serverCopy: undefined,
+    etag: undefined,
+    draft: '{}',
+    revision: 0,
+    saving: false,
+    notice: undefined,
+    newDocument: { id: '', partitionKey: input.partitionKeyPaths.map(() => '') }
+  }
+}
+
 export function editSessionReducer(session: EditSession, event: EditSessionEvent): EditSession {
   switch (event.type) {
     case 'readSucceeded':
@@ -125,6 +166,8 @@ export function editSessionReducer(session: EditSession, event: EditSessionEvent
       return { ...session, phase: 'read-failed', notice: { kind: 'error', message: event.message } }
     case 'draftChanged':
       return { ...session, draft: event.text }
+    case 'newDocumentFieldsChanged':
+      return session.newDocument ? { ...session, newDocument: event.fields } : session
     case 'saveRefused':
       return { ...session, saving: false, notice: event.notice }
     case 'saveStarted':
@@ -164,6 +207,15 @@ export type EditSessionsAction =
       address: DocumentAddress
       row: unknown
     }
+  /** New document, empty, or prefilled from the edit session `from`
+   * ("Different address? New document"). */
+  | {
+      type: 'newDocumentOpened'
+      key: number
+      target: DocumentTarget
+      partitionKeyPaths: readonly string[]
+      from?: number
+    }
   | { type: 'selected'; key: number }
   | { type: 'closed'; key: number }
   | { type: 'session'; key: number; event: EditSessionEvent }
@@ -177,6 +229,13 @@ export function editSessionsReducer(
       const existing = findEditSession(state, action.target, action.address)
       if (existing) return { ...state, activeKey: existing.key }
       return { sessions: [...state.sessions, openEditSession(action)], activeKey: action.key }
+    }
+    case 'newDocumentOpened': {
+      const from = state.sessions.find((s) => s.key === action.from)
+      return {
+        sessions: [...state.sessions, openNewDocumentSession({ ...action, from })],
+        activeKey: action.key
+      }
     }
     case 'selected':
       return state.sessions.some((s) => s.key === action.key) ? { ...state, activeKey: action.key } : state
@@ -227,21 +286,15 @@ export type SavePlan = { ok: true; write: DocumentWrite } | { ok: false; notice:
  * address (moving a document is New document's job).
  */
 export function planSave(session: EditSession): SavePlan {
+  if (session.newDocument) return planCreate(session, session.newDocument)
   if (session.phase !== 'editing' || session.etag === undefined) {
     return { ok: false, notice: { kind: 'error', message: 'The document has not been read yet.' } }
   }
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(session.draft)
-  } catch (err) {
-    return { ok: false, notice: { kind: 'invalid-body', message: (err as Error).message } }
-  }
-  if (!isRecord(parsed)) {
-    return { ok: false, notice: { kind: 'invalid-body', message: 'A document must be a JSON object.' } }
-  }
+  const parsed = parseDraft(session.draft)
+  if (!parsed.ok) return parsed
 
   const { address, partitionKeyPaths } = session
-  const body = stripSystemProperties(parsed)
+  const body = parsed.body
   const changed: string[] = []
   if (Object.hasOwn(body, 'id') && body.id !== address.id) changed.push('id')
 
@@ -267,6 +320,93 @@ export function planSave(session: EditSession): SavePlan {
       container: session.target.container
     }
   }
+}
+
+/** The draft as a body to send: a JSON object, system properties stripped. */
+function parseDraft(
+  draft: string
+): { ok: true; body: Record<string, unknown> } | { ok: false; notice: EditNotice } {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(draft)
+  } catch (err) {
+    return { ok: false, notice: { kind: 'invalid-body', message: (err as Error).message } }
+  }
+  if (!isRecord(parsed)) {
+    return { ok: false, notice: { kind: 'invalid-body', message: 'A document must be a JSON object.' } }
+  }
+  return { ok: true, body: stripSystemProperties(parsed) }
+}
+
+/**
+ * What Create sends for a New document session: a `create` with the `id`
+ * and partition key value from the fields, both also written into the body
+ * (the SDK takes the partition key from the body, and invents an `id` when
+ * the body has none). Refused when a field is empty or the body already
+ * holds a different value for it.
+ */
+function planCreate(session: EditSession, fields: NewDocumentFields): SavePlan {
+  const { partitionKeyPaths } = session
+  const empty: string[] = []
+  if (fields.id === '') empty.push('id')
+  partitionKeyPaths.forEach((path, i) => {
+    if ((fields.partitionKey[i] ?? '') === '') empty.push(partitionKeyFieldName(path))
+  })
+  if (empty.length > 0) {
+    return invalidAddress(`Enter ${empty.join(' and ')} for the new document.`)
+  }
+
+  const parsed = parseDraft(session.draft)
+  if (!parsed.ok) return parsed
+  const body = parsed.body
+
+  const differs: string[] = []
+  if (Object.hasOwn(body, 'id') && body.id !== fields.id) differs.push('id')
+  const levels = partitionKeyPaths.map((_path, i) => parsePartitionKeyInput(fields.partitionKey[i]))
+  partitionKeyPaths.forEach((path, i) => {
+    const segments = partitionKeyPathSegments(path)
+    const read = readPath(body, segments)
+    const agrees = read.found ? read.value === levels[i] : setPath(body, segments, levels[i])
+    if (!agrees) differs.push(partitionKeyFieldName(path))
+  })
+  if (differs.length > 0) {
+    return invalidAddress(
+      `The body's ${differs.join(' and ')} ${differs.length === 1 ? 'differs' : 'differ'} from the field above. Remove it from the body or make them match.`
+    )
+  }
+
+  return {
+    ok: true,
+    write: {
+      kind: 'create',
+      id: fields.id,
+      partitionKey: levels.length === 1 ? levels[0] : levels,
+      body: { ...body, id: fields.id },
+      database: session.target.database,
+      container: session.target.container
+    }
+  }
+}
+
+function invalidAddress(message: string): SavePlan {
+  return { ok: false, notice: { kind: 'invalid-address', message } }
+}
+
+/**
+ * A New document partition key field as a value: a JSON scalar literal
+ * (`72712`, `"72712"`, `true`, `null`) is that value; any other text is a
+ * string as typed.
+ */
+export function parsePartitionKeyInput(text: string): Exclude<PartitionKeyLevelValue, Record<string, never>> {
+  try {
+    const value: unknown = JSON.parse(text)
+    if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) {
+      return value as string | number | boolean | null
+    }
+  } catch {
+    // Not JSON: plain text.
+  }
+  return text
 }
 
 function partitionKeyLevels(value: PartitionKeyValue, pathCount: number): PartitionKeyLevelValue[] {

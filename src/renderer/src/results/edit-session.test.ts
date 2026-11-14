@@ -5,6 +5,7 @@ import {
   hasUnsavedEdits,
   initialEditSessionsState,
   openEditSession,
+  openNewDocumentSession,
   planSave,
   type EditSession,
   type EditSessionsAction
@@ -294,6 +295,146 @@ describe('editSessionsReducer', () => {
     state = editSessionsReducer(state, { type: 'closed', key: 1 })
     state = editSessionsReducer(state, { type: 'closed', key: 2 })
     expect(state).toMatchObject({ sessions: [], activeKey: undefined })
+  })
+})
+
+describe('New document', () => {
+  const newDocument = (key: number, from?: number): EditSessionsAction => ({
+    type: 'newDocumentOpened',
+    key,
+    target,
+    partitionKeyPaths: ['/customerId'],
+    from
+  })
+
+  it('opens an editing session with empty id and partition key fields above an empty body', () => {
+    const state = editSessionsReducer(initialEditSessionsState, newDocument(1))
+    expect(state.activeKey).toBe(1)
+    expect(state.sessions[0]).toMatchObject({
+      phase: 'editing',
+      newDocument: { id: '', partitionKey: [''] },
+      serverCopy: undefined,
+      etag: undefined
+    })
+    expect(JSON.parse(state.sessions[0].draft)).toEqual({})
+  })
+
+  it('gives a hierarchical partition key one field per level', () => {
+    const state = editSessionsReducer(initialEditSessionsState, {
+      type: 'newDocumentOpened',
+      key: 1,
+      target,
+      partitionKeyPaths: ['/tenant', '/geo/region']
+    })
+    expect(state.sessions[0].newDocument).toEqual({ id: '', partitionKey: ['', ''] })
+  })
+
+  it('opens every New document in its own edit session', () => {
+    const state = [newDocument(1), newDocument(2)].reduce(editSessionsReducer, initialEditSessionsState)
+    expect(state.sessions.map((s) => s.key)).toEqual([1, 2])
+    expect(state.activeKey).toBe(2)
+  })
+})
+
+/** A New document session with these fields typed and this body. */
+function newDocumentDraft(
+  id: string,
+  partitionKey: string[],
+  body: unknown = {},
+  partitionKeyPaths: string[] = ['/customerId']
+): EditSession {
+  let session = openNewDocumentSession({ key: 1, target, partitionKeyPaths })
+  session = editSessionReducer(session, { type: 'newDocumentFieldsChanged', fields: { id, partitionKey } })
+  return editSessionReducer(session, {
+    type: 'draftChanged',
+    text: typeof body === 'string' ? body : JSON.stringify(body)
+  })
+}
+
+describe('planSave for a New document', () => {
+  it('sends a create Document Write with an explicit id and partition key, both also in the body', () => {
+    expect(planSave(newDocumentDraft('n1', ['c9'], { name: 'Grace' }))).toEqual({
+      ok: true,
+      write: {
+        kind: 'create',
+        id: 'n1',
+        partitionKey: 'c9',
+        body: { name: 'Grace', id: 'n1', customerId: 'c9' },
+        database: 'orders-db',
+        container: 'orders'
+      }
+    })
+  })
+
+  it('strips system properties from the body', () => {
+    const plan = planSave(
+      newDocumentDraft('n1', ['c9'], { name: 'Grace', _etag: '"e"', _ts: 1, _rid: 'r', _self: 's', _attachments: 'a' })
+    )
+    expect(plan.ok && plan.write.body).toEqual({ name: 'Grace', id: 'n1', customerId: 'c9' })
+  })
+
+  it('writes every level of a hierarchical, nested partition key into the body', () => {
+    const plan = planSave(
+      newDocumentDraft('n1', ['t1', 'us'], { geo: { city: 'Bentonville' } }, ['/tenant', '/geo/region'])
+    )
+    expect(plan).toMatchObject({
+      ok: true,
+      write: {
+        partitionKey: ['t1', 'us'],
+        body: { id: 'n1', tenant: 't1', geo: { region: 'us', city: 'Bentonville' } }
+      }
+    })
+  })
+
+  it.each([
+    ['plain text as a string', 'c9', 'c9'],
+    ['a JSON number as a number', '72712', 72712],
+    ['a quoted JSON string as that string', '"72712"', '72712'],
+    ['true as a boolean', 'true', true],
+    ['null as JSON null', 'null', null]
+  ])('reads a partition key field holding %s', (_label, text, value) => {
+    expect(planSave(newDocumentDraft('n1', [text]))).toMatchObject({
+      ok: true,
+      write: { partitionKey: value, body: { customerId: value } }
+    })
+  })
+
+  it('accepts an id or partition key value repeated unchanged in the body', () => {
+    expect(planSave(newDocumentDraft('n1', ['c9'], { id: 'n1', customerId: 'c9' }))).toMatchObject({
+      ok: true
+    })
+  })
+
+  it.each([
+    ['an empty id', '', 'c9', {}, 'Enter id for the new document.'],
+    ['an empty partition key field', 'n1', '', {}, 'Enter customerId for the new document.'],
+    ['both empty', '', '', {}, 'Enter id and customerId for the new document.'],
+    [
+      'a body id that differs from the id field',
+      'n1',
+      'c9',
+      { id: 'n2' },
+      "The body's id differs from the field above. Remove it from the body or make them match."
+    ],
+    [
+      'a body partition key value that differs from its field',
+      'n1',
+      'c9',
+      { customerId: 'c10' },
+      "The body's customerId differs from the field above. Remove it from the body or make them match."
+    ]
+  ])('refuses Create with %s', (_label, id, pk, body, message) => {
+    expect(planSave(newDocumentDraft(id, [pk], body))).toEqual({
+      ok: false,
+      notice: { kind: 'invalid-address', message }
+    })
+  })
+
+  it('refuses a body that is not a JSON object', () => {
+    expect(planSave(newDocumentDraft('n1', ['c9'], '[1]'))).toMatchObject({
+      ok: false,
+      notice: { kind: 'invalid-body' }
+    })
   })
 })
 
