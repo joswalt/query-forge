@@ -6,7 +6,7 @@ import type {
 } from '@shared/types/database-provider'
 import { getExtractor, type ExtractorId, type ExtractorOptions } from '@shared/extractors/extract'
 import { inferTableName } from '@shared/extractors/infer-table-name'
-import { detectDmlStatement, parseDmlStatement } from '@shared/dml/dml-statement'
+import { detectDmlStatement, parseDmlStatement, type DmlVerb } from '@shared/dml/dml-statement'
 import { FALLBACK_TABLE_NAME } from '@shared/extractors/sql-extractors'
 import { QueryEditor, type QueryEditorHandle } from '../editor/QueryEditor'
 import { initialExportState, type ExportState } from '../results/export-state'
@@ -350,18 +350,16 @@ export const QueryWorkspace = forwardRef<
     const connection = connections.find((c) => c.id === tab.connectionId)
     if (connection?.config.kind === 'cosmos-db' && detectDmlStatement(queryText)) {
       const parsed = parseDmlStatement(queryText)
-      if (parsed.ok && parsed.statement.verb === 'DELETE') {
+      if (parsed.ok) {
         const container = tab.options?.container ?? connection.config.container ?? ''
-        handlePlanDml(tab, tab.connectionId, queryText, container)
+        handlePlanDml(tab, tab.connectionId, queryText, parsed.statement.verb, container)
         return
       }
       const now = Date.now()
       dispatchRun(tabId, { type: 'started', startedAt: now })
       dispatchRun(tabId, {
         type: 'failed',
-        message: parsed.ok
-          ? 'UPDATE statements are not supported yet. Only DELETE can run for now.'
-          : `DML syntax error: ${parsed.error.message}`,
+        message: `DML syntax error: ${parsed.error.message}`,
         finishedAt: now,
         cancelled: false
       })
@@ -427,10 +425,10 @@ export const QueryWorkspace = forwardRef<
     tab: QueryTabState,
     connectionId: string,
     statement: string,
+    verb: DmlVerb,
     container: string
   ): void {
     const tabId = tab.id
-    const verb = 'DELETE'
     dmlTabsRef.current.add(tabId)
     // A DML run leaves nothing for "Export all matching rows" to re-run.
     updateTab(tabId, (t) => ({ ...t, lastExecutedQuery: undefined }))
