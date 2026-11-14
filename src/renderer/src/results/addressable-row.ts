@@ -46,7 +46,8 @@ export function readPath(
   return { found: true, value: current }
 }
 
-function isFullDocument(row: Record<string, unknown>): boolean {
+/** A row carrying the system properties: a whole stored document. */
+export function isFullDocument(row: Record<string, unknown>): boolean {
   return FULL_DOCUMENT_MARKERS.every((marker) => Object.hasOwn(row, marker))
 }
 
