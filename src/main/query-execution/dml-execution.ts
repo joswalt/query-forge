@@ -17,11 +17,14 @@ import type {
   PartitionKeyValue
 } from '@shared/types/document-writer'
 import {
+  DML_SAMPLE_SIZE,
   DML_WRITE_POOL_SIZE,
   emptyOutcomeCounts,
   MAX_DML_PLAN_DOCUMENTS,
   type DmlOutcomeRow,
   type DmlPlanningProgress,
+  type DmlSampleDocument,
+  type DmlSampleValue,
   type WriteOutcome
 } from '@shared/types/dml-run'
 import { toExecutionErrorMessage } from './scrub-error-message'
@@ -57,6 +60,9 @@ export interface DmlPlan {
   target: ContainerTarget
   partitionKeyPaths: string[]
   documents: PlannedDocument[]
+  /** The first matches with today's value of each `SET` path, for the
+   * confirmation only; the commit never reads it. */
+  sample: DmlSampleDocument[]
   drivingQueryRequestCharge: number
 }
 
@@ -135,6 +141,7 @@ export async function buildDmlPlan(
   if (run.cancelled) throw new DmlRunCancelledError()
 
   const documents: PlannedDocument[] = []
+  const sample: DmlSampleDocument[] = []
   let requestCharge = 0
   for await (const page of writer.runDrivingQuery(translated.translation.drivingQuery, {
     ...input.target,
@@ -142,7 +149,11 @@ export async function buildDmlPlan(
   })) {
     requestCharge += page.requestCharge
     for (const row of page.rows) {
-      documents.push(toPlannedDocument(row, translated.translation))
+      const document = toPlannedDocument(row, translated.translation)
+      documents.push(document)
+      if (sample.length < DML_SAMPLE_SIZE) {
+        sample.push(toSampleDocument(row, document, translated.translation.operations))
+      }
     }
     // Throwing leaves the loop, which stops the provider paging further.
     if (documents.length > MAX_DML_PLAN_DOCUMENTS) {
@@ -165,8 +176,34 @@ export async function buildDmlPlan(
     target: input.target,
     partitionKeyPaths,
     documents,
+    sample,
     drivingQueryRequestCharge: requestCharge
   }
+}
+
+/** A sampled match: its address and, for `UPDATE`, current → new per `SET`
+ * (current from the Driving Query's `__cur<n>`/`__def<n>` columns). */
+function toSampleDocument(
+  row: unknown,
+  document: PlannedDocument,
+  operations: DmlOperationTemplate[]
+): DmlSampleDocument {
+  const match = row as Record<string, unknown>
+  const sampled: DmlSampleDocument = { id: document.id, partitionKey: document.partitionKey }
+  if (document.assignments) {
+    sampled.changes = document.assignments.map((assignment, i) => {
+      const current: DmlSampleValue =
+        assignment.pathDefined && operations[i].currentColumn in match
+          ? { defined: true, value: match[operations[i].currentColumn] }
+          : { defined: false }
+      const next: DmlSampleValue =
+        assignment.op === 'set' && assignment.value
+          ? { defined: true, value: assignment.value.value }
+          : { defined: false }
+      return { target: assignment.target, current, next }
+    })
+  }
+  return sampled
 }
 
 function toPlannedDocument(

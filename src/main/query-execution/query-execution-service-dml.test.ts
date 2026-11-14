@@ -235,7 +235,13 @@ describe('QueryExecutionService DML Statements', () => {
             planId: expect.any(String),
             verb: 'DELETE',
             matchCount: 3,
-            drivingQueryRequestCharge: 4.5
+            drivingQueryRequestCharge: 4.5,
+            partitionKeyPaths: ['/customerId'],
+            sample: [
+              { id: 'doc-1', partitionKey: 'cust-1' },
+              { id: 'doc-2', partitionKey: 'cust-2' },
+              { id: 'doc-3', partitionKey: 'cust-3' }
+            ]
           },
           done: true
         }
@@ -293,7 +299,29 @@ describe('QueryExecutionService DML Statements', () => {
 
       const summary = planSummary(await call(service, planRequest()))
 
-      expect(summary).toEqual({ verb: 'DELETE', matchCount: 0, drivingQueryRequestCharge: 2.8 })
+      expect(summary).toEqual({
+        verb: 'DELETE',
+        matchCount: 0,
+        drivingQueryRequestCharge: 2.8,
+        partitionKeyPaths: ['/customerId'],
+        sample: []
+      })
+    })
+
+    it('samples the first 10 matches of a DELETE by address only', async () => {
+      const provider = new FakeCosmosProvider()
+      provider.pages = [
+        { rows: matches(1, 4), requestCharge: 1 },
+        { rows: matches(5, 12), requestCharge: 1 }
+      ]
+      const service = await connected(provider)
+
+      const summary = planSummary(await call(service, planRequest()))
+
+      expect(summary.matchCount).toBe(12)
+      expect(summary.sample).toEqual(
+        Array.from({ length: 10 }, (_, i) => ({ id: `doc-${i + 1}`, partitionKey: `cust-${i + 1}` }))
+      )
     })
 
     it('reads a missing partition key as the None value and a hierarchical key level by level', async () => {
@@ -548,6 +576,53 @@ describe('QueryExecutionService DML Statements', () => {
       ])
       expect(summaryOf(responses)).toMatchObject({ verb: 'UPDATE', counts: { written: 1 } })
     })
+    it('samples each match with every SET path’s current and new value', async () => {
+      const provider = new FakeCosmosProvider()
+      provider.pages = [
+        {
+          rows: [
+            updateMatch(1),
+            // status absent today; legacy already absent.
+            updateMatch(2, { __set1: 'archived', __def1: false, __def2: false }),
+            // the SET expression came back undefined.
+            updateMatch(3, { __def1: true, __cur1: { nested: true }, __def2: true, __cur2: null })
+          ],
+          requestCharge: 1
+        }
+      ]
+      const service = await connected(provider)
+
+      const summary = planSummary(await call(service, planRequest({ statement })))
+
+      expect(summary.verb).toBe('UPDATE')
+      expect(summary.sample).toEqual([
+        {
+          id: 'doc-1',
+          partitionKey: 'cust-1',
+          changes: [
+            { target: 'c.status', current: { defined: true, value: 'active' }, next: { defined: true, value: 'archived' } },
+            { target: 'c.legacy', current: { defined: true, value: 'x' }, next: { defined: false } }
+          ]
+        },
+        {
+          id: 'doc-2',
+          partitionKey: 'cust-2',
+          changes: [
+            { target: 'c.status', current: { defined: false }, next: { defined: true, value: 'archived' } },
+            { target: 'c.legacy', current: { defined: false }, next: { defined: false } }
+          ]
+        },
+        {
+          id: 'doc-3',
+          partitionKey: 'cust-3',
+          changes: [
+            { target: 'c.status', current: { defined: true, value: { nested: true } }, next: { defined: false } },
+            { target: 'c.legacy', current: { defined: true, value: null }, next: { defined: false } }
+          ]
+        }
+      ])
+    })
+
     it('drops a remove whose path is already absent from a patch that still sets something', async () => {
       const provider = new FakeCosmosProvider()
       provider.pages = [
