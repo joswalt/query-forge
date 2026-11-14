@@ -8,6 +8,10 @@ Cross-platform desktop database query/exploration tool (Azure Cosmos DB for NoSQ
 The persisted, non-secret description of a database connection (server/account address, database/container name, auth mode, display name) stored as SQLite metadata. Never contains plaintext credential material — only a reference to its Secret Ciphertext row.
 _Avoid_: Connection, Connection Config
 
+**Environment**:
+The tier a Connection Profile points at: prod, stg or dev, or unset. Drives how the connection is marked and whether writes on it need a Write Confirmation.
+_Avoid_: Tier, Stage
+
 **Secret Ciphertext**:
 The `safeStorage`-encrypted form of a credential (SQL password, Cosmos account key, MSAL token cache entry), persisted in SQLite. Decryptable only by the OS-held master key, and only from Electron's main process.
 _Avoid_: Secret, Credential (both too ambiguous about encryption state — always say which state you mean)
@@ -49,8 +53,28 @@ The rows produced by one row-returning statement of a query submission. A multi-
 _Avoid_: Recordset (mssql's name for it — a driver term), Statement Result
 
 **Document Write**:
-Cosmos DB only. One create, replace, or delete of a single document, addressed by its `id` and partition key value. The only way QueryForge changes Cosmos data, since the Cosmos query language cannot write; refused on a read-only Connection Profile. Bulk DML produces many Document Writes.
+Cosmos DB only. One create, replace, patch (change only some properties), or delete of a single document, addressed by its `id` and partition key value. The only way QueryForge changes Cosmos data, since the Cosmos query language cannot write; refused on a read-only Connection Profile. A DML Statement produces many Document Writes.
 _Avoid_: Mutation, DML, Edit (Edit is the UI gesture; the Document Write is what it sends)
+
+**DML Statement**:
+Cosmos DB only. A `DELETE` or `UPDATE` typed in the query editor that QueryForge translates into a Driving Query plus one Document Write per matching document, since the Cosmos query language itself cannot write. One statement per run, always with a `WHERE`.
+_Avoid_: Bulk DML (the effort's name, not a thing), Write query, Mutation
+
+**Driving Query**:
+The SELECT QueryForge derives from a DML Statement to find the documents it changes, along with each one's address and current version. The user never writes it; its matches are exactly the documents the statement touches.
+_Avoid_: Preview query, Inner query
+
+**DML Plan**:
+Cosmos DB only. The documents a Driving Query matched, each with its address, current version and the values the statement will write, held until the user confirms or discards the run. Confirming writes exactly the DML Plan, never a fresh match, so a document changed in between is refused as a Concurrent Change rather than rewritten.
+_Avoid_: Execution plan (reads as a query optimiser plan), Preview
+
+**Write Outcome**:
+Cosmos DB only. What happened to one document of a DML Plan when it was committed: written, left unchanged, refused, failed, or never attempted because the run stopped. Every document in a committed DML Plan ends with exactly one.
+_Avoid_: Status, Result (both collide with query results)
+
+**Retry**:
+Cosmos DB only. A DML Statement run that finishes the previous committed run in the same tab: it takes only the documents that ended without being written or left unchanged, checks each one's current version against the statement again, and writes those that still match, through the same Write Confirmation. Documents that no longer match are left alone. Distinct from running the statement again, which matches across the whole container and can apply a change twice to documents already written.
+_Avoid_: Retry failed (`failed` is one Write Outcome; a Retry covers every unwritten one), Resume, Re-run
 
 **Addressable Row**:
 Cosmos DB only. A result row that QueryForge can tie back to exactly one document: a JSON object with an `id` and a known partition key value for every partition key path of its container. A missing partition key property counts as known (the None value) only when the row is a full document, carrying the system properties; in a projection it is unknown. Only Addressable Rows can be edited or deleted.
@@ -59,6 +83,10 @@ _Avoid_: Editable row (editability also depends on the Connection Profile not be
 **Concurrent Change**:
 Cosmos DB only. A change someone else made to a document after QueryForge read it for an Edit or Delete, detected when the Document Write is attempted. The write is refused rather than overwriting the newer version; the user's edits are kept, and they can compare against the current version before saving again. Distinct from an `id` clash on a new document, which is the only thing "conflict" means here.
 _Avoid_: Conflict, Write conflict (reserved for the `id` clash), 412, Precondition failure (HTTP/implementation terms)
+
+**Write Confirmation**:
+A deliberate extra step before a write runs on a prod Connection Profile. Shared by both engines; what counts as a write is engine-specific (every Document Write for Cosmos DB; destructive statements for Azure SQL). A DML Statement is the exception: it gets one on every Environment, and on prod the user must also type its verb and document count. A speed bump, not a refusal: contrast a read-only Connection Profile, which refuses writes outright.
+_Avoid_: Safety guard, Confirm dialog
 
 **Database Metadata**:
 The shared, provider-agnostic shape `getMetadata()` returns — tables/columns for Azure SQL, containers/partition keys for Cosmos DB — consumed by the Object Explorer (§4.2). Distinct from editor-side autocomplete, which is out of scope for MVP (ticket 04).
@@ -73,7 +101,7 @@ A short-lived connection attempt (`testConnection`) used only to validate a Conn
 _Avoid_: Ping, Validate (both too generic — this is specifically the pre-save connectivity check)
 
 **Query History Entry**:
-A single automatically recorded past query execution — profile, status (`success`/`error`/`cancelled`), duration, row count, and timestamp — persisted in SQLite's `query_history` table after every run. Denormalizes the connection's display name at record time so an entry stays readable after its Connection Profile is renamed or deleted. The query text itself is withheld unless Preferences opts into persisting it.
+A single automatically recorded past query execution — profile, status (`success`/`error`/`cancelled`), duration, row count, and timestamp — persisted in SQLite's `query_history` table after every run. Denormalizes the connection's display name at record time so an entry stays readable after its Connection Profile is renamed or deleted. The query text itself is withheld unless Preferences opts into persisting it. A DML Statement run records an entry like a query, with the statement as its text, plus its verb, container and a count per Write Outcome kept even when the text is withheld; it is `partial` when it ran to the end but left some documents unwritten. A Retry records its own entry, marked as a Retry, and never changes the entry of the run it finishes. A DML Plan discarded at the confirmation records nothing. A single Document Write from the results view (Edit, New document, Delete) records none, since history holds what was run from the editor, not an audit of changes.
 _Avoid_: History Record (too generic), Query Log (implies append-only diagnostic output, not a user-facing reusable record)
 
 **Preferences**:
