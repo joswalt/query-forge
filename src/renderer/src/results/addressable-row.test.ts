@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { addressOf, isOutOfDate, notAddressableReason } from './addressable-row'
+import { addressOf, isOutOfDate, notAddressableReason, sameAddress } from './addressable-row'
 
 /** The system properties that make a row a full document, not a projection. */
 const system = { _rid: 'rid-1', _self: 'dbs/x/colls/y/docs/rid-1', _etag: '"e1"', _ts: 1_700_000_000 }
@@ -117,6 +117,15 @@ describe('notAddressableReason', () => {
 
   it('explains that rows cannot be edited when the partition key paths are unknown', () => {
     expect(notAddressableReason(undefined, [])).toContain("doesn't know this container's partition key")
+  })
+})
+
+describe('sameAddress', () => {
+  it('compares partition key values structurally, telling null, None and strings apart', () => {
+    expect(sameAddress({ id: 'a', partitionKey: ['t', {}] }, { id: 'a', partitionKey: ['t', {}] })).toBe(true)
+    expect(sameAddress({ id: 'a', partitionKey: null }, { id: 'a', partitionKey: {} })).toBe(false)
+    expect(sameAddress({ id: 'a', partitionKey: 1 }, { id: 'a', partitionKey: '1' })).toBe(false)
+    expect(sameAddress({ id: 'a', partitionKey: 'c' }, { id: 'b', partitionKey: 'c' })).toBe(false)
   })
 })
 

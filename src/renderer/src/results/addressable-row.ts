@@ -91,6 +91,12 @@ export function addressOf(row: unknown, partitionKeyPaths: readonly string[] | u
   }
 }
 
+/** Whether two addresses name the same document. Structural, since a
+ * partition key value can be `null`, `{}` (None) or a hierarchical array. */
+export function sameAddress(a: DocumentAddress, b: DocumentAddress): boolean {
+  return a.id === b.id && JSON.stringify(a.partitionKey) === JSON.stringify(b.partitionKey)
+}
+
 /**
  * The disabled Edit/Delete tooltip: which fields an Addressable Row needs,
  * and how to get them.
