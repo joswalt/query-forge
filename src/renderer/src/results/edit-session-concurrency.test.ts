@@ -4,6 +4,7 @@ import {
   hasUnsavedEdits,
   openEditSession,
   planSave,
+  planSaveAsNew,
   type EditSession,
   type EditSessionEvent
 } from './edit-session'
@@ -143,6 +144,96 @@ describe('Reload after a Concurrent Change on Save', () => {
     )
     expect(reloaded).toMatchObject({ phase: 'editing', comparing: false, serverCopy: theirs })
     expect(hasUnsavedEdits(reloaded)).toBe(false)
+  })
+})
+
+describe('a document deleted while editing', () => {
+  function deletedWhileEditing(): EditSession {
+    return apply(
+      concurrentlyChanged(),
+      { type: 'saveStarted' },
+      { type: 'saveOutcome', outcome: 'not-found', requestCharge: 1 }
+    )
+  }
+
+  it('Save as new document sends a create at the same address, keeping my edits', () => {
+    expect(planSaveAsNew(deletedWhileEditing())).toEqual({
+      ok: true,
+      write: {
+        kind: 'create',
+        id: 'a1',
+        partitionKey: 'c9',
+        body: { ...mine, id: 'a1', customerId: 'c9' },
+        database: 'orders-db',
+        container: 'orders'
+      }
+    })
+  })
+
+  it('offers Save as new document only once the document was found deleted', () => {
+    expect(planSaveAsNew(concurrentlyChanged())).toMatchObject({ ok: false })
+  })
+
+  it('becomes an edit session of the document created again, carrying its etag', () => {
+    const created = { ...stored, ...mine, _rid: 'rid-2', _etag: '"etag-created"' }
+    const session = apply(
+      deletedWhileEditing(),
+      { type: 'saveStarted', asNew: true },
+      { type: 'saveSucceeded', document: created, requestCharge: 6.1 }
+    )
+    expect(session).toMatchObject({
+      phase: 'editing',
+      newDocument: undefined,
+      serverCopy: created,
+      etag: '"etag-created"',
+      notice: { kind: 'created', requestCharge: 6.1 }
+    })
+    expect(hasUnsavedEdits(session)).toBe(false)
+  })
+
+  it('an id clash on Save as new document keeps my edits as a New document at that address', () => {
+    const session = apply(
+      deletedWhileEditing(),
+      { type: 'saveStarted', asNew: true },
+      { type: 'saveOutcome', outcome: 'conflict', requestCharge: 1.3 }
+    )
+    expect(session).toMatchObject({
+      newDocument: { id: 'a1', partitionKey: ['c9'] },
+      notice: { kind: 'id-clash', address: { id: 'a1', partitionKey: 'c9' } }
+    })
+    expect(JSON.parse(session.draft)).toEqual(mine)
+  })
+
+  it('Compare that finds the document deleted says so and offers Save as new document', () => {
+    const session = apply(concurrentlyChanged(), { type: 'compareRequested' }, { type: 'currentVersionNotFound' })
+    expect(session).toMatchObject({
+      comparing: false,
+      pendingRead: undefined,
+      notice: { kind: 'deleted-while-editing' }
+    })
+    expect(JSON.parse(session.draft)).toEqual(mine)
+    expect(planSaveAsNew(session)).toMatchObject({ ok: true, write: { kind: 'create' } })
+  })
+
+  it('Overwrite with mine that finds the document deleted offers Save as new document', () => {
+    const session = apply(comparing(), { type: 'overwriteRequested' }, { type: 'currentVersionNotFound' })
+    expect(session).toMatchObject({ comparing: false, notice: { kind: 'deleted-while-editing' } })
+  })
+})
+
+describe('reading the current version fails unexpectedly', () => {
+  it('keeps my edits and the compare view, showing the scrubbed message', () => {
+    const session = apply(
+      comparing(),
+      { type: 'overwriteRequested' },
+      { type: 'currentVersionReadFailed', message: 'Request timed out' }
+    )
+    expect(session).toMatchObject({
+      comparing: true,
+      pendingRead: undefined,
+      serverCopy: theirs,
+      notice: { kind: 'error', message: 'Request timed out' }
+    })
   })
 })
 
