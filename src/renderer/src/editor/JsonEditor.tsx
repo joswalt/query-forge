@@ -2,10 +2,14 @@ import { useEffect, useRef } from 'react'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import {
   bracketMatching,
+  foldGutter,
+  foldKeymap,
   HighlightStyle,
   indentOnInput,
   syntaxHighlighting
 } from '@codemirror/language'
+import { json, jsonParseLinter } from '@codemirror/lang-json'
+import { linter, lintGutter } from '@codemirror/lint'
 import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
 import { searchKeymap } from '@codemirror/search'
 import { EditorState } from '@codemirror/state'
@@ -18,17 +22,17 @@ import {
 } from '@codemirror/view'
 import { tags } from '@lezer/highlight'
 import { forgeHighlight, forgeTheme } from './forge-theme'
-import { jsonLanguage } from './json-language'
 
 const jsonHighlight = HighlightStyle.define([
   { tag: tags.propertyName, color: 'var(--qf-syn-func)' },
-  { tag: tags.brace, color: 'var(--qf-syn-op)' },
-  { tag: tags.invalid, color: 'var(--qf-err)', textDecoration: 'underline wavy' }
+  { tag: tags.brace, color: 'var(--qf-syn-op)' }
 ])
 
 /**
- * The document editor (story 25): the app's CodeMirror setup with JSON
- * highlighting. Mount-once like `QueryEditor`: the parent remounts it via
+ * The document editor (story 25): the app's CodeMirror setup with
+ * `@codemirror/lang-json` (highlighting, folding, indentation) and inline
+ * parse errors from its linter. Save still refuses a body that isn't a
+ * JSON object. Mount-once like `QueryEditor`: the parent remounts it via
  * `key` when the text must be replaced (a fresh server copy), rather than
  * this component reacting to `initialValue` on every keystroke.
  */
@@ -54,6 +58,8 @@ export function JsonEditor({
       doc: initialValue,
       extensions: [
         lineNumbers(),
+        foldGutter(),
+        lintGutter(),
         highlightActiveLineGutter(),
         history(),
         drawSelection(),
@@ -63,7 +69,8 @@ export function JsonEditor({
         forgeTheme,
         syntaxHighlighting(forgeHighlight),
         syntaxHighlighting(jsonHighlight),
-        jsonLanguage,
+        json(),
+        linter(jsonParseLinter()),
         EditorState.readOnly.of(readOnly),
         EditorView.contentAttributes.of({ 'aria-label': ariaLabel }),
         keymap.of([
@@ -71,6 +78,7 @@ export function JsonEditor({
           ...defaultKeymap,
           ...historyKeymap,
           ...searchKeymap,
+          ...foldKeymap,
           indentWithTab
         ]),
         EditorView.updateListener.of((update) => {

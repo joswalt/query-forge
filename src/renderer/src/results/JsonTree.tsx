@@ -19,8 +19,8 @@ import {
 
 /**
  * Hand-rolled collapsible, syntax-highlighted JSON renderer (user stories
- * 40-41) — no new dependency (CodeMirror's JSON mode would add another
- * `@codemirror/lang-json` package for a feature this small). Used both for
+ * 40-41), not a CodeMirror view (`@codemirror/lang-json` serves only the
+ * document editor, `JsonEditor`). Used both for
  * the full JSON results view and the single-cell inspector, so both present
  * nested documents identically.
  *
