@@ -439,6 +439,12 @@
   white-space: nowrap;
 }
 
+/* A Retry's entry: beside the verb + container chip. */
+.history-entry__retry {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .history-entry__stats {
   display: flex;
   flex-wrap: wrap;

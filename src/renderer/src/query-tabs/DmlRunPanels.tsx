@@ -9,7 +9,7 @@ import {
   type WriteOutcome
 } from '@shared/types/dml-run'
 import { matchesTypedDmlConfirmation, typedDmlConfirmation } from '@shared/write-confirmation'
-import type { DmlRunState } from './dml-run-state'
+import { retryScope, type DmlRunState } from './dml-run-state'
 import { projectedRequestCharge, writeRequestChargeBand } from './dml-ru-estimate'
 import { notWrittenCount, outcomeBarSegments, writeOutcomeTone } from './dml-run-report'
 import './dml-run.css'
@@ -69,13 +69,23 @@ export function DmlConfirmStrip({
         <span className="dml-strip__icon" aria-hidden="true">
           !
         </span>
-        <span>
-          <b>
-            {verbs} {documents(dml.matchCount)}
-          </b>{' '}
-          in <code>{dml.container}</code>
-          {production && <b> (production)</b>}
-        </span>
+        {dml.retry ? (
+          <RetryLine
+            verb={dml.verb}
+            matchCount={dml.matchCount}
+            scopeCount={dml.retry.scopeCount}
+            container={dml.container}
+            production={production}
+          />
+        ) : (
+          <span>
+            <b>
+              {verbs} {documents(dml.matchCount)}
+            </b>{' '}
+            in <code>{dml.container}</code>
+            {production && <b> (production)</b>}
+          </span>
+        )}
         <span className="dml-muted">
           Driving Query {ru(dml.drivingQueryRequestCharge)} RU
           {band && (
@@ -109,6 +119,42 @@ export function DmlConfirmStrip({
         </button>
       </div>
     </div>
+  )
+}
+
+/** A Retry's confirmation line (story 119): "Retry: updates 44 documents in
+ * `customers` · 3 of the 47 no longer match or were deleted, so they're
+ * left alone". */
+function RetryLine({
+  verb,
+  matchCount,
+  scopeCount,
+  container,
+  production
+}: {
+  verb: DmlVerb
+  matchCount: number
+  scopeCount: number
+  container: string
+  production: boolean
+}): React.JSX.Element {
+  const droppedOut = scopeCount - matchCount
+  return (
+    <span>
+      <b>
+        Retry: {verb === 'DELETE' ? 'deletes' : 'updates'} {documents(matchCount)}
+      </b>{' '}
+      in <code>{container}</code>
+      {production && <b> (production)</b>}
+      {droppedOut > 0 && (
+        <>
+          {' · '}
+          {count(droppedOut)} of the {count(scopeCount)} no longer match or{' '}
+          {droppedOut === 1 ? 'was' : 'were'} deleted, so {droppedOut === 1 ? 'it’s' : 'they’re'}{' '}
+          left alone
+        </>
+      )}
+    </span>
   )
 }
 
@@ -177,15 +223,29 @@ function ShortcutHint({ blocked }: { blocked: number }): React.JSX.Element {
 export function DmlRunReport({
   dml,
   onCancel,
-  onPreviewQuery
+  onPreviewQuery,
+  onRetry
 }: {
   dml: DmlRunState | undefined
   onCancel: () => void
   onPreviewQuery: () => void
+  onRetry: () => void
 }): React.JSX.Element | null {
   if (!dml) return null
   switch (dml.phase) {
     case 'planning':
+      if (dml.retry) {
+        return (
+          <div className="dml-notice" role="status">
+            <span className="dml-spinner" aria-hidden="true" /> Re-checking{' '}
+            {documents(dml.retry.scopeCount)}… {ru(dml.requestCharge)} RU
+            <span className="dml-spacer" />
+            <button type="button" className="btn--ghost" onClick={onCancel}>
+              Cancel
+            </button>
+          </div>
+        )
+      }
       return (
         <div className="dml-notice" role="status">
           <span className="dml-spinner" aria-hidden="true" /> Finding matching documents in{' '}
@@ -201,7 +261,9 @@ export function DmlRunReport({
     case 'zero-matches':
       return (
         <div className="dml-notice" role="status">
-          No documents match. Nothing to write.
+          {dml.retry
+            ? `None of the ${count(dml.retry.scopeCount)} still match. Nothing to write.`
+            : 'No documents match. Nothing to write.'}
           <span className="dml-muted">
             Driving Query {ru(dml.drivingQueryRequestCharge)} RU
           </span>
@@ -216,7 +278,7 @@ export function DmlRunReport({
     case 'committing':
     case 'done':
     case 'stopped':
-      return <CommitReport dml={dml} onStop={onCancel} />
+      return <CommitReport dml={dml} onStop={onCancel} onRetry={onRetry} />
     default:
       return null
   }
@@ -224,10 +286,12 @@ export function DmlRunReport({
 
 function CommitReport({
   dml,
-  onStop
+  onStop,
+  onRetry
 }: {
   dml: Extract<DmlRunState, { phase: 'committing' | 'done' | 'stopped' }>
   onStop: () => void
+  onRetry: () => void
 }): React.JSX.Element {
   const past = dml.verb === 'DELETE' ? 'deleted' : 'updated'
   const ing = dml.verb === 'DELETE' ? 'Deleting' : 'Updating'
@@ -248,8 +312,14 @@ function CommitReport({
     counts = summary.counts
     total = dml.matchCount
     requestCharge = summary.drivingQueryRequestCharge + summary.writeRequestCharge
-    head = `${dml.phase === 'stopped' ? 'Stopped' : 'Done'}: ${past} ${count(summary.counts.written)} of ${count(total)}`
+    const ending = dml.retry
+      ? `Retry of the previous run${dml.phase === 'stopped' ? ', stopped' : ''}`
+      : dml.phase === 'stopped'
+        ? 'Stopped'
+        : 'Done'
+    head = `${ending}: ${past} ${count(summary.counts.written)} of ${count(total)}`
   }
+  const scope = retryScope(dml)
   const duration = dml.phase === 'committing' ? undefined : dml.summary.durationMs
   const completed = dml.phase === 'committing' ? dml.progress.completed : total
   return (
@@ -285,7 +355,25 @@ function CommitReport({
         ))}
       </div>
       <OutcomeTiles verb={dml.verb} counts={counts} />
-      {dml.phase !== 'committing' && <ReRunHint verb={dml.verb} counts={counts} />}
+      {dml.phase !== 'committing' && (
+        <div className="dml-report__after">
+          <ReRunHint verb={dml.verb} counts={counts} />
+          {scope !== undefined && (
+            <button
+              type="button"
+              title="Re-checks just these documents against their current versions: WHERE and SET are evaluated again, and you confirm before anything is written."
+              onClick={onRetry}
+            >
+              Retry {count(scope)} not written
+            </button>
+          )}
+        </div>
+      )}
+      {dml.phase !== 'committing' && dml.retryError && (
+        <p className="dml-retry-error" role="alert">
+          The Retry could not be planned: {dml.retryError}
+        </p>
+      )}
     </div>
   )
 }
@@ -384,14 +472,18 @@ function DmlSample({
           first {count(sample.length)} of {count(dml.matchCount)} matches · nothing written yet
         </span>
         <span className="dml-spacer" />
-        <button
-          type="button"
-          className="btn--ghost dml-link"
-          title="Opens a new tab with SELECT * over the same WHERE (normal Row Limit applies). This plan stays held here."
-          onClick={onPreviewQuery}
-        >
-          Preview as query ↗
-        </button>
+        {/* A Retry's scope is a list of addresses, which a SELECT over the
+            statement's WHERE can't show. */}
+        {!dml.retry && (
+          <button
+            type="button"
+            className="btn--ghost dml-link"
+            title="Opens a new tab with SELECT * over the same WHERE (normal Row Limit applies). This plan stays held here."
+            onClick={onPreviewQuery}
+          >
+            Preview as query ↗
+          </button>
+        )}
       </div>
       <div className="dml-sample__scroll">
         <table className="dml-sample__table">
