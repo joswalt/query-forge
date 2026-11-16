@@ -2,13 +2,16 @@ import { describe, expect, it } from 'vitest'
 import {
   editSessionReducer,
   editSessionsReducer,
+  findEditSession,
   hasUnsavedEdits,
   initialEditSessionsState,
   deletePreviewText,
   openEditSession,
+  openNewDocumentSession,
   planDelete,
   planSave,
   type EditSession,
+  type EditSessionEvent,
   type EditSessionsAction,
   type EditSessionsState
 } from './edit-session'
@@ -297,6 +300,326 @@ describe('editSessionsReducer', () => {
     state = editSessionsReducer(state, { type: 'closed', key: 1 })
     state = editSessionsReducer(state, { type: 'closed', key: 2 })
     expect(state).toMatchObject({ sessions: [], activeKey: undefined })
+  })
+})
+
+describe('New document', () => {
+  const newDocument = (key: number, from?: number): EditSessionsAction => ({
+    type: 'newDocumentOpened',
+    key,
+    target,
+    partitionKeyPaths: ['/customerId'],
+    from
+  })
+
+  it('opens an editing session with empty id and partition key fields above an empty body', () => {
+    const state = editSessionsReducer(initialEditSessionsState, newDocument(1))
+    expect(state.activeKey).toBe(1)
+    expect(state.sessions[0]).toMatchObject({
+      phase: 'editing',
+      newDocument: { id: '', partitionKey: [''] },
+      serverCopy: undefined,
+      etag: undefined
+    })
+    expect(JSON.parse(state.sessions[0].draft)).toEqual({})
+    expect(hasUnsavedEdits(state.sessions[0])).toBe(false)
+  })
+
+  it('"Different address? New document" opens a New document prefilled with the current body and address', () => {
+    let state = editSessionsReducer(initialEditSessionsState, {
+      type: 'opened',
+      key: 1,
+      target,
+      partitionKeyPaths: ['/customerId'],
+      address: { id: 'a1', partitionKey: 'c9' },
+      row: stored
+    })
+    state = editSessionsReducer(state, { type: 'session', key: 1, event: { type: 'readSucceeded', document: stored } })
+    state = editSessionsReducer(state, {
+      type: 'session',
+      key: 1,
+      event: { type: 'draftChanged', text: '{"name":"Ada, unsaved"}' }
+    })
+    const before = state.sessions[0]
+    state = editSessionsReducer(state, newDocument(2, 1))
+
+    expect(state.activeKey).toBe(2)
+    expect(state.sessions[0]).toBe(before)
+    expect(state.sessions[1]).toMatchObject({
+      newDocument: { id: 'a1', partitionKey: ['c9'] },
+      draft: '{"name":"Ada, unsaved"}',
+      target
+    })
+    expect(planSave(state.sessions[1])).toMatchObject({
+      ok: true,
+      write: { kind: 'create', id: 'a1', partitionKey: 'c9', body: { name: 'Ada, unsaved' } }
+    })
+  })
+
+  it.each([
+    ['a plain string', 'c9', 'c9'],
+    ['a string that reads as a number', '72712', '"72712"'],
+    ['a number', 72712, '72712'],
+    ['JSON null', null, 'null'],
+    ['the None value', {}, '']
+  ])('prefills a partition key field holding %s so that it reads back the same', (_label, value, text) => {
+    const doc = { ...stored, customerId: value }
+    let state = editSessionsReducer(initialEditSessionsState, {
+      type: 'opened',
+      key: 1,
+      target,
+      partitionKeyPaths: ['/customerId'],
+      address: { id: 'a1', partitionKey: value as never },
+      row: doc
+    })
+    state = editSessionsReducer(state, newDocument(2, 1))
+    expect(state.sessions[1].newDocument).toEqual({ id: 'a1', partitionKey: [text] })
+  })
+
+  it('gives a hierarchical partition key one field per level', () => {
+    const state = editSessionsReducer(initialEditSessionsState, {
+      type: 'newDocumentOpened',
+      key: 1,
+      target,
+      partitionKeyPaths: ['/tenant', '/geo/region']
+    })
+    expect(state.sessions[0].newDocument).toEqual({ id: '', partitionKey: ['', ''] })
+  })
+
+  it('opens every New document in its own edit session', () => {
+    const state = [newDocument(1), newDocument(2)].reduce(editSessionsReducer, initialEditSessionsState)
+    expect(state.sessions.map((s) => s.key)).toEqual([1, 2])
+    expect(state.activeKey).toBe(2)
+  })
+})
+
+/** A New document session with these fields typed and this body. */
+function newDocumentDraft(
+  id: string,
+  partitionKey: string[],
+  body: unknown = {},
+  partitionKeyPaths: string[] = ['/customerId']
+): EditSession {
+  let session = openNewDocumentSession({ key: 1, target, partitionKeyPaths })
+  session = editSessionReducer(session, { type: 'newDocumentFieldsChanged', fields: { id, partitionKey } })
+  return editSessionReducer(session, {
+    type: 'draftChanged',
+    text: typeof body === 'string' ? body : JSON.stringify(body)
+  })
+}
+
+describe('planSave for a New document', () => {
+  it('sends a create Document Write with an explicit id and partition key, both also in the body', () => {
+    expect(planSave(newDocumentDraft('n1', ['c9'], { name: 'Grace' }))).toEqual({
+      ok: true,
+      write: {
+        kind: 'create',
+        id: 'n1',
+        partitionKey: 'c9',
+        body: { name: 'Grace', id: 'n1', customerId: 'c9' },
+        database: 'orders-db',
+        container: 'orders'
+      }
+    })
+  })
+
+  it('strips system properties from the body', () => {
+    const plan = planSave(
+      newDocumentDraft('n1', ['c9'], { name: 'Grace', _etag: '"e"', _ts: 1, _rid: 'r', _self: 's', _attachments: 'a' })
+    )
+    expect(plan.ok && plan.write.kind === 'create' && plan.write.body).toEqual({ name: 'Grace', id: 'n1', customerId: 'c9' })
+  })
+
+  it('writes every level of a hierarchical, nested partition key into the body', () => {
+    const plan = planSave(
+      newDocumentDraft('n1', ['t1', 'us'], { geo: { city: 'Bentonville' } }, ['/tenant', '/geo/region'])
+    )
+    expect(plan).toMatchObject({
+      ok: true,
+      write: {
+        partitionKey: ['t1', 'us'],
+        body: { id: 'n1', tenant: 't1', geo: { region: 'us', city: 'Bentonville' } }
+      }
+    })
+  })
+
+  it.each([
+    ['plain text as a string', 'c9', 'c9'],
+    ['a JSON number as a number', '72712', 72712],
+    ['a quoted JSON string as that string', '"72712"', '72712'],
+    ['true as a boolean', 'true', true],
+    ['null as JSON null', 'null', null]
+  ])('reads a partition key field holding %s', (_label, text, value) => {
+    expect(planSave(newDocumentDraft('n1', [text]))).toMatchObject({
+      ok: true,
+      write: { partitionKey: value, body: { customerId: value } }
+    })
+  })
+
+  it('accepts an id or partition key value repeated unchanged in the body', () => {
+    expect(planSave(newDocumentDraft('n1', ['c9'], { id: 'n1', customerId: 'c9' }))).toMatchObject({
+      ok: true
+    })
+  })
+
+  it.each([
+    ['an empty id', '', 'c9', {}, 'Enter id for the new document.'],
+    ['an empty partition key field', 'n1', '', {}, 'Enter customerId for the new document.'],
+    ['both empty', '', '', {}, 'Enter id and customerId for the new document.'],
+    [
+      'a body id that differs from the id field',
+      'n1',
+      'c9',
+      { id: 'n2' },
+      "The body's id differs from the field above. Remove it from the body or make them match."
+    ],
+    [
+      'a body partition key value that differs from its field',
+      'n1',
+      'c9',
+      { customerId: 'c10' },
+      "The body's customerId differs from the field above. Remove it from the body or make them match."
+    ]
+  ])('refuses Create with %s', (_label, id, pk, body, message) => {
+    expect(planSave(newDocumentDraft(id, [pk], body))).toEqual({
+      ok: false,
+      notice: { kind: 'invalid-address', message }
+    })
+  })
+
+  it('refuses a body that is not a JSON object', () => {
+    expect(planSave(newDocumentDraft('n1', ['c9'], '[1]'))).toMatchObject({
+      ok: false,
+      notice: { kind: 'invalid-body' }
+    })
+  })
+})
+
+describe('creating a New document', () => {
+  const created = {
+    id: 'n1',
+    customerId: 'c9',
+    name: 'Grace',
+    _rid: 'rid-9',
+    _self: 's',
+    _etag: '"etag-new"',
+    _attachments: 'attachments/',
+    _ts: 1_700_000_200
+  }
+
+  function creating(): EditSession {
+    return editSessionReducer(newDocumentDraft('n1', ['c9'], { name: 'Grace' }), {
+      type: 'saveStarted',
+      address: { id: 'n1', partitionKey: 'c9' }
+    })
+  }
+
+  it('becomes an edit session of the created document, showing its RU charge', () => {
+    const session = editSessionReducer(creating(), {
+      type: 'saveSucceeded',
+      document: created,
+      requestCharge: 6.29
+    })
+    expect(session).toMatchObject({
+      newDocument: undefined,
+      phase: 'editing',
+      saving: false,
+      address: { id: 'n1', partitionKey: 'c9' },
+      etag: '"etag-new"',
+      serverCopy: created,
+      notice: { kind: 'created', requestCharge: 6.29 }
+    })
+    expect(JSON.parse(session.draft)).toEqual({ name: 'Grace' })
+    expect(hasUnsavedEdits(session)).toBe(false)
+
+    const edited = editSessionReducer(session, { type: 'draftChanged', text: '{"name":"Grace Hopper"}' })
+    expect(planSave(edited)).toMatchObject({ ok: true, write: { kind: 'replace', ifMatch: '"etag-new"' } })
+  })
+
+  it('keeps the draft and fields on an id clash and names the address that clashed', () => {
+    const session = editSessionReducer(creating(), {
+      type: 'saveOutcome',
+      outcome: 'conflict',
+      requestCharge: 1.1
+    })
+    expect(session).toMatchObject({
+      saving: false,
+      newDocument: { id: 'n1', partitionKey: ['c9'] },
+      notice: { kind: 'id-clash', address: { id: 'n1', partitionKey: 'c9' } }
+    })
+    expect(JSON.parse(session.draft)).toEqual({ name: 'Grace' })
+    expect(hasUnsavedEdits(session)).toBe(true)
+  })
+})
+
+describe('edit sessions after an id clash', () => {
+  const clash = { id: 'a1', partitionKey: 'c9' }
+
+  function clashed(): EditSessionsState {
+    let state = editSessionsReducer(initialEditSessionsState, {
+      type: 'newDocumentOpened',
+      key: 1,
+      target,
+      partitionKeyPaths: ['/customerId']
+    })
+    const events: EditSessionEvent[] = [
+      { type: 'newDocumentFieldsChanged', fields: { id: 'a1', partitionKey: ['c9'] } },
+      { type: 'draftChanged', text: '{"name":"Mine"}' },
+      { type: 'saveStarted', address: clash },
+      { type: 'saveOutcome', outcome: 'conflict', requestCharge: 1 }
+    ]
+    for (const event of events) state = editSessionsReducer(state, { type: 'session', key: 1, event })
+    return state
+  }
+
+  it('Open existing opens the clashing document in a new edit session tab next to the draft', () => {
+    const before = clashed()
+    const state = editSessionsReducer(before, {
+      type: 'opened',
+      key: 2,
+      target,
+      partitionKeyPaths: ['/customerId'],
+      address: clash,
+      row: undefined
+    })
+    expect(state.sessions.map((s) => s.key)).toEqual([1, 2])
+    expect(state.activeKey).toBe(2)
+    expect(state.sessions[1]).toMatchObject({ phase: 'reading', address: clash })
+    expect(state.sessions[1].newDocument).toBeUndefined()
+    expect(state.sessions[0]).toBe(before.sessions[0])
+  })
+
+  it("switching tabs keeps each session's draft and notice", () => {
+    let state = editSessionsReducer(clashed(), {
+      type: 'opened',
+      key: 2,
+      target,
+      partitionKeyPaths: ['/customerId'],
+      address: clash,
+      row: undefined
+    })
+    state = editSessionsReducer(state, {
+      type: 'session',
+      key: 2,
+      event: { type: 'readSucceeded', document: stored }
+    })
+    state = editSessionsReducer(state, {
+      type: 'session',
+      key: 2,
+      event: { type: 'draftChanged', text: '{"name":"Theirs, edited"}' }
+    })
+    state = editSessionsReducer(state, { type: 'selected', key: 1 })
+    state = editSessionsReducer(state, { type: 'selected', key: 2 })
+    state = editSessionsReducer(state, { type: 'selected', key: 1 })
+
+    expect(state.activeKey).toBe(1)
+    const [draft, existing] = state.sessions
+    expect(draft).toMatchObject({ draft: '{"name":"Mine"}', notice: { kind: 'id-clash' } })
+    expect(existing).toMatchObject({ draft: '{"name":"Theirs, edited"}', etag: '"etag-1"' })
+  })
+
+  it('a New document draft is never mistaken for the document at its attempted address', () => {
+    expect(findEditSession(clashed(), target, clash)).toBeUndefined()
   })
 })
 

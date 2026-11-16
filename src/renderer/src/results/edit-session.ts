@@ -68,15 +68,31 @@ export interface EditSession {
   /** A Document Write is in flight. */
   saving: boolean
   notice: EditNotice | undefined
+  /** Set while this is a New document session (until its create succeeds):
+   * the `id` and partition key fields as typed. `address` is then the
+   * prefill or the last create attempt, not a stored document. */
+  newDocument?: NewDocumentFields
+}
+
+/** New document's editable address fields: the `id`, and one partition key
+ * field per level (see `parsePartitionKeyInput`). */
+export interface NewDocumentFields {
+  id: string
+  partitionKey: string[]
 }
 
 /** What the drawer shows above the editor. */
 export type EditNotice =
-  | { kind: 'saved'; requestCharge: number }
+  | { kind: 'saved' | 'created'; requestCharge: number }
+  /** A create found a document already at this address (409). */
+  | { kind: 'id-clash'; address: DocumentAddress }
   /** Save refused: the draft changes `id` or a partition key field. */
   | { kind: 'address-changed'; fields: string[] }
   /** Save refused: the draft isn't a JSON object. */
   | { kind: 'invalid-body'; message: string }
+  /** Create refused: New document's address fields are empty or disagree
+   * with the body. */
+  | { kind: 'invalid-address'; message: string }
   /** The etag no longer matches: someone else changed the document. */
   | { kind: 'concurrent-change' }
   | { kind: 'deleted-while-editing' }
@@ -92,8 +108,12 @@ export type EditSessionEvent =
   | { type: 'readNotFound' }
   | { type: 'readFailed'; message: string }
   | { type: 'draftChanged'; text: string }
+  /** New document's `id` / partition key fields were edited. */
+  | { type: 'newDocumentFieldsChanged'; fields: NewDocumentFields }
   | { type: 'saveRefused'; notice: EditNotice }
-  | { type: 'saveStarted' }
+  /** `address`: where a create is sent (New document), recorded so an `id`
+   * clash can name it. */
+  | { type: 'saveStarted'; address?: DocumentAddress }
   | { type: 'saveSucceeded'; document: StoredDocument; requestCharge: number }
   | {
       type: 'saveOutcome'
@@ -140,6 +160,52 @@ export function openEditSession(input: {
   }
 }
 
+/** A New document session (stories 4, 26): editable `id` and partition key
+ * fields above the body. Opened `from` an Edit ("Different address? New
+ * document", story 21), it starts with that session's address in the
+ * fields and its current draft, unsaved edits included, as the body. */
+export function openNewDocumentSession(input: {
+  key: number
+  target: DocumentTarget
+  partitionKeyPaths: readonly string[]
+  from?: EditSession
+}): EditSession {
+  const { from } = input
+  const fields: NewDocumentFields = from
+    ? (from.newDocument ?? {
+        id: from.address.id,
+        partitionKey: partitionKeyLevels(from.address.partitionKey, from.partitionKeyPaths.length).map(
+          partitionKeyInputText
+        )
+      })
+    : { id: '', partitionKey: input.partitionKeyPaths.map(() => '') }
+  return {
+    key: input.key,
+    target: input.target,
+    partitionKeyPaths: input.partitionKeyPaths,
+    mode: 'edit',
+    address: { id: '', partitionKey: null },
+    rowRid: undefined,
+    phase: 'editing',
+    serverCopy: undefined,
+    etag: undefined,
+    draft: from?.draft || '{}',
+    revision: 0,
+    saving: false,
+    notice: undefined,
+    newDocument: fields
+  }
+}
+
+/** A partition key value as New document's field text, the inverse of
+ * `parsePartitionKeyInput`: a string that would read back as another value
+ * is quoted; the None value (no property) leaves the field empty. */
+export function partitionKeyInputText(level: PartitionKeyLevelValue): string {
+  if (isNoneValue(level)) return ''
+  if (typeof level !== 'string') return JSON.stringify(level)
+  return parsePartitionKeyInput(level) === level ? level : JSON.stringify(level)
+}
+
 export function editSessionReducer(session: EditSession, event: EditSessionEvent): EditSession {
   switch (event.type) {
     case 'readSucceeded':
@@ -160,22 +226,29 @@ export function editSessionReducer(session: EditSession, event: EditSessionEvent
       return { ...session, phase: 'read-failed', notice: { kind: 'error', message: event.message } }
     case 'draftChanged':
       return { ...session, draft: event.text }
+    case 'newDocumentFieldsChanged':
+      return session.newDocument ? { ...session, newDocument: event.fields } : session
     case 'saveRefused':
       return { ...session, saving: false, notice: event.notice }
     case 'saveStarted':
-      return { ...session, saving: true, notice: undefined }
+      return { ...session, address: event.address ?? session.address, saving: true, notice: undefined }
     case 'saveSucceeded':
+      // A created document is edited from here on like any other.
       return {
         ...session,
+        newDocument: undefined,
         saving: false,
         serverCopy: event.document,
         etag: etagOf(event.document),
         draft: editorText(event.document, session.partitionKeyPaths),
         revision: session.revision + 1,
-        notice: { kind: 'saved', requestCharge: event.requestCharge }
+        notice: {
+          kind: session.newDocument ? 'created' : 'saved',
+          requestCharge: event.requestCharge
+        }
       }
     case 'saveOutcome':
-      return { ...session, saving: false, notice: noticeForOutcome(event.outcome) }
+      return { ...session, saving: false, notice: noticeForOutcome(event.outcome, session.address) }
     case 'saveFailed':
       return { ...session, saving: false, notice: { kind: 'error', message: event.message } }
     case 'deleteStarted':
@@ -247,6 +320,15 @@ export type EditSessionsAction =
       /** Edit document… (default) or Delete document…. */
       mode?: EditSessionMode
     }
+  /** New document, empty, or prefilled from the edit session `from`
+   * ("Different address? New document"). */
+  | {
+      type: 'newDocumentOpened'
+      key: number
+      target: DocumentTarget
+      partitionKeyPaths: readonly string[]
+      from?: number
+    }
   | { type: 'selected'; key: number }
   | { type: 'closed'; key: number }
   | { type: 'session'; key: number; event: EditSessionEvent }
@@ -268,6 +350,13 @@ export function editSessionsReducer(
         }
       }
       return { sessions: [...state.sessions, openEditSession(action)], activeKey: action.key }
+    }
+    case 'newDocumentOpened': {
+      const from = state.sessions.find((s) => s.key === action.from)
+      return {
+        sessions: [...state.sessions, openNewDocumentSession({ ...action, from })],
+        activeKey: action.key
+      }
     }
     case 'selected':
       return state.sessions.some((s) => s.key === action.key) ? { ...state, activeKey: action.key } : state
@@ -307,7 +396,9 @@ export function findEditSession(
   target: DocumentTarget,
   address: DocumentAddress
 ): EditSession | undefined {
-  return state.sessions.find((s) => sameTarget(s.target, target) && sameAddress(s.address, address))
+  return state.sessions.find(
+    (s) => !s.newDocument && sameTarget(s.target, target) && sameAddress(s.address, address)
+  )
 }
 
 export function sameTarget(a: DocumentTarget | undefined, b: DocumentTarget | undefined): boolean {
@@ -330,21 +421,15 @@ export type SavePlan = { ok: true; write: DocumentWrite } | { ok: false; notice:
  * address (moving a document is New document's job).
  */
 export function planSave(session: EditSession): SavePlan {
+  if (session.newDocument) return planCreate(session, session.newDocument)
   if (session.phase !== 'editing' || session.etag === undefined) {
     return { ok: false, notice: { kind: 'error', message: 'The document has not been read yet.' } }
   }
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(session.draft)
-  } catch (err) {
-    return { ok: false, notice: { kind: 'invalid-body', message: (err as Error).message } }
-  }
-  if (!isRecord(parsed)) {
-    return { ok: false, notice: { kind: 'invalid-body', message: 'A document must be a JSON object.' } }
-  }
+  const parsed = parseDraft(session.draft)
+  if (!parsed.ok) return parsed
 
   const { address, partitionKeyPaths } = session
-  const body = stripSystemProperties(parsed)
+  const body = parsed.body
   const changed: string[] = []
   if (Object.hasOwn(body, 'id') && body.id !== address.id) changed.push('id')
 
@@ -366,6 +451,72 @@ export function planSave(session: EditSession): SavePlan {
       partitionKey: address.partitionKey,
       ifMatch: session.etag,
       body: { ...body, id: address.id },
+      database: session.target.database,
+      container: session.target.container
+    }
+  }
+}
+
+/** The draft as a body to send: a JSON object, system properties stripped. */
+function parseDraft(
+  draft: string
+): { ok: true; body: Record<string, unknown> } | { ok: false; notice: EditNotice } {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(draft)
+  } catch (err) {
+    return { ok: false, notice: { kind: 'invalid-body', message: (err as Error).message } }
+  }
+  if (!isRecord(parsed)) {
+    return { ok: false, notice: { kind: 'invalid-body', message: 'A document must be a JSON object.' } }
+  }
+  return { ok: true, body: stripSystemProperties(parsed) }
+}
+
+/**
+ * What Create sends for a New document session: a `create` with the `id`
+ * and partition key value from the fields, both also written into the body
+ * (the SDK takes the partition key from the body, and invents an `id` when
+ * the body has none). Refused when a field is empty or the body already
+ * holds a different value for it.
+ */
+function planCreate(session: EditSession, fields: NewDocumentFields): SavePlan {
+  const { partitionKeyPaths } = session
+  const empty: string[] = []
+  if (fields.id === '') empty.push('id')
+  partitionKeyPaths.forEach((path, i) => {
+    if ((fields.partitionKey[i] ?? '') === '') empty.push(partitionKeyFieldName(path))
+  })
+  if (empty.length > 0) {
+    return invalidAddress(`Enter ${empty.join(' and ')} for the new document.`)
+  }
+
+  const parsed = parseDraft(session.draft)
+  if (!parsed.ok) return parsed
+  const body = parsed.body
+
+  const differs: string[] = []
+  if (Object.hasOwn(body, 'id') && body.id !== fields.id) differs.push('id')
+  const levels = partitionKeyPaths.map((_path, i) => parsePartitionKeyInput(fields.partitionKey[i]))
+  partitionKeyPaths.forEach((path, i) => {
+    const segments = partitionKeyPathSegments(path)
+    const read = readPath(body, segments)
+    const agrees = read.found ? read.value === levels[i] : setPath(body, segments, levels[i])
+    if (!agrees) differs.push(partitionKeyFieldName(path))
+  })
+  if (differs.length > 0) {
+    return invalidAddress(
+      `The body's ${differs.join(' and ')} ${differs.length === 1 ? 'differs' : 'differ'} from the field above. Remove it from the body or make them match.`
+    )
+  }
+
+  return {
+    ok: true,
+    write: {
+      kind: 'create',
+      id: fields.id,
+      partitionKey: levels.length === 1 ? levels[0] : levels,
+      body: { ...body, id: fields.id },
       database: session.target.database,
       container: session.target.container
     }
@@ -398,6 +549,27 @@ export function planDelete(session: EditSession): SavePlan {
   }
 }
 
+function invalidAddress(message: string): SavePlan {
+  return { ok: false, notice: { kind: 'invalid-address', message } }
+}
+
+/**
+ * A New document partition key field as a value: a JSON scalar literal
+ * (`72712`, `"72712"`, `true`, `null`) is that value; any other text is a
+ * string as typed.
+ */
+export function parsePartitionKeyInput(text: string): Exclude<PartitionKeyLevelValue, Record<string, never>> {
+  try {
+    const value: unknown = JSON.parse(text)
+    if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) {
+      return value as string | number | boolean | null
+    }
+  } catch {
+    // Not JSON: plain text.
+  }
+  return text
+}
+
 function partitionKeyLevels(value: PartitionKeyValue, pathCount: number): PartitionKeyLevelValue[] {
   return pathCount > 1 && Array.isArray(value) ? value : [value as PartitionKeyLevelValue]
 }
@@ -423,19 +595,28 @@ function setPath(target: Record<string, unknown>, segments: readonly string[], v
 
 /** Concurrent Change handling beyond the notice (Compare, Reload, Save as
  * new document) is ticket 18. */
-function noticeForOutcome(outcome: 'precondition-failed' | 'not-found' | 'conflict'): EditNotice {
+function noticeForOutcome(
+  outcome: 'precondition-failed' | 'not-found' | 'conflict',
+  address: DocumentAddress
+): EditNotice {
   switch (outcome) {
     case 'precondition-failed':
       return { kind: 'concurrent-change' }
     case 'not-found':
       return { kind: 'deleted-while-editing' }
     case 'conflict':
-      return { kind: 'error', message: 'The server refused the write as an id clash.' }
+      // Only a create can clash; the draft is kept for another id.
+      return { kind: 'id-clash', address }
   }
 }
 
-/** True when the draft differs from the server copy's editor text. */
+/** True when the draft differs from the server copy's editor text; for a
+ * New document, once anything has been typed. */
 export function hasUnsavedEdits(session: EditSession): boolean {
+  if (session.newDocument) {
+    const { id, partitionKey } = session.newDocument
+    return id !== '' || partitionKey.some((text) => text !== '') || session.draft.replace(/\s/g, '') !== '{}'
+  }
   return (
     session.serverCopy !== undefined &&
     session.draft !== editorText(session.serverCopy, session.partitionKeyPaths)
