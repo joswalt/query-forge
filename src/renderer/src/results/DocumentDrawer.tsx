@@ -490,6 +490,17 @@ function NewDocumentAddress({
           spellCheck={false}
           onChange={(e) => onChange({ ...fields, id: e.target.value })}
         />
+        {/* QueryForge picks the id, never the SDK: create always sends an
+            explicit id (ADR 0004), so the address is known before the write. */}
+        <button
+          type="button"
+          className="btn--ghost document-drawer__generate"
+          title="Fill in a random UUID"
+          disabled={session.saving}
+          onClick={() => onChange({ ...fields, id: crypto.randomUUID() })}
+        >
+          Generate
+        </button>
       </label>
       {session.partitionKeyPaths.map((path, i) => {
         const text = fields.partitionKey[i] ?? ''

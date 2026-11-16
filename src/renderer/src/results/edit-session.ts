@@ -243,6 +243,22 @@ export function partitionKeyInputText(level: PartitionKeyLevelValue): string {
   return parsePartitionKeyInput(level) === level ? level : JSON.stringify(level)
 }
 
+/**
+ * A Save/Create refusal describes the draft and fields as they were when
+ * pressed, so any edit makes it stale; the next press checks again. Other
+ * notices (an id clash with Open existing, a Concurrent Change) outlive edits.
+ */
+function withoutSaveRefusal(notice: EditNotice | undefined): EditNotice | undefined {
+  switch (notice?.kind) {
+    case 'invalid-address':
+    case 'invalid-body':
+    case 'address-changed':
+      return undefined
+    default:
+      return notice
+  }
+}
+
 export function editSessionReducer(session: EditSession, event: EditSessionEvent): EditSession {
   switch (event.type) {
     case 'readSucceeded':
@@ -262,9 +278,11 @@ export function editSessionReducer(session: EditSession, event: EditSessionEvent
     case 'readFailed':
       return { ...session, phase: 'read-failed', notice: { kind: 'error', message: event.message } }
     case 'draftChanged':
-      return { ...session, draft: event.text }
+      return { ...session, draft: event.text, notice: withoutSaveRefusal(session.notice) }
     case 'newDocumentFieldsChanged':
-      return session.newDocument ? { ...session, newDocument: event.fields } : session
+      return session.newDocument
+        ? { ...session, newDocument: event.fields, notice: withoutSaveRefusal(session.notice) }
+        : session
     case 'saveRefused':
       return { ...session, saving: false, notice: event.notice }
     case 'saveStarted':
