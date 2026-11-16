@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   detectDmlStatement,
+  dmlPreviewQuery,
   parseDmlStatement,
   translateDmlStatement,
   type DmlAssignment
@@ -344,5 +345,26 @@ describe('translating a DML Statement into its Driving Query', () => {
     expect(refusal.ok ? undefined : refusal.error.message).toBe(
       parsed.ok ? 'parsed' : parsed.error.message
     )
+  })
+})
+
+describe('previewing a DML Statement as a query', () => {
+  it.each([
+    ['DELETE FROM c WHERE c.status = "stale"', 'SELECT * FROM c WHERE c.status = "stale"'],
+    [
+      'UPDATE c SET c.n = c.n + 1, c.old = undefined WHERE c.n < 5;',
+      'SELECT * FROM c WHERE c.n < 5'
+    ],
+    ['delete from x where x.a IN (1, 2)', 'SELECT * FROM x WHERE x.a IN (1, 2)'],
+    [
+      '-- tidy\nDELETE FROM c WHERE EXISTS(SELECT VALUE t FROM t IN c.tags WHERE t = "x")',
+      'SELECT * FROM c WHERE EXISTS(SELECT VALUE t FROM t IN c.tags WHERE t = "x")'
+    ]
+  ])('selects every document %j would write', (statement, query) => {
+    expect(dmlPreviewQuery(statement)).toBe(query)
+  })
+
+  it('has no preview for a malformed DML Statement', () => {
+    expect(dmlPreviewQuery('DELETE FROM c')).toBeUndefined()
   })
 })

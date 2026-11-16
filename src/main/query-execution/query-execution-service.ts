@@ -154,6 +154,9 @@ export class QueryExecutionService {
             verb: plan.verb,
             matchCount,
             drivingQueryRequestCharge: plan.drivingQueryRequestCharge,
+            ...(plan.averageDocumentSize !== undefined
+              ? { averageDocumentSize: plan.averageDocumentSize }
+              : {}),
             partitionKeyPaths: plan.partitionKeyPaths,
             sample: plan.sample
           }

@@ -77,16 +77,22 @@ export interface DmlPlanSummary {
   verb: DmlVerb
   matchCount: number
   drivingQueryRequestCharge: number
+  /** Mean stored size in bytes of the documents the Driving Query
+   * retrieved (`retrievedDocumentSize / retrievedDocumentCount`). Absent
+   * when Cosmos DB returned no query metrics. */
+  averageDocumentSize?: number
   partitionKeyPaths: string[]
   sample: DmlSampleDocument[]
 }
 
 /** Each commit chunk's `meta.dmlProgress`. `requestCharge` is the running
- * write RU (the Driving Query's is in the summary). */
+ * write RU (the Driving Query's is in the summary); `counts` the Write
+ * Outcomes so far, for the run report's stacked bar. */
 export interface DmlCommitProgress {
   completed: number
   total: number
   requestCharge: number
+  counts: Record<WriteOutcome, number>
 }
 
 /** The last commit chunk's `meta.dmlSummary`. */
@@ -126,6 +132,23 @@ export function writeOutcomeLabel(outcome: WriteOutcome, verb: DmlVerb): string 
       return 'Failed'
     case 'not-attempted':
       return 'Not attempted'
+  }
+}
+
+/** A Write Outcome's one-line meaning on its run report tile (spec
+ * "Renderer DML run state"); undefined where the label says it all. */
+export function writeOutcomeMeaning(outcome: WriteOutcome): string | undefined {
+  switch (outcome) {
+    case 'unchanged':
+      return 'only removed paths that were already absent; nothing sent'
+    case 'concurrent-change':
+      return 'edited after the plan was made, so skipped. Re-run to apply to its current version'
+    case 'failed':
+      return 'see message'
+    case 'not-attempted':
+      return 'the run was cancelled before this write was sent'
+    default:
+      return undefined
   }
 }
 

@@ -207,6 +207,18 @@ export function parseDmlStatement(
   }
 }
 
+/**
+ * "Preview as query" (story 88): a SELECT of whole documents over the
+ * statement's own `WHERE`, under its own alias so the condition reads the
+ * same. Undefined for a statement that doesn't parse.
+ */
+export function dmlPreviewQuery(text: string): string | undefined {
+  const parsed = parseDmlStatement(text)
+  if (!parsed.ok) return undefined
+  const { alias, condition } = parsed.statement
+  return `SELECT * FROM ${alias} WHERE ${condition}`
+}
+
 function parseShell(text: string, partitionKeyPaths: readonly string[]): DmlStatement {
   const all = tokenize(text)
   // One statement per run (story 65): a trailing `;` is allowed, any other

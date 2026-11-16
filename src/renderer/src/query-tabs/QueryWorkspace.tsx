@@ -6,7 +6,13 @@ import type {
 } from '@shared/types/database-provider'
 import { getExtractor, type ExtractorId, type ExtractorOptions } from '@shared/extractors/extract'
 import { inferTableName } from '@shared/extractors/infer-table-name'
-import { detectDmlStatement, parseDmlStatement, type DmlVerb } from '@shared/dml/dml-statement'
+import {
+  detectDmlStatement,
+  dmlPreviewQuery,
+  parseDmlStatement,
+  type DmlVerb
+} from '@shared/dml/dml-statement'
+import { requiresWriteConfirmation } from '@shared/write-confirmation'
 import { FALLBACK_TABLE_NAME } from '@shared/extractors/sql-extractors'
 import type { DocumentWrite, StoredDocument } from '@shared/types/document-writer'
 import { QueryEditor, type QueryEditorHandle } from '../editor/QueryEditor'
@@ -265,11 +271,23 @@ export const QueryWorkspace = forwardRef<
   const dmlTabsRef = useRef(new Set<string>())
   /** Bumped each time Cmd/Ctrl+Enter is swallowed at a DML confirmation. */
   const [blockedShortcut, setBlockedShortcut] = useState(0)
+  /** A "DML preview" tab just opened, to run once it is in `tabs`. */
+  const [pendingPreviewRun, setPendingPreviewRun] = useState<string | null>(null)
   const [extractorSettings, updateExtractorSettings] = useExtractorSettings()
   const editorRef = useRef<QueryEditorHandle>(null)
   const editorHeight = useEditorHeight()
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId)
+
+  useEffect(() => {
+    if (!pendingPreviewRun) return
+    const tab = tabs.find((t) => t.id === pendingPreviewRun)
+    if (!tab) return
+    setPendingPreviewRun(null)
+    handleExecute(tab.id, tab.queryText)
+    // handleExecute reads the latest tabs; only a new preview should run.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingPreviewRun, tabs])
 
   // The name field belongs to the tab it was opened on.
   useEffect(() => setSaveName(null), [activeTabId])
@@ -759,7 +777,13 @@ export const QueryWorkspace = forwardRef<
     dmlTabsRef.current.add(tabId)
     // A DML run leaves nothing for "Export all matching rows" to re-run.
     updateTab(tabId, (t) => ({ ...t, lastExecutedQuery: undefined }))
-    dispatchRun(tabId, { type: 'dmlPlanningStarted', startedAt: Date.now(), verb, container })
+    dispatchRun(tabId, {
+      type: 'dmlPlanningStarted',
+      startedAt: Date.now(),
+      verb,
+      container,
+      statement
+    })
 
     const handle: ExecutionHandle = { cancel: () => {}, cancelRequested: false }
     executionsRef.current.set(tabId, handle)
@@ -778,6 +802,27 @@ export const QueryWorkspace = forwardRef<
       })
       .then((resolved) => attachCancel(tabId, handle, resolved.cancel))
       .catch((err) => failSetup(tabId, err))
+  }
+
+  /** "Preview as query ↗" (stories 88, 89): a new "DML preview" tab on
+   * the same connection and container runs `SELECT *` over the planned
+   * statement's `WHERE` under the normal Row Limit. The DML tab stays
+   * busy with its plan held, to confirm or cancel on return. */
+  function handlePreviewDml(tabId: string): void {
+    const tab = tabs.find((t) => t.id === tabId)
+    const dml = tab?.run.dml
+    if (!tab || dml?.phase !== 'confirming') return
+    const queryText = dmlPreviewQuery(dml.statement)
+    if (!queryText) return
+    const preview = createTab(nextIndexRef.current++, {
+      title: 'DML preview',
+      queryText,
+      connectionId: tab.connectionId,
+      options: tab.options
+    })
+    setTabs((prev) => [...prev, preview])
+    setActiveTabId(preview.id)
+    setPendingPreviewRun(preview.id)
   }
 
   /** Confirm at the strip: writes exactly the held DML Plan (story 95). */
@@ -1277,6 +1322,11 @@ export const QueryWorkspace = forwardRef<
           <DmlConfirmStrip
             key={activeTab.run.dml?.phase === 'confirming' ? activeTab.run.dml.planId : undefined}
             dml={activeTab.run.dml}
+            // Read from the current profile on every render, so an
+            // Environment edited meanwhile is honoured (decision 05).
+            production={requiresWriteConfirmation(
+              connections.find((c) => c.id === activeTab.connectionId)
+            )}
             blockedShortcut={blockedShortcut}
             onConfirm={() => handleConfirmDml(activeTab.id)}
             onCancel={() => handleCancel(activeTab.id)}
@@ -1293,7 +1343,11 @@ export const QueryWorkspace = forwardRef<
 
           <EditorResizer {...editorHeight} />
 
-          <DmlRunReport dml={activeTab.run.dml} onCancel={() => handleCancel(activeTab.id)} />
+          <DmlRunReport
+            dml={activeTab.run.dml}
+            onCancel={() => handleCancel(activeTab.id)}
+            onPreviewQuery={() => handlePreviewDml(activeTab.id)}
+          />
 
           <QueryResultsView
             run={activeTab.run}

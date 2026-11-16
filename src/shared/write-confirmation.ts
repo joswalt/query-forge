@@ -1,3 +1,4 @@
+import type { DmlVerb } from './dml/dml-statement'
 import type { ConnectionEnvironment } from './types/connection-profile'
 
 /**
@@ -16,4 +17,32 @@ export function requiresWriteConfirmation(
   profile: { environment?: ConnectionEnvironment } | undefined
 ): boolean {
   return profile?.environment === 'prod'
+}
+
+/**
+ * What a DML Statement's Write Confirmation on prod asks the user to type:
+ * the verb and the document count, e.g. `DELETE 1840` (story 84). Typing
+ * the count makes the user read it, which catches a `WHERE` that matches
+ * more than meant.
+ */
+export function typedDmlConfirmation(verb: DmlVerb, matchCount: number): string {
+  return `${verb} ${matchCount}`
+}
+
+/**
+ * Does the typed text confirm this DML Statement on prod? The verb is
+ * case-insensitive; the count must be exactly the plan's, digits only.
+ * Surrounding and repeated spaces are tolerated, anything else is not.
+ */
+export function matchesTypedDmlConfirmation(
+  typed: string,
+  verb: DmlVerb,
+  matchCount: number
+): boolean {
+  const [typedVerb, typedCount, ...rest] = typed.trim().split(/\s+/)
+  return (
+    rest.length === 0 &&
+    typedVerb?.toUpperCase() === verb &&
+    typedCount === String(matchCount)
+  )
 }

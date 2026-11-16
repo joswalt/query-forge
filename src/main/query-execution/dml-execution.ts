@@ -64,6 +64,9 @@ export interface DmlPlan {
    * confirmation only; the commit never reads it. */
   sample: DmlSampleDocument[]
   drivingQueryRequestCharge: number
+  /** Mean stored bytes per retrieved document, when query metrics came
+   * back; feeds the confirmation's rough write-RU band only. */
+  averageDocumentSize?: number
 }
 
 /** A planning or commit run, addressable by its Execution ID for cancel. */
@@ -143,11 +146,15 @@ export async function buildDmlPlan(
   const documents: PlannedDocument[] = []
   const sample: DmlSampleDocument[] = []
   let requestCharge = 0
+  let retrievedDocumentCount = 0
+  let retrievedDocumentSize = 0
   for await (const page of writer.runDrivingQuery(translated.translation.drivingQuery, {
     ...input.target,
     executionId: input.executionId
   })) {
     requestCharge += page.requestCharge
+    retrievedDocumentCount += page.retrievedDocumentCount ?? 0
+    retrievedDocumentSize += page.retrievedDocumentSize ?? 0
     for (const row of page.rows) {
       const document = toPlannedDocument(row, translated.translation)
       documents.push(document)
@@ -177,7 +184,10 @@ export async function buildDmlPlan(
     partitionKeyPaths,
     documents,
     sample,
-    drivingQueryRequestCharge: requestCharge
+    drivingQueryRequestCharge: requestCharge,
+    ...(retrievedDocumentCount > 0
+      ? { averageDocumentSize: retrievedDocumentSize / retrievedDocumentCount }
+      : {})
   }
 }
 
@@ -271,7 +281,7 @@ export async function commitDmlPlan(
     rows: buffer,
     meta: {
       ru: bufferRequestCharge,
-      dmlProgress: { completed, total, requestCharge: writeRequestCharge }
+      dmlProgress: { completed, total, requestCharge: writeRequestCharge, counts: { ...counts } }
     }
   })
   const flush = (): void => {

@@ -16,7 +16,8 @@ const planningStarted: QueryRunAction = {
   type: 'dmlPlanningStarted',
   startedAt: 100,
   verb: 'DELETE',
-  container: 'customers'
+  container: 'customers',
+  statement: 'DELETE FROM c WHERE c.stale'
 }
 
 const planned: QueryRunAction = {
@@ -26,6 +27,7 @@ const planned: QueryRunAction = {
     verb: 'DELETE',
     matchCount: 3,
     drivingQueryRequestCharge: 4.5,
+    averageDocumentSize: 1536,
     partitionKeyPaths: ['/customerId'],
     sample: [{ id: 'a', partitionKey: 'c' }]
   },
@@ -43,6 +45,8 @@ function summary(overrides: Partial<DmlCommitSummary> = {}): DmlCommitSummary {
     ...overrides
   }
 }
+
+const written = (n: number): DmlCommitSummary['counts'] => ({ ...emptyOutcomeCounts(), written: n })
 
 const row = (id: string): Record<string, unknown> => ({
   id,
@@ -72,12 +76,13 @@ describe('queryRunReducer DML phases', () => {
       phase: 'planning',
       verb: 'DELETE',
       container: 'customers',
+      statement: 'DELETE FROM c WHERE c.stale',
       matched: 200,
       requestCharge: 12.5
     })
   })
 
-  it('a held DML Plan moves to confirming, still busy, with the plan numbers', () => {
+  it('a held DML Plan moves to confirming, still busy, with the plan numbers and the statement it was planned from', () => {
     const state = fold([planningStarted, planned])
 
     expect(state.status).toBe('running')
@@ -85,9 +90,11 @@ describe('queryRunReducer DML phases', () => {
       phase: 'confirming',
       verb: 'DELETE',
       container: 'customers',
+      statement: 'DELETE FROM c WHERE c.stale',
       planId: 'plan-1',
       matchCount: 3,
       drivingQueryRequestCharge: 4.5,
+      averageDocumentSize: 1536,
       partitionKeyPaths: ['/customerId'],
       sample: [{ id: 'a', partitionKey: 'c' }]
     })
@@ -108,7 +115,7 @@ describe('queryRunReducer DML phases', () => {
       }
     ]
     const state = fold([
-      { ...planningStarted, verb: 'UPDATE' } as QueryRunAction,
+      { ...planningStarted, verb: 'UPDATE', statement: 'UPDATE c SET c.status = "archived" WHERE c.status = "active"' } as QueryRunAction,
       {
         type: 'dmlPlanned',
         summary: {
@@ -127,6 +134,7 @@ describe('queryRunReducer DML phases', () => {
       phase: 'confirming',
       verb: 'UPDATE',
       container: 'customers',
+      statement: 'UPDATE c SET c.status = "archived" WHERE c.status = "active"',
       planId: 'plan-2',
       matchCount: 40,
       drivingQueryRequestCharge: 6,
@@ -209,7 +217,7 @@ describe('queryRunReducer DML phases', () => {
         type: 'chunk',
         chunk: {
           rows: [row('a'), row('b')],
-          meta: { ru: 10, dmlProgress: { completed: 2, total: 3, requestCharge: 10 } }
+          meta: { ru: 10, dmlProgress: { completed: 2, total: 3, requestCharge: 10, counts: written(2) } }
         }
       }
     ])
@@ -223,18 +231,18 @@ describe('queryRunReducer DML phases', () => {
       container: 'customers',
       matchCount: 3,
       drivingQueryRequestCharge: 4.5,
-      progress: { completed: 2, total: 3, requestCharge: 10 },
+      progress: { completed: 2, total: 3, requestCharge: 10, counts: written(2) },
       stopRequested: false,
       summary: undefined
     })
   })
 
-  it('starts committing at zero of the match count', () => {
+  it('starts committing at zero of the match count, with no Write Outcomes yet', () => {
     const state = fold([planningStarted, planned, { type: 'dmlCommitStarted' }])
 
     expect(state.dml).toMatchObject({
       phase: 'committing',
-      progress: { completed: 0, total: 3, requestCharge: 0 }
+      progress: { completed: 0, total: 3, requestCharge: 0, counts: emptyOutcomeCounts() }
     })
   })
 
@@ -256,7 +264,7 @@ describe('queryRunReducer DML phases', () => {
           rows: [row('a'), row('b'), row('c')],
           meta: {
             ru: 15,
-            dmlProgress: { completed: 3, total: 3, requestCharge: 15 },
+            dmlProgress: { completed: 3, total: 3, requestCharge: 15, counts: written(3) },
             dmlSummary: summary()
           }
         }
@@ -289,7 +297,7 @@ describe('queryRunReducer DML phases', () => {
         type: 'chunk',
         chunk: {
           rows: [row('a')],
-          meta: { dmlProgress: { completed: 3, total: 3, requestCharge: 5 }, dmlSummary: stoppedSummary }
+          meta: { dmlProgress: { completed: 3, total: 3, requestCharge: 5, counts: stoppedSummary.counts }, dmlSummary: stoppedSummary }
         }
       },
       { type: 'done', finishedAt: 900 }
@@ -310,7 +318,7 @@ describe('queryRunReducer DML phases', () => {
       planningStarted,
       planned,
       { type: 'dmlCommitStarted' },
-      { type: 'chunk', chunk: { rows: [row('a')], meta: { dmlProgress: { completed: 1, total: 3, requestCharge: 5 } } } },
+      { type: 'chunk', chunk: { rows: [row('a')], meta: { dmlProgress: { completed: 1, total: 3, requestCharge: 5, counts: written(1) } } } },
       { type: 'failed', message: 'The query execution service stopped', finishedAt: 300, cancelled: false }
     ])
 

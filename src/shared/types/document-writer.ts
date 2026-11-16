@@ -143,10 +143,14 @@ export interface DrivingQueryOptions extends ContainerTarget {
   executionId?: ExecutionId
 }
 
-/** One page of Driving Query matches with its RU charge. */
+/** One page of Driving Query matches with its RU charge and, when the
+ * service returned query metrics, the documents it retrieved to produce
+ * them (count and total stored bytes, summed over partition key ranges). */
 export interface DrivingQueryPage {
   rows: unknown[]
   requestCharge: number
+  retrievedDocumentCount?: number
+  retrievedDocumentSize?: number
 }
 
 export function isDocumentWriter(provider: unknown): provider is DocumentWriter {

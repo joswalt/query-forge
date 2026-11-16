@@ -1,5 +1,6 @@
 import type { ResultChunk } from '@shared/types/database-provider'
 import type { StoredDocument } from '@shared/types/document-writer'
+import { emptyOutcomeCounts } from '@shared/types/dml-run'
 import {
   addressOf,
   isFullDocument,
@@ -235,6 +236,7 @@ export function queryRunReducer(state: QueryRunState, action: QueryRunAction): Q
           phase: 'planning',
           verb: action.verb,
           container: action.container,
+          statement: action.statement,
           matched: 0,
           requestCharge: 0
         }
@@ -253,9 +255,15 @@ export function queryRunReducer(state: QueryRunState, action: QueryRunAction): Q
 
     case 'dmlPlanned': {
       if (state.dml?.phase !== 'planning') return state
-      const { verb, container } = state.dml
-      const { planId, matchCount, drivingQueryRequestCharge, partitionKeyPaths, sample } =
-        action.summary
+      const { verb, container, statement } = state.dml
+      const {
+        planId,
+        matchCount,
+        drivingQueryRequestCharge,
+        averageDocumentSize,
+        partitionKeyPaths,
+        sample
+      } = action.summary
       if (planId === undefined || matchCount === 0) {
         return {
           ...state,
@@ -270,9 +278,11 @@ export function queryRunReducer(state: QueryRunState, action: QueryRunAction): Q
           phase: 'confirming',
           verb,
           container,
+          statement,
           planId,
           matchCount,
           drivingQueryRequestCharge,
+          ...(averageDocumentSize !== undefined ? { averageDocumentSize } : {}),
           partitionKeyPaths,
           sample
         }
@@ -299,7 +309,7 @@ export function queryRunReducer(state: QueryRunState, action: QueryRunAction): Q
           container,
           matchCount,
           drivingQueryRequestCharge,
-          progress: { completed: 0, total: matchCount, requestCharge: 0 },
+          progress: { completed: 0, total: matchCount, requestCharge: 0, counts: emptyOutcomeCounts() },
           stopRequested: false,
           summary: undefined
         }
