@@ -3,9 +3,11 @@ import type { ConnectionEnvironment } from '@shared/types/connection-profile'
 import type { PartitionKeyLevelValue, PartitionKeyValue } from '@shared/types/document-writer'
 import { JsonEditor } from '../editor/JsonEditor'
 import { partitionKeyFieldName, type DocumentAddress } from './addressable-row'
+import { CompareView } from './CompareView'
 import {
   deletePreviewText,
   hasUnsavedEdits,
+  isBusy,
   parsePartitionKeyInput,
   SYSTEM_PROPERTIES,
   type EditNotice,
@@ -28,7 +30,13 @@ export interface DocumentDrawerProps {
    * policy and the prod header strip. */
   connectionProfile: { environment?: ConnectionEnvironment } | undefined
   onSelect: (key: number) => void
+  /** Close (the drawer's, or a session tab's): asks first when unsaved
+   * edits would be lost (story 27). */
   onClose: (key: number) => void
+  /** Discard edits, after asking: closes the session. */
+  onDiscard: (key: number) => void
+  /** Keep editing: the close is not done. */
+  onKeepEditing: () => void
   onDraftChange: (key: number, text: string) => void
   onSave: (key: number) => void
   /** Delete document in a delete-mode session: sends the delete. */
@@ -45,6 +53,16 @@ export interface DocumentDrawerProps {
   onNewDocumentFieldsChange: (key: number, fields: NewDocumentFields) => void
   /** After an `id` clash: open the document already at `address`. */
   onOpenExisting: (key: number, address: DocumentAddress) => void
+  /** Compare after a Concurrent Change on Save (story 38). */
+  onCompare: (key: number) => void
+  /** Back to editor from the compare view. */
+  onBackToEditor: (key: number) => void
+  /** Overwrite with mine, from the compare view only (story 41). */
+  onOverwrite: (key: number) => void
+  /** Reload: discard edits and load the current version (story 42). */
+  onReload: (key: number) => void
+  /** Save as new document after a 404 on Save (story 47). */
+  onSaveAsNew: (key: number) => void
 }
 
 /**
@@ -67,7 +85,7 @@ export function DocumentDrawer(props: DocumentDrawerProps): React.JSX.Element | 
 
   return (
     <aside
-      className="document-drawer"
+      className={session.comparing ? 'document-drawer document-drawer--wide' : 'document-drawer'}
       role="dialog"
       aria-label={title}
       data-env={confirmation.required ? 'prod' : undefined}
@@ -82,18 +100,31 @@ export function DocumentDrawer(props: DocumentDrawerProps): React.JSX.Element | 
       {confirmation.required && <ProdWriteStrip />}
       {state.sessions.length > 1 && (
         <div className="document-drawer__tabs" role="tablist" aria-label="Open documents">
-          {state.sessions.map((s) => (
-            <button
-              key={s.key}
-              type="button"
-              role="tab"
-              aria-selected={s.key === session.key}
-              onClick={() => props.onSelect(s.key)}
-            >
-              {s.newDocument ? 'New document' : s.address.id}
-              {hasUnsavedEdits(s) ? ' •' : ''}
-            </button>
-          ))}
+          {state.sessions.map((s) => {
+            const label = s.newDocument ? 'New document' : s.address.id
+            return (
+              <span key={s.key} className="document-drawer__tab">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={s.key === session.key}
+                  onClick={() => props.onSelect(s.key)}
+                >
+                  {label}
+                  {hasUnsavedEdits(s) ? ' •' : ''}
+                </button>
+                <button
+                  type="button"
+                  className="btn--ghost document-drawer__tab-close"
+                  aria-label={`Close ${label}`}
+                  title="Close"
+                  onClick={() => props.onClose(s.key)}
+                >
+                  ×
+                </button>
+              </span>
+            )
+          })}
         </div>
       )}
       <header className="document-drawer__head">
@@ -110,6 +141,18 @@ export function DocumentDrawer(props: DocumentDrawerProps): React.JSX.Element | 
           ✕
         </button>
       </header>
+      {state.confirmingClose === session.key && (
+        <p className="document-drawer__notice document-drawer__notice--warn" role="alert">
+          Discard your unsaved edits
+          {session.newDocument ? ' to this new document' : <> to <code>{session.address.id}</code></>}?
+          <button type="button" onClick={props.onKeepEditing}>
+            Keep editing
+          </button>
+          <button type="button" className="btn--danger" onClick={() => props.onDiscard(session.key)}>
+            Discard edits
+          </button>
+        </p>
+      )}
       <SessionBody {...props} session={session} confirmation={confirmation} />
     </aside>
   )
@@ -120,7 +163,7 @@ function canSave(session: EditSession): boolean {
   return (
     session.phase === 'editing' &&
     session.mode !== 'delete' &&
-    !session.saving &&
+    !isBusy(session) &&
     hasUnsavedEdits(session)
   )
 }
@@ -141,6 +184,17 @@ function SessionBody(props: SessionBodyProps): React.JSX.Element {
     onNewDocumentFieldsChange,
     onOpenExisting
   } = props
+  const notice = session.notice && (
+    <Notice
+      notice={session.notice}
+      comparing={session.comparing}
+      busy={isBusy(session)}
+      onOpenExisting={(address) => onOpenExisting(session.key, address)}
+      onCompare={() => props.onCompare(session.key)}
+      onReload={() => props.onReload(session.key)}
+      onSaveAsNew={() => confirmation.press('save-as-new', () => props.onSaveAsNew(session.key))}
+    />
+  )
   switch (session.phase) {
     case 'reading':
       return (
@@ -181,7 +235,21 @@ function SessionBody(props: SessionBodyProps): React.JSX.Element {
       )
     case 'editing': {
       if (session.mode === 'delete') return <DeletePreview {...props} />
+      if (session.comparing) {
+        return (
+          <CompareView
+            session={session}
+            confirmation={confirmation}
+            notice={notice}
+            onDraftChange={(text) => onDraftChange(session.key, text)}
+            onBackToEditor={() => props.onBackToEditor(session.key)}
+            onSave={() => onSave(session.key)}
+            onOverwrite={() => props.onOverwrite(session.key)}
+          />
+        )
+      }
       const dirty = hasUnsavedEdits(session)
+      const awaiting = confirmation.awaiting
       const { newDocument } = session
       return (
         <div className="document-drawer__body">
@@ -194,12 +262,7 @@ function SessionBody(props: SessionBodyProps): React.JSX.Element {
           ) : (
             <AddressChips session={session} onNewDocument={() => onNewDocument(session.key)} />
           )}
-          {session.notice && (
-            <Notice
-              notice={session.notice}
-              onOpenExisting={(address) => onOpenExisting(session.key, address)}
-            />
-          )}
+          {notice}
           <JsonEditor
             key={`${session.key}:${session.revision}`}
             initialValue={session.draft}
@@ -209,11 +272,13 @@ function SessionBody(props: SessionBodyProps): React.JSX.Element {
           {!newDocument && <SystemProperties document={session.serverCopy} />}
           <div className="document-drawer__actions">
             <span className="document-drawer__spacer" />
-            {confirmation.awaiting === 'save' ? (
+            {awaiting === 'save' || awaiting === 'save-as-new' ? (
               <ConfirmWriteButtons
                 step={confirmation}
-                write="save"
-                onConfirm={() => onSave(session.key)}
+                write={awaiting}
+                onConfirm={() =>
+                  awaiting === 'save' ? onSave(session.key) : props.onSaveAsNew(session.key)
+                }
               />
             ) : (
               <>
@@ -462,10 +527,22 @@ function partitionKeyLabel(value: PartitionKeyValue): string {
 
 function Notice({
   notice,
-  onOpenExisting
+  comparing,
+  busy,
+  onOpenExisting,
+  onCompare,
+  onReload,
+  onSaveAsNew
 }: {
   notice: EditNotice
+  /** In the compare view Compare is already done, so only the message
+   * repeats (story 40). */
+  comparing?: boolean
+  busy?: boolean
   onOpenExisting?: (address: DocumentAddress) => void
+  onCompare?: () => void
+  onReload?: () => void
+  onSaveAsNew?: () => void
 }): React.JSX.Element {
   switch (notice.kind) {
     case 'saved':
@@ -515,12 +592,39 @@ function Notice({
       return (
         <p className="document-drawer__notice document-drawer__notice--warn" role="alert">
           This document changed since you opened it.
+          {comparing && ' The server side now shows its current version.'}
+          {!comparing && onCompare && (
+            <button type="button" className="btn--primary" disabled={busy} onClick={onCompare}>
+              Compare
+            </button>
+          )}
+          {!comparing && onReload && (
+            <button
+              type="button"
+              disabled={busy}
+              title="Discards your edits and loads the current version"
+              onClick={onReload}
+            >
+              Reload
+            </button>
+          )}
         </p>
       )
     case 'deleted-while-editing':
       return (
         <p className="document-drawer__notice document-drawer__notice--warn" role="alert">
           This document was deleted since you opened it.
+          {onSaveAsNew && (
+            <button
+              type="button"
+              className="btn--primary"
+              disabled={busy}
+              title="Creates it again at the same id and partition key, with your edits"
+              onClick={onSaveAsNew}
+            >
+              Save as new document
+            </button>
+          )}
         </p>
       )
     case 'concurrent-change-on-delete':
