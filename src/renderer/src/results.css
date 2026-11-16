@@ -728,6 +728,74 @@
   border-bottom-color: var(--qf-accent);
 }
 
+.document-drawer__tab {
+  display: inline-flex;
+  align-items: center;
+}
+
+.document-drawer__tabs .document-drawer__tab-close {
+  padding: 0 4px;
+  color: var(--qf-muted);
+}
+
+/* The compare view (decision 04): the drawer widens to show server now and
+   mine side by side. */
+.document-drawer--wide {
+  width: min(1100px, calc(100vw - 32px));
+}
+
+.document-compare__cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  min-height: 0;
+}
+
+.document-compare__label {
+  margin-bottom: 4px;
+  color: var(--qf-muted);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.document-compare__diff {
+  max-height: 40vh;
+  margin: 0;
+  padding: 8px 0;
+  overflow: auto;
+  border: 1px solid var(--qf-border);
+  border-radius: var(--qf-r-control);
+  background: var(--qf-panel);
+  font-family: var(--qf-font-mono);
+  font-size: 12px;
+}
+
+.document-compare__line {
+  min-height: 1.5em;
+  padding: 0 10px;
+  white-space: pre;
+}
+
+.document-compare__line.is-server {
+  background: color-mix(in srgb, var(--qf-err) 16%, transparent);
+}
+
+.document-compare__line.is-mine {
+  background: color-mix(in srgb, var(--qf-ok) 18%, transparent);
+}
+
+.document-compare__line.is-gap {
+  background: repeating-linear-gradient(45deg, transparent 0 4px, var(--qf-hover) 4px 8px);
+}
+
+.document-compare__edit summary {
+  margin-bottom: 6px;
+  color: var(--qf-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .document-drawer__head {
   display: flex;
   align-items: center;

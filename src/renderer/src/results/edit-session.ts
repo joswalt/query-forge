@@ -72,7 +72,18 @@ export interface EditSession {
    * the `id` and partition key fields as typed. `address` is then the
    * prefill or the last create attempt, not a stored document. */
   newDocument?: NewDocumentFields
+  /** The compare view is open (story 38): the server copy, as read by
+   * Compare, side by side with the draft. The drawer widens. */
+  comparing?: boolean
+  /** A point-read of the current version is in flight for Compare,
+   * Overwrite with mine or Reload. */
+  pendingRead?: CurrentVersionRead
+  /** The write in flight is Save as new document. */
+  savingAsNew?: boolean
 }
+
+/** Why the current version is being read while the session is open. */
+export type CurrentVersionRead = 'compare' | 'overwrite'
 
 /** New document's editable address fields: the `id`, and one partition key
  * field per level (see `parsePartitionKeyInput`). */
@@ -113,7 +124,9 @@ export type EditSessionEvent =
   | { type: 'saveRefused'; notice: EditNotice }
   /** `address`: where a create is sent (New document), recorded so an `id`
    * clash can name it. */
-  | { type: 'saveStarted'; address?: DocumentAddress }
+  /** `asNew`: Save as new document, a create at the session's address
+   * after it was found deleted. */
+  | { type: 'saveStarted'; address?: DocumentAddress; asNew?: boolean }
   | { type: 'saveSucceeded'; document: StoredDocument; requestCharge: number }
   | {
       type: 'saveOutcome'
@@ -134,6 +147,22 @@ export type EditSessionEvent =
   /** Edit instead (or Edit document… on an open Delete): edit the version
    * already read. */
   | { type: 'editRequested' }
+  /** Compare, after a Concurrent Change: read the current version and open
+   * the compare view, keeping the draft. */
+  | { type: 'compareRequested' }
+  /** Overwrite with mine, in the compare view only: read the current
+   * version, then replace it carrying that read's etag. */
+  | { type: 'overwriteRequested' }
+  /** Back to editor: leave the compare view, keeping the draft and the
+   * etag of the compare read. */
+  | { type: 'compareClosed' }
+  /** Reload: discard the draft and read the current version, as on open. */
+  | { type: 'reloadRequested' }
+  /** Compare or Overwrite with mine found the document deleted. */
+  | { type: 'currentVersionNotFound' }
+  | { type: 'currentVersionReadFailed'; message: string }
+  /** The current version read for Compare or Overwrite with mine. */
+  | { type: 'currentVersionRead'; document: StoredDocument }
 
 export function openEditSession(input: {
   key: number
@@ -172,12 +201,7 @@ export function openNewDocumentSession(input: {
 }): EditSession {
   const { from } = input
   const fields: NewDocumentFields = from
-    ? (from.newDocument ?? {
-        id: from.address.id,
-        partitionKey: partitionKeyLevels(from.address.partitionKey, from.partitionKeyPaths.length).map(
-          partitionKeyInputText
-        )
-      })
+    ? (from.newDocument ?? newDocumentFieldsAt(from.address, from.partitionKeyPaths))
     : { id: '', partitionKey: input.partitionKeyPaths.map(() => '') }
   return {
     key: input.key,
@@ -194,6 +218,19 @@ export function openNewDocumentSession(input: {
     saving: false,
     notice: undefined,
     newDocument: fields
+  }
+}
+
+/** New document's fields filled in with `address`. */
+function newDocumentFieldsAt(
+  address: DocumentAddress,
+  partitionKeyPaths: readonly string[]
+): NewDocumentFields {
+  return {
+    id: address.id,
+    partitionKey: partitionKeyLevels(address.partitionKey, partitionKeyPaths.length).map(
+      partitionKeyInputText
+    )
   }
 }
 
@@ -231,26 +268,61 @@ export function editSessionReducer(session: EditSession, event: EditSessionEvent
     case 'saveRefused':
       return { ...session, saving: false, notice: event.notice }
     case 'saveStarted':
-      return { ...session, address: event.address ?? session.address, saving: true, notice: undefined }
+      return {
+        ...session,
+        address: event.address ?? session.address,
+        saving: true,
+        savingAsNew: event.asNew,
+        notice: undefined
+      }
     case 'saveSucceeded':
       // A created document is edited from here on like any other.
       return {
         ...session,
         newDocument: undefined,
+        comparing: false,
         saving: false,
+        savingAsNew: undefined,
         serverCopy: event.document,
         etag: etagOf(event.document),
         draft: editorText(event.document, session.partitionKeyPaths),
         revision: session.revision + 1,
         notice: {
-          kind: session.newDocument ? 'created' : 'saved',
+          kind: session.newDocument || session.savingAsNew ? 'created' : 'saved',
           requestCharge: event.requestCharge
         }
       }
     case 'saveOutcome':
-      return { ...session, saving: false, notice: noticeForOutcome(event.outcome, session.address) }
+      // In the compare view a Concurrent Change refreshes the server side.
+      if (session.comparing && event.outcome === 'precondition-failed') {
+        return { ...session, saving: false, pendingRead: 'compare', notice: { kind: 'concurrent-change' } }
+      }
+      // Someone created it again first: the id clash case, as a New document
+      // at that address, so Open existing can open theirs next to mine.
+      if (session.savingAsNew && event.outcome === 'conflict') {
+        return {
+          ...session,
+          saving: false,
+          savingAsNew: undefined,
+          comparing: false,
+          newDocument: newDocumentFieldsAt(session.address, session.partitionKeyPaths),
+          notice: noticeForOutcome(event.outcome, session.address)
+        }
+      }
+      return {
+        ...session,
+        saving: false,
+        savingAsNew: undefined,
+        comparing: event.outcome === 'not-found' ? false : session.comparing,
+        notice: noticeForOutcome(event.outcome, session.address)
+      }
     case 'saveFailed':
-      return { ...session, saving: false, notice: { kind: 'error', message: event.message } }
+      return {
+        ...session,
+        saving: false,
+        savingAsNew: undefined,
+        notice: { kind: 'error', message: event.message }
+      }
     case 'deleteStarted':
       return { ...session, saving: true, notice: undefined }
     case 'deleteSucceeded':
@@ -294,6 +366,37 @@ export function editSessionReducer(session: EditSession, event: EditSessionEvent
     case 'editRequested':
       if (session.mode === 'edit' || session.saving) return session
       return { ...session, mode: 'edit', notice: undefined }
+    case 'compareRequested':
+      if (isBusy(session) || session.newDocument) return session
+      return { ...session, comparing: true, pendingRead: 'compare', notice: undefined }
+    case 'compareClosed':
+      return isBusy(session) ? session : { ...session, comparing: false }
+    case 'reloadRequested':
+      if (isBusy(session) || session.newDocument) return session
+      return {
+        ...session,
+        phase: 'reading',
+        comparing: false,
+        serverCopy: undefined,
+        etag: undefined,
+        notice: undefined
+      }
+    case 'currentVersionNotFound':
+      return { ...session, pendingRead: undefined, comparing: false, notice: { kind: 'deleted-while-editing' } }
+    case 'currentVersionReadFailed':
+      return { ...session, pendingRead: undefined, notice: { kind: 'error', message: event.message } }
+    case 'overwriteRequested':
+      // Never an unconditional write: a fresh read supplies the etag.
+      if (!session.comparing || isBusy(session)) return session
+      return { ...session, pendingRead: 'overwrite', notice: undefined }
+    case 'currentVersionRead':
+      // The draft (my side) is kept; Save from here carries this etag.
+      return {
+        ...session,
+        pendingRead: undefined,
+        serverCopy: event.document,
+        etag: etagOf(event.document)
+      }
   }
 }
 
@@ -305,6 +408,9 @@ export interface EditSessionsState {
   /** A delete just finished: shown once as a toast, then cleared with
    * `toastShown`. `key` is the deleted edit session's. */
   toast?: { key: number; message: string }
+  /** Closing this session would discard unsaved edits (story 27): the
+   * drawer asks first. Cleared by Keep editing or a switch of session tab. */
+  confirmingClose?: number
 }
 
 export const initialEditSessionsState: EditSessionsState = { sessions: [], activeKey: undefined }
@@ -330,7 +436,12 @@ export type EditSessionsAction =
       from?: number
     }
   | { type: 'selected'; key: number }
+  /** Discards the session at once (also: Discard edits, after asking). */
   | { type: 'closed'; key: number }
+  /** Close or a session tab's close: asks first when edits would be lost. */
+  | { type: 'closeRequested'; key: number }
+  /** Keep editing: the session stays open with its edits. */
+  | { type: 'closeCancelled' }
   | { type: 'session'; key: number; event: EditSessionEvent }
   | { type: 'toastShown'; key: number }
 
@@ -359,7 +470,17 @@ export function editSessionsReducer(
       }
     }
     case 'selected':
-      return state.sessions.some((s) => s.key === action.key) ? { ...state, activeKey: action.key } : state
+      return state.sessions.some((s) => s.key === action.key)
+        ? { ...state, activeKey: action.key, confirmingClose: undefined }
+        : state
+    case 'closeRequested': {
+      const session = state.sessions.find((s) => s.key === action.key)
+      if (!session) return state
+      if (!hasUnsavedEdits(session)) return withoutSession(state, action.key)
+      return { ...state, activeKey: action.key, confirmingClose: action.key }
+    }
+    case 'closeCancelled':
+      return { ...state, confirmingClose: undefined }
     case 'closed':
       return withoutSession(state, action.key)
     case 'session': {
@@ -379,7 +500,8 @@ export function editSessionsReducer(
 function withoutSession(state: EditSessionsState, key: number): EditSessionsState {
   const sessions = state.sessions.filter((s) => s.key !== key)
   const activeKey = state.activeKey === key ? sessions[sessions.length - 1]?.key : state.activeKey
-  return { ...state, sessions, activeKey }
+  const confirmingClose = state.confirmingClose === key ? undefined : state.confirmingClose
+  return { ...state, sessions, activeKey, confirmingClose }
 }
 
 /** Story 30 ("Deleted `<id>` · RU") and story 48 (a 404 is done). */
@@ -425,6 +547,54 @@ export function planSave(session: EditSession): SavePlan {
   if (session.phase !== 'editing' || session.etag === undefined) {
     return { ok: false, notice: { kind: 'error', message: 'The document has not been read yet.' } }
   }
+  const planned = bodyAtAddress(session)
+  if (!planned.ok) return planned
+  const { address } = session
+  return {
+    ok: true,
+    write: {
+      kind: 'replace',
+      id: address.id,
+      partitionKey: address.partitionKey,
+      ifMatch: session.etag,
+      body: planned.body,
+      database: session.target.database,
+      container: session.target.container
+    }
+  }
+}
+
+/**
+ * What Save as new document sends after a 404 on Save (story 47): a
+ * `create` at the session's own address with the draft, the same body a
+ * Save would have sent. Only offered once the document was found deleted.
+ */
+export function planSaveAsNew(session: EditSession): SavePlan {
+  if (session.newDocument || session.notice?.kind !== 'deleted-while-editing') {
+    return { ok: false, notice: { kind: 'error', message: 'The document has not been found deleted.' } }
+  }
+  const planned = bodyAtAddress(session)
+  if (!planned.ok) return planned
+  const { address } = session
+  return {
+    ok: true,
+    write: {
+      kind: 'create',
+      id: address.id,
+      partitionKey: address.partitionKey,
+      body: planned.body,
+      database: session.target.database,
+      container: session.target.container
+    }
+  }
+}
+
+/** The draft as a body for the session's locked address: system properties
+ * stripped, `id` and partition key values restored. Refused when the draft
+ * isn't a JSON object or changes the address. */
+function bodyAtAddress(
+  session: EditSession
+): { ok: true; body: Record<string, unknown> } | { ok: false; notice: EditNotice } {
   const parsed = parseDraft(session.draft)
   if (!parsed.ok) return parsed
 
@@ -442,19 +612,7 @@ export function planSave(session: EditSession): SavePlan {
     if (!restored) changed.push(partitionKeyFieldName(path))
   })
   if (changed.length > 0) return { ok: false, notice: { kind: 'address-changed', fields: changed } }
-
-  return {
-    ok: true,
-    write: {
-      kind: 'replace',
-      id: address.id,
-      partitionKey: address.partitionKey,
-      ifMatch: session.etag,
-      body: { ...body, id: address.id },
-      database: session.target.database,
-      container: session.target.container
-    }
-  }
+  return { ok: true, body: { ...body, id: address.id } }
 }
 
 /** The draft as a body to send: a JSON object, system properties stripped. */
@@ -608,6 +766,11 @@ function noticeForOutcome(
       // Only a create can clash; the draft is kept for another id.
       return { kind: 'id-clash', address }
   }
+}
+
+/** A Document Write or a point-read of the current version is in flight. */
+export function isBusy(session: EditSession): boolean {
+  return session.saving || session.pendingRead !== undefined
 }
 
 /** True when the draft differs from the server copy's editor text; for a

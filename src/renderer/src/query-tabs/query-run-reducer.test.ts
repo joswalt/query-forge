@@ -263,6 +263,25 @@ describe('queryRunReducer with Addressable Rows', () => {
     expect(next.resultSets[0].rowMarks).toEqual({ 0: 'gone' })
   })
 
+  it('restores a struck-through row in place once Save as new document creates it again', () => {
+    const row = { id: 'a1', customerId: 'c1', name: 'Ada', ...system }
+    const gone = queryRunReducer(cosmosRun([row], ['/customerId']), {
+      type: 'documentGone',
+      target,
+      address: { id: 'a1', partitionKey: 'c1' }
+    })
+    const created = { id: 'a1', customerId: 'c1', name: 'Ada Lovelace', ...system, _rid: 'rid-new' }
+    const next = queryRunReducer(gone, {
+      type: 'documentSaved',
+      target,
+      address: { id: 'a1', partitionKey: 'c1' },
+      document: created,
+      previous: row
+    })
+    expect(next.resultSets[0].rows).toEqual([created])
+    expect(next.resultSets[0].rowMarks).toEqual({ 0: 'edited' })
+  })
+
   it('removes the rows of a deleted document from the grid, keeping later row marks on their rows', () => {
     const run = queryRunReducer(
       cosmosRun(
