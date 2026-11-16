@@ -149,7 +149,7 @@ export function writeOutcomeMeaning(outcome: WriteOutcome): string | undefined {
     case 'unchanged':
       return 'only removed paths that were already absent; nothing sent'
     case 'concurrent-change':
-      return 'edited after the plan was made, so skipped. Re-run to apply to its current version'
+      return 'edited after the plan was made, so skipped. Retry checks it again against its current version'
     case 'failed':
       return 'see message'
     case 'not-attempted':

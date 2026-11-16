@@ -45,7 +45,7 @@ export function outcomeBarSegments(
 }
 
 /** Documents a run left without being written or left unchanged: what the
- * re-run hint is about. */
+ * "Retry N not written" counts. */
 export function notWrittenCount(counts: Record<WriteOutcome, number>): number {
   return WRITE_OUTCOMES.filter((o) => o !== 'written' && o !== 'unchanged').reduce(
     (sum, o) => sum + counts[o],
