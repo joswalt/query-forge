@@ -734,6 +734,38 @@
   gap: 8px;
 }
 
+/* Write Confirmation on prod (decision 05): a prod-coloured strip across the
+   top of the drawer, and Confirm / Cancel in place of the write button. */
+.document-drawer[data-env='prod'] {
+  border-top: 3px solid var(--env-color);
+}
+
+.document-drawer__env-strip {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: -12px -12px 0;
+  padding: 6px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--env-color) 45%, var(--qf-border));
+  background: color-mix(in srgb, var(--env-color) 14%, transparent);
+  color: var(--env-color);
+  font-size: 12px;
+}
+
+.document-drawer__env-strip span {
+  color: var(--qf-fg);
+}
+
+.document-drawer__confirm-prompt {
+  color: var(--env-color, var(--qf-fg));
+  font-weight: 600;
+}
+
+.document-drawer__confirm {
+  border-color: var(--qf-err);
+  color: var(--qf-err);
+}
+
 .document-drawer__id {
   overflow: hidden;
   color: var(--qf-muted);

@@ -1210,6 +1210,11 @@ export const QueryWorkspace = forwardRef<
               isWritableProfile(connections, activeTab.run.documentTarget?.connectionId)
                 ? {
                     state: activeTab.editSessions,
+                    // Looked up on every render, so the Write Confirmation policy and
+                    // the prod strip follow an Environment edited meanwhile (story 58).
+                    connectionProfile: connections.find(
+                      (c) => c.id === activeTab.run.documentTarget?.connectionId
+                    ),
                     onEdit: (row) => handleEditDocument(activeTab.id, row),
                     onSelect: (key) => dispatchEdit(activeTab.id, { type: 'selected', key }),
                     onClose: (key) => dispatchEdit(activeTab.id, { type: 'closed', key }),
