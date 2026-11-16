@@ -1,40 +1,70 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import type { DmlVerb } from '@shared/dml/dml-statement'
 import {
   WRITE_OUTCOMES,
   writeOutcomeLabel,
+  writeOutcomeMeaning,
   type DmlSampleDocument,
-  type DmlSampleValue
+  type DmlSampleValue,
+  type WriteOutcome
 } from '@shared/types/dml-run'
+import { matchesTypedDmlConfirmation, typedDmlConfirmation } from '@shared/write-confirmation'
 import type { DmlRunState } from './dml-run-state'
+import { projectedRequestCharge, writeRequestChargeBand } from './dml-ru-estimate'
+import { notWrittenCount, outcomeBarSegments, writeOutcomeTone } from './dml-run-report'
 import './dml-run.css'
 
 const count = (n: number): string => n.toLocaleString()
 const ru = (n: number): string => n.toFixed(2)
+/** RU for estimates and running totals: `21k`, `1.2k`, `640.25`. */
+const ruCompact = (n: number): string =>
+  n >= 10_000 ? `${(n / 1000).toFixed(0)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : n.toFixed(2)
+const kilobytes = (bytes: number): string => `${(bytes / 1024).toFixed(1)} KB`
 const documents = (n: number): string => `${count(n)} document${n === 1 ? '' : 's'}`
+
+/** The confirm button names the action (story 93): "Delete 1,840
+ * documents", "Update 1,840 documents in prod". */
+function confirmLabel(verb: DmlVerb, matchCount: number, production: boolean): string {
+  const action = `${verb === 'DELETE' ? 'Delete' : 'Update'} ${documents(matchCount)}`
+  if (!production) return action
+  return `${action} ${verb === 'DELETE' ? 'from' : 'in'} prod`
+}
 
 /**
  * The DML confirmation strip, docked under the editor toolbar so the
  * statement stays visible (story 80). Every Environment confirms (story
- * 82); focus starts on Cancel so Enter cancels (story 90). `blockedShortcut`
- * changes each time Cmd/Ctrl+Enter was swallowed, flashing the hint (story
- * 91).
+ * 82); `production` (the shared Write Confirmation policy, read from the
+ * current profile) turns it red and asks for the verb and count to be
+ * typed first (stories 83, 84). Focus starts on Cancel so Enter cancels
+ * (story 90). `blockedShortcut` changes each time Cmd/Ctrl+Enter was
+ * swallowed, flashing the hint (story 91). Mount it keyed by plan, so
+ * typed text never carries over to another plan.
  */
 export function DmlConfirmStrip({
   dml,
+  production,
   blockedShortcut,
   onConfirm,
   onCancel
 }: {
   dml: DmlRunState | undefined
+  production: boolean
   blockedShortcut: number
   onConfirm: () => void
   onCancel: () => void
 }): React.JSX.Element | null {
+  const [typed, setTyped] = useState('')
   if (dml?.phase !== 'confirming') return null
   const verbs = dml.verb === 'DELETE' ? 'Deletes' : 'Updates'
-  const action = dml.verb === 'DELETE' ? 'Delete' : 'Update'
+  const ready = !production || matchesTypedDmlConfirmation(typed, dml.verb, dml.matchCount)
+  const band = writeRequestChargeBand(dml)
   return (
-    <div className="dml-strip" role="alertdialog" aria-label="Confirm DML Statement">
+    <div
+      className="dml-strip"
+      data-env={production ? 'prod' : undefined}
+      role="alertdialog"
+      aria-label="Confirm DML Statement"
+    >
       <div className="dml-strip__line">
         <span className="dml-strip__icon" aria-hidden="true">
           !
@@ -44,20 +74,79 @@ export function DmlConfirmStrip({
             {verbs} {documents(dml.matchCount)}
           </b>{' '}
           in <code>{dml.container}</code>
+          {production && <b> (production)</b>}
         </span>
-        <span className="dml-muted">Driving Query {ru(dml.drivingQueryRequestCharge)} RU</span>
+        <span className="dml-muted">
+          Driving Query {ru(dml.drivingQueryRequestCharge)} RU
+          {band && (
+            <>
+              {' · '}writes ≈ {ruCompact(band.low)}–{ruCompact(band.high)} RU{' '}
+              <abbr title="No estimate exists before writing: this is from Microsoft's published anchors (about 5.5 RU per 1 KB insert; replace and patch about twice that). The run report projects the total from the first writes.">
+                (rough)
+              </abbr>
+            </>
+          )}
+          {dml.averageDocumentSize !== undefined &&
+            ` · avg document ${kilobytes(dml.averageDocumentSize)}`}
+        </span>
       </div>
       <div className="dml-strip__line">
+        {production && (
+          <TypeToConfirm
+            expected={typedDmlConfirmation(dml.verb, dml.matchCount)}
+            value={typed}
+            matched={ready}
+            onChange={setTyped}
+          />
+        )}
         <ShortcutHint blocked={blockedShortcut} />
         <span className="dml-spacer" />
         <button type="button" autoFocus onClick={onCancel}>
           Cancel
         </button>
-        <button type="button" className="dml-danger" onClick={onConfirm}>
-          {action} {documents(dml.matchCount)}
+        <button type="button" className="dml-danger" disabled={!ready} onClick={onConfirm}>
+          {confirmLabel(dml.verb, dml.matchCount, production)}
         </button>
       </div>
     </div>
+  )
+}
+
+/** The prod type-to-confirm field. Enter in it never confirms (story 92):
+ * confirming takes a click, or Tab to the button and Enter. */
+function TypeToConfirm({
+  expected,
+  value,
+  matched,
+  onChange
+}: {
+  expected: string
+  value: string
+  matched: boolean
+  onChange: (value: string) => void
+}): React.JSX.Element {
+  return (
+    <label className="dml-gate">
+      <span>
+        Type <code>{expected}</code> to confirm
+      </span>
+      <input
+        type="text"
+        spellCheck={false}
+        autoComplete="off"
+        value={value}
+        placeholder={expected}
+        aria-label={`Type ${expected} to confirm`}
+        data-ok={matched ? 'true' : undefined}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault()
+            e.stopPropagation()
+          }
+        }}
+      />
+    </label>
   )
 }
 
@@ -79,17 +168,20 @@ function ShortcutHint({ blocked }: { blocked: number }): React.JSX.Element {
 }
 
 /**
- * Above the results: planning progress with Cancel (story 76), the run
- * report while committing and after (stories 97, 99, 109), and the
- * end notices for zero matches (story 79) and a discarded plan (story 94).
- * Outcome rows themselves stream into the ordinary results grid below.
+ * Above the results: planning progress with Cancel (story 76), the sample
+ * while confirming (stories 85 to 88), the run report while committing
+ * and after (stories 97 to 100, 104, 109, 110), and the end notices for
+ * zero matches (story 79) and a discarded plan (story 94). Outcome rows
+ * themselves stream into the ordinary results grid below, with raw codes.
  */
 export function DmlRunReport({
   dml,
-  onCancel
+  onCancel,
+  onPreviewQuery
 }: {
   dml: DmlRunState | undefined
   onCancel: () => void
+  onPreviewQuery: () => void
 }): React.JSX.Element | null {
   if (!dml) return null
   switch (dml.phase) {
@@ -105,7 +197,7 @@ export function DmlRunReport({
         </div>
       )
     case 'confirming':
-      return <DmlSample dml={dml} />
+      return <DmlSample dml={dml} onPreviewQuery={onPreviewQuery} />
     case 'zero-matches':
       return (
         <div className="dml-notice" role="status">
@@ -140,29 +232,33 @@ function CommitReport({
   const past = dml.verb === 'DELETE' ? 'deleted' : 'updated'
   const ing = dml.verb === 'DELETE' ? 'Deleting' : 'Updating'
   let head: string
-  let completed: number
   let total: number
   let requestCharge: number
-  let counts: Partial<Record<(typeof WRITE_OUTCOMES)[number], number>> | undefined
+  let counts: Record<WriteOutcome, number>
+  let projected: number | undefined
   if (dml.phase === 'committing') {
-    ;({ completed, total } = dml.progress)
-    requestCharge = dml.drivingQueryRequestCharge + dml.progress.requestCharge
-    head = `${dml.stopRequested ? 'Stopping after in-flight writes' : ing}… ${count(completed)} of ${count(total)}`
+    const { progress } = dml
+    total = progress.total
+    counts = progress.counts
+    requestCharge = dml.drivingQueryRequestCharge + progress.requestCharge
+    projected = projectedRequestCharge(dml)
+    head = `${dml.stopRequested ? 'Stopping after in-flight writes' : ing}… ${count(progress.completed)} of ${count(total)}`
   } else {
     const { summary } = dml
     counts = summary.counts
     total = dml.matchCount
-    completed = total
     requestCharge = summary.drivingQueryRequestCharge + summary.writeRequestCharge
     head = `${dml.phase === 'stopped' ? 'Stopped' : 'Done'}: ${past} ${count(summary.counts.written)} of ${count(total)}`
   }
   const duration = dml.phase === 'committing' ? undefined : dml.summary.durationMs
+  const completed = dml.phase === 'committing' ? dml.progress.completed : total
   return (
     <div className="dml-report" role="status">
       <div className="dml-report__head">
         <b>{head}</b>
         <span className="dml-muted">
-          {ru(requestCharge)} RU
+          {ruCompact(requestCharge)} RU
+          {projected !== undefined && ` of ≈ ${ruCompact(projected)} projected`}
           {duration !== undefined && ` · ${(duration / 1000).toFixed(1)} s`}
         </span>
         <span className="dml-spacer" />
@@ -173,22 +269,77 @@ function CommitReport({
         )}
       </div>
       <div
-        className="dml-bar"
+        className="dml-stack"
         role="progressbar"
+        aria-label="Progress by Write Outcome"
         aria-valuemin={0}
         aria-valuemax={total}
         aria-valuenow={completed}
       >
-        <span style={{ width: `${total > 0 ? (completed / total) * 100 : 100}%` }} />
+        {outcomeBarSegments(counts, total).map((segment) => (
+          <span
+            key={segment.key}
+            data-tone={segment.tone}
+            style={{ width: `${total > 0 ? (segment.count / total) * 100 : 0}%` }}
+          />
+        ))}
       </div>
-      {counts && (
-        <p className="dml-counts">
-          {WRITE_OUTCOMES.filter((o) => (counts?.[o] ?? 0) > 0)
-            .map((o) => `${writeOutcomeLabel(o, dml.verb)}: ${count(counts?.[o] ?? 0)}`)
-            .join(' · ')}
-        </p>
-      )}
+      <OutcomeTiles verb={dml.verb} counts={counts} />
+      {dml.phase !== 'committing' && <ReRunHint verb={dml.verb} counts={counts} />}
     </div>
+  )
+}
+
+/** One tile per non-zero Write Outcome: count, label and one-line meaning
+ * (story 104). The grid below keeps the raw codes. */
+function OutcomeTiles({
+  verb,
+  counts
+}: {
+  verb: DmlVerb
+  counts: Record<WriteOutcome, number>
+}): React.JSX.Element | null {
+  const shown = WRITE_OUTCOMES.filter((o) => counts[o] > 0)
+  if (shown.length === 0) return null
+  return (
+    <div className="dml-tiles">
+      {shown.map((outcome) => {
+        const meaning = writeOutcomeMeaning(outcome)
+        return (
+          <div key={outcome} className="dml-tile" data-tone={writeOutcomeTone(outcome)}>
+            <b>{count(counts[outcome])}</b>
+            <span>{writeOutcomeLabel(outcome, verb)}</span>
+            {meaning && <small>{meaning}</small>}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/** After a run that left documents unwritten, why running the statement
+ * again is not the same as finishing this run (story 110). */
+function ReRunHint({
+  verb,
+  counts
+}: {
+  verb: DmlVerb
+  counts: Record<WriteOutcome, number>
+}): React.JSX.Element | null {
+  const n = notWrittenCount(counts)
+  if (n === 0) return null
+  return (
+    <p className="dml-rerun">
+      {documents(n)} {n === 1 ? 'was' : 'were'} not written. Running the statement again
+      re-evaluates <code>WHERE</code> against current data and writes whatever still matches
+      {verb === 'UPDATE' && (
+        <>
+          ; a <code>SET</code> that depends on the old value (<code>c.n = c.n + 1</code>) applies
+          again to documents already updated
+        </>
+      )}
+      .
+    </p>
   )
 }
 
@@ -208,13 +359,17 @@ function partitionKeyLevel(level: unknown): string {
 
 /**
  * While confirming, the first matches of the held DML Plan (stories 85 to
- * 87): the address of each, and for `UPDATE` current → new for each `SET`
- * path. Nothing is written yet.
+ * 87): the address of each (`id` and one column per partition key level),
+ * and for `UPDATE` current → new for each `SET` path. Nothing is written
+ * yet. "Preview as query ↗" opens the matches in full in a new tab while
+ * this plan stays held (stories 88, 89).
  */
 function DmlSample({
-  dml
+  dml,
+  onPreviewQuery
 }: {
   dml: Extract<DmlRunState, { phase: 'confirming' }>
+  onPreviewQuery: () => void
 }): React.JSX.Element | null {
   const { sample, partitionKeyPaths } = dml
   if (sample.length === 0) return null
@@ -228,6 +383,15 @@ function DmlSample({
         <span className="dml-muted">
           first {count(sample.length)} of {count(dml.matchCount)} matches · nothing written yet
         </span>
+        <span className="dml-spacer" />
+        <button
+          type="button"
+          className="btn--ghost dml-link"
+          title="Opens a new tab with SELECT * over the same WHERE (normal Row Limit applies). This plan stays held here."
+          onClick={onPreviewQuery}
+        >
+          Preview as query ↗
+        </button>
       </div>
       <div className="dml-sample__scroll">
         <table className="dml-sample__table">

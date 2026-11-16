@@ -135,6 +135,23 @@ export function writeOutcomeLabel(outcome: WriteOutcome, verb: DmlVerb): string 
   }
 }
 
+/** A Write Outcome's one-line meaning on its run report tile (spec
+ * "Renderer DML run state"); undefined where the label says it all. */
+export function writeOutcomeMeaning(outcome: WriteOutcome): string | undefined {
+  switch (outcome) {
+    case 'unchanged':
+      return 'only removed paths that were already absent; nothing sent'
+    case 'concurrent-change':
+      return 'edited after the plan was made, so skipped. Re-run to apply to its current version'
+    case 'failed':
+      return 'see message'
+    case 'not-attempted':
+      return 'the run was cancelled before this write was sent'
+    default:
+      return undefined
+  }
+}
+
 export function emptyOutcomeCounts(): Record<WriteOutcome, number> {
   return Object.fromEntries(WRITE_OUTCOMES.map((o) => [o, 0])) as Record<WriteOutcome, number>
 }
