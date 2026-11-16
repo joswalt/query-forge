@@ -23,6 +23,15 @@ export type GridCopy =
   | { scope: 'cell'; value: unknown }
   | { scope: 'rows'; rows: unknown[]; extractorId?: ExtractorId }
 
+/** An extra per-row action the parent offers (e.g. Edit document…), shown
+ * in the row context menu. `disabledReason` disables it and becomes its
+ * tooltip. */
+export interface GridRowAction {
+  label: string
+  onSelect: () => void
+  disabledReason?: string
+}
+
 interface ContextMenuState {
   x: number
   y: number
@@ -72,7 +81,10 @@ export function ResultsGrid({
   columns,
   streaming,
   onExpandCell,
-  onCopy
+  onCopy,
+  rowActions,
+  rowGutterAction,
+  rowClassName
 }: {
   rows: unknown[]
   columns: string[]
@@ -82,20 +94,39 @@ export function ResultsGrid({
   /** Open the JSON inspector for one cell's value (user story 41). */
   onExpandCell: (value: unknown) => void
   onCopy: (copy: GridCopy) => void
+  /** Extra context-menu actions for a row, after the copy actions. */
+  rowActions?: (rowIndex: number) => GridRowAction[]
+  /** A one-click action shown on hover in the row-number gutter (✎). */
+  rowGutterAction?: (rowIndex: number) => GridRowAction | undefined
+  /** Extra classes for a row (edited tint, struck through, highlighted). */
+  rowClassName?: (rowIndex: number) => string | undefined
 }): React.JSX.Element {
   const [activeCell, setActiveCell] = useState<{ rowIndex: number; columnId: string } | null>(
     null
   )
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set())
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
+  // Selection is by row index: when rows leave the grid (a drawer delete),
+  // the indexes would point at other rows, so drop them.
+  const [seenRowCount, setSeenRowCount] = useState(rows.length)
+  if (rows.length !== seenRowCount) {
+    if (rows.length < seenRowCount) {
+      setSelectedRows(new Set())
+      setActiveCell(null)
+      setContextMenu(null)
+    }
+    setSeenRowCount(rows.length)
+  }
   const parentRef = useRef<HTMLDivElement>(null)
   const measureCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const hasGutterAction = rowGutterAction !== undefined
 
   const tableColumns = useMemo<ColumnDef<unknown>[]>(() => {
     const rowNumberColumn: ColumnDef<unknown> = {
       id: '__row_number__',
       header: '#',
-      size: 48,
+      // Room for the hover ✎ beside the number when rows can be edited.
+      size: hasGutterAction ? 64 : 48,
       enableResizing: false,
       cell: (info) => info.row.index + 1
     }
@@ -106,7 +137,7 @@ export function ResultsGrid({
       accessorFn: (row) => (isRecord(row) ? row[column] : undefined)
     }))
     return [rowNumberColumn, ...dataColumns]
-  }, [columns])
+  }, [columns, hasGutterAction])
 
   const table = useReactTable({
     data: rows,
@@ -272,10 +303,18 @@ export function ResultsGrid({
           {virtualizer.getVirtualItems().map((virtualRow) => {
             const row = tableRows[virtualRow.index]
             const isSelected = selectedRows.has(virtualRow.index)
+            const extraClass = rowClassName?.(virtualRow.index)
+            const gutterAction = rowGutterAction?.(virtualRow.index)
             return (
               <div
                 key={row.id}
-                className={`results-grid__row${isSelected ? ' is-selected' : ''}`}
+                className={[
+                  'results-grid__row',
+                  isSelected ? 'is-selected' : '',
+                  extraClass ?? ''
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
                 style={{
                   position: 'absolute',
                   top: 0,
@@ -346,6 +385,21 @@ export function ResultsGrid({
                       {isRowNumber
                         ? flexRender(cell.column.columnDef.cell, cell.getContext())
                         : formatCellValue(rawValue)}
+                      {isRowNumber && gutterAction && (
+                        <button
+                          type="button"
+                          className="results-grid__gutter-action"
+                          aria-label={gutterAction.label}
+                          aria-disabled={gutterAction.disabledReason ? true : undefined}
+                          title={gutterAction.disabledReason ?? gutterAction.label}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            if (!gutterAction.disabledReason) gutterAction.onSelect()
+                          }}
+                        >
+                          ✎
+                        </button>
+                      )}
                     </div>
                   )
                 })}
@@ -422,6 +476,28 @@ export function ResultsGrid({
               ))}
             </ul>
           </li>
+          {rowActions && (
+            <>
+              <li role="separator" className="results-grid__menu-separator" />
+              {rowActions(contextMenu.rowIndex).map((action) => (
+                <li key={action.label}>
+                  <button
+                    type="button"
+                    aria-disabled={action.disabledReason ? true : undefined}
+                    className={action.disabledReason ? 'is-disabled' : undefined}
+                    title={action.disabledReason}
+                    onClick={() => {
+                      if (action.disabledReason) return
+                      action.onSelect()
+                      setContextMenu(null)
+                    }}
+                  >
+                    {action.label}
+                  </button>
+                </li>
+              ))}
+            </>
+          )}
           <li role="separator" className="results-grid__menu-separator" />
           {contextMenu.columnId !== null && (
             <li>

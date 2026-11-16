@@ -2,13 +2,30 @@ import { ipcMain } from 'electron'
 import type { WebContents } from 'electron'
 import { randomUUID } from 'node:crypto'
 import type { ConnectionManager } from '../connection-manager/connection-manager'
-import type { QueryExecutionClient } from '../query-execution/query-execution-client'
+import type {
+  PlanDmlRequest,
+  PlanRetryRequest,
+  QueryExecutionClient
+} from '../query-execution/query-execution-client'
 import type {
   QueryHistoryRepository,
   QueryHistoryStatus,
   RecordQueryHistoryInput
 } from '../local-storage/query-history-repository'
 import type { PreferencesStore } from '../local-storage/preferences-store'
+import type {
+  DmlCommitProgress,
+  DmlCommitSummary,
+  DmlPlanningProgress,
+  DmlPlanSummary
+} from '@shared/types/dml-run'
+import {
+  commitEndedHistoryInput,
+  planningEndedHistoryInput,
+  type DmlHistoryContext,
+  type DmlRunTarget,
+  type PlannedDmlRun
+} from './dml-history'
 import type { ConnectionProfile, TestConnectionRequest } from '@shared/types/connection-profile'
 import type {
   DatabaseMetadata,
@@ -16,6 +33,12 @@ import type {
   QueryOptions,
   TestResult
 } from '@shared/types/database-provider'
+import type {
+  DocumentWrite,
+  DocumentWriteResult,
+  ReadDocumentRequest,
+  ReadDocumentResult
+} from '@shared/types/document-writer'
 
 /**
  * Registers the Query Execution Service's connection-lifecycle IPC surface
@@ -50,6 +73,31 @@ export function registerQueryExecutionIpcHandlers(
   // normally has to make this call instead; history recording is the one
   // main-side consumer that needs the distinction).
   const cancelledExecutionIds = new Set<ExecutionId>()
+  // DML Plans main knows about, by `planId`, mirroring the plans the Query
+  // Execution Service holds (dropped on the same events) so a commit can
+  // record its Query History Entry without the renderer. Never holds
+  // document ids or values.
+  const plannedRuns = new Map<string, { tabId: string; run: PlannedDmlRun }>()
+  const dropPlannedRuns = (
+    matches: (held: { tabId: string; run: PlannedDmlRun }) => boolean
+  ): void => {
+    for (const [planId, held] of plannedRuns) if (matches(held)) plannedRuns.delete(planId)
+  }
+  // Each tab's last committed run as main needs it for a Retry's history
+  // entry (statement and target, never documents), mirroring the Query
+  // Execution Service's: dropped by a plan for an ordinary statement in the
+  // tab, releaseTab and disconnect.
+  const committedRuns = new Map<string, { planId: string; target: DmlRunTarget }>()
+  // Planning runs in progress, so releaseTab can mark those of a closed
+  // tab: like the Query Execution Service's, they end normally but hold
+  // nothing (and record nothing: a plan dropped without a commit).
+  const planningRuns = new Set<{ tabId: string; tabReleased: boolean }>()
+  const historyDeps: StreamQueryDeps = {
+    manager,
+    historyRepository,
+    preferencesStore,
+    cancelledExecutionIds
+  }
   ipcMain.handle(
     'connection:test',
     async (_event, request: TestConnectionRequest): Promise<TestResult> => {
@@ -71,12 +119,36 @@ export function registerQueryExecutionIpcHandlers(
   })
 
   ipcMain.handle('connection:disconnect', async (_event, profileId: string): Promise<void> => {
+    dropPlannedRuns((held) => held.run.profileId === profileId)
+    for (const [tabId, committed] of committedRuns) {
+      if (committed.target.profileId === profileId) committedRuns.delete(tabId)
+    }
     await client.disconnect(profileId)
   })
 
   ipcMain.handle(
     'connection:getMetadata',
     async (_event, profileId: string): Promise<DatabaseMetadata> => client.getMetadata(profileId)
+  )
+
+  // Document Writes and point-reads (Cosmos DB, ADR 0004). Plain
+  // request/response: a single Document Write can't be cancelled and
+  // records no Query History Entry. Read-only is enforced in the Query
+  // Execution Service, not here.
+  ipcMain.handle(
+    'document:write',
+    async (
+      _event,
+      request: { profileId: string; write: DocumentWrite }
+    ): Promise<DocumentWriteResult> => client.writeDocument(request.profileId, request.write)
+  )
+
+  ipcMain.handle(
+    'document:read',
+    async (
+      _event,
+      { profileId, ...document }: { profileId: string } & ReadDocumentRequest
+    ): Promise<ReadDocumentResult> => client.readDocument(profileId, document)
   )
 
   // Execution ID minting (GLOSSARY.md: "an opaque identifier the Query
@@ -94,18 +166,213 @@ export function registerQueryExecutionIpcHandlers(
   // reply for `invoke` to return (see preload/index.ts's `queryStreamApi`
   // doc for the full rationale).
   ipcMain.on('query:execute', (event, request: QueryExecuteRequest) => {
-    void streamQuery(client, event.sender, request, {
-      manager,
-      historyRepository,
-      preferencesStore,
-      cancelledExecutionIds
-    })
+    void streamQuery(client, event.sender, request, historyDeps)
   })
 
   ipcMain.on('query:cancel', (_event, request: QueryCancelRequest) => {
     cancelledExecutionIds.add(request.executionId)
     client.cancel(request.profileId, request.executionId)
   })
+
+  // DML Statement runs (Cosmos DB, ADR 0004 amendments). Both take an
+  // Execution ID minted by `query:start` and are cancelled through
+  // `query:cancel`. Planning streams progress on `dml:progress:<id>` and
+  // ends on `dml:planned:<id>` or `query:error:<id>`; a commit streams its
+  // outcome rows on the same channels as a query.
+  //
+  // Each run records one Query History Entry, here in main and never from
+  // the renderer, at exactly two points: when planning ends without a held
+  // plan (failed, cancelled or nothing matched) and when a commit ends. A
+  // plan dropped without a commit records nothing, and the Driving Query
+  // never records an entry of its own.
+  /** Forwards one planning run (`planDml` or `planRetry`) to the renderer
+   * and records its Query History Entry if it ends without a held plan;
+   * a held plan is remembered for its commit. `target` is undefined only
+   * for a Retry of a run main doesn't know, which records nothing. */
+  const trackPlanning = (
+    sender: WebContents,
+    tabId: string,
+    executionId: ExecutionId,
+    target: DmlRunTarget | undefined,
+    start: (onProgress: (progress: DmlPlanningProgress) => void) => Promise<DmlPlanSummary>
+  ): void => {
+    const startedAt = Date.now()
+    let progress: DmlPlanningProgress | undefined
+    // A new plan in the tab replaces the held one, even if it is refused.
+    dropPlannedRuns((held) => held.tabId === tabId)
+    const planning = { tabId, tabReleased: false }
+    planningRuns.add(planning)
+    start((latest) => {
+      progress = latest
+      if (!sender.isDestroyed()) sender.send(`dml:progress:${executionId}`, latest)
+    })
+      .then(
+        (summary) => {
+          const finishedAt = Date.now()
+          if (planning.tabReleased) {
+            // The tab closed while planning: nothing is held or recorded.
+          } else if (target && summary.planId) {
+            plannedRuns.set(summary.planId, {
+              tabId,
+              run: {
+                ...target,
+                verb: summary.verb,
+                matchCount: summary.matchCount,
+                drivingQueryRequestCharge: summary.drivingQueryRequestCharge,
+                planningDurationMs: finishedAt - startedAt
+              }
+            })
+          } else if (target) {
+            recordDmlHistory(historyDeps, sender, target.profileId, (context) =>
+              planningEndedHistoryInput(
+                target,
+                {
+                  kind: 'no-matches',
+                  verb: summary.verb,
+                  drivingQueryRequestCharge: summary.drivingQueryRequestCharge
+                },
+                { startedAt, finishedAt },
+                context
+              )
+            )
+          }
+          if (!sender.isDestroyed()) sender.send(`dml:planned:${executionId}`, summary)
+        },
+        (err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err)
+          if (!sender.isDestroyed()) sender.send(`query:error:${executionId}`, message)
+          if (!target) return
+          const ending = {
+            kind: 'failed' as const,
+            wasCancelled: cancelledExecutionIds.has(executionId),
+            message,
+            progress
+          }
+          const times = { startedAt, finishedAt: Date.now() }
+          recordDmlHistory(historyDeps, sender, target.profileId, (context) =>
+            planningEndedHistoryInput(target, ending, times, context)
+          )
+        }
+      )
+      .finally(() => {
+        planningRuns.delete(planning)
+        cancelledExecutionIds.delete(executionId)
+      })
+  }
+
+  ipcMain.on('dml:plan', (event, request: PlanDmlRequest) => {
+    // A plan for an ordinary statement ends any Retry of the tab's last run.
+    committedRuns.delete(request.tabId)
+    trackPlanning(
+      event.sender,
+      request.tabId,
+      request.executionId,
+      dmlRunTarget(manager, request),
+      (onProgress) => client.planDml(request, onProgress)
+    )
+  })
+
+  // A Retry (GLOSSARY.md) runs the original statement, which the Query
+  // Execution Service holds; its entry records that statement with the
+  // retry marker, taken from the committed run main remembers.
+  ipcMain.on('dml:planRetry', (event, request: PlanRetryRequest) => {
+    const committed = committedRuns.get(request.tabId)
+    const target =
+      committed?.planId === request.planId ? { ...committed.target, retry: true } : undefined
+    trackPlanning(event.sender, request.tabId, request.executionId, target, (onProgress) =>
+      client.planRetry(request, onProgress)
+    )
+  })
+
+  ipcMain.on('dml:commit', (event, request: { planId: string; executionId: ExecutionId }) => {
+    const { sender } = event
+    // Taken out at commit start, so a tab closed mid-commit still records
+    // its entry when the commit ends; the committed run set here is the
+    // one releaseTab removes, so nothing is left for a closed tab.
+    const planned = plannedRuns.get(request.planId)
+    plannedRuns.delete(request.planId)
+    if (planned) {
+      const { profileId, statement, databaseName, containerName } = planned.run
+      committedRuns.set(planned.tabId, {
+        planId: request.planId,
+        target: { profileId, statement, databaseName, containerName }
+      })
+    }
+    void streamCommit(client, sender, request, (ending, times) => {
+      if (!planned) return
+      recordDmlHistory(historyDeps, sender, planned.run.profileId, (context) =>
+        commitEndedHistoryInput(
+          planned.run,
+          ending.kind === 'failed'
+            ? { ...ending, wasCancelled: cancelledExecutionIds.has(request.executionId) }
+            : ending,
+          times,
+          context
+        )
+      )
+    }).finally(() => cancelledExecutionIds.delete(request.executionId))
+  })
+
+  ipcMain.handle('dml:discard', async (_event, planId: string): Promise<void> => {
+    plannedRuns.delete(planId)
+    return client.discardPlan(planId)
+  })
+
+  ipcMain.handle('dml:releaseTab', async (_event, tabId: string): Promise<void> => {
+    dropPlannedRuns((held) => held.tabId === tabId)
+    committedRuns.delete(tabId)
+    for (const planning of planningRuns) if (planning.tabId === tabId) planning.tabReleased = true
+    return client.releaseTab(tabId)
+  })
+}
+
+/** The run's database and container: the request's, else the profile's
+ * (as the Cosmos DB Provider falls back). */
+function dmlRunTarget(manager: ConnectionManager, request: PlanDmlRequest): DmlRunTarget {
+  const config = manager.get(request.profileId)?.config
+  const cosmos = config?.kind === 'cosmos-db' ? config : undefined
+  return {
+    profileId: request.profileId,
+    statement: request.statement,
+    databaseName: request.database ?? cosmos?.database,
+    containerName: request.container ?? cosmos?.container
+  }
+}
+
+type CommitStreamEnding =
+  | { kind: 'ended'; summary: DmlCommitSummary }
+  | { kind: 'failed'; message: string; progress?: DmlCommitProgress }
+
+/** Forwards a commit's outcome rows to the renderer on the query channels,
+ * then reports how it ended (the last chunk's summary, or the failure with
+ * the last progress seen). Keeps draining after the sender is gone: the
+ * commit still runs to its end in the Query Execution Service. */
+async function streamCommit(
+  client: QueryExecutionClient,
+  sender: WebContents,
+  { planId, executionId }: { planId: string; executionId: ExecutionId },
+  onEnded: (ending: CommitStreamEnding, times: { startedAt: number; finishedAt: number }) => void
+): Promise<void> {
+  const startedAt = Date.now()
+  let progress: DmlCommitProgress | undefined
+  let summary: DmlCommitSummary | undefined
+  let ending: CommitStreamEnding
+  try {
+    for await (const chunk of client.commitDml(planId, executionId)) {
+      progress = chunk.meta?.dmlProgress ?? progress
+      summary = chunk.meta?.dmlSummary ?? summary
+      if (!sender.isDestroyed()) sender.send(`query:chunk:${executionId}`, chunk)
+    }
+    if (!sender.isDestroyed()) sender.send(`query:done:${executionId}`)
+    ending = summary
+      ? { kind: 'ended', summary }
+      : { kind: 'failed', message: 'The commit ended without a summary.', progress }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    if (!sender.isDestroyed()) sender.send(`query:error:${executionId}`, message)
+    ending = { kind: 'failed', message, progress }
+  }
+  onEnded(ending, { startedAt, finishedAt: Date.now() })
 }
 
 interface QueryExecuteRequest {
@@ -234,12 +501,29 @@ function recordHistory(deps: StreamQueryDeps, input: RecordHistoryInput): void {
   try {
     const profile = deps.manager.get(input.profileId)
     const { persistQueryText } = deps.preferencesStore.get().queryHistory
-    deps.historyRepository.record(
-      toRecordQueryHistoryInput(input, profile?.name, persistQueryText)
-    )
+    deps.historyRepository.record(toRecordQueryHistoryInput(input, profile?.name, persistQueryText))
   } catch (err) {
     console.error('Failed to record query history entry:', err)
   }
+}
+
+/** Best-effort, like `recordHistory`: looks up the profile name and the
+ * query-text opt-in, records the DML Statement run's entry, and tells the
+ * renderer history changed. */
+function recordDmlHistory(
+  deps: StreamQueryDeps,
+  sender: WebContents,
+  profileId: string,
+  build: (context: DmlHistoryContext) => RecordQueryHistoryInput
+): void {
+  try {
+    const { persistQueryText } = deps.preferencesStore.get().queryHistory
+    const profileName = deps.manager.get(profileId)?.name
+    deps.historyRepository.record(build({ profileName, persistQueryText }))
+  } catch (err) {
+    console.error('Failed to record query history entry:', err)
+  }
+  if (!sender.isDestroyed()) sender.send('history:updated')
 }
 
 function requireProfile(manager: ConnectionManager, profileId: string): ConnectionProfile {

@@ -10,12 +10,37 @@ import type {
   ResultChunk,
   TestResult
 } from '@shared/types/database-provider'
+import type {
+  DocumentWrite,
+  DocumentWriteResult,
+  ReadDocumentRequest,
+  ReadDocumentResult
+} from '@shared/types/document-writer'
+import type { DmlPlanningProgress, DmlPlanSummary, DmlRetrySummary } from '@shared/types/dml-run'
 import type { QueryExecutionRequest, QueryExecutionResponse } from './protocol'
 import { AsyncQueue } from './async-queue'
 
 interface PendingResult {
   resolve: (value: unknown) => void
   reject: (err: Error) => void
+  /** `planDml` and `planRetry`: Driving Query progress before the result. */
+  onProgress?: (progress: DmlPlanningProgress) => void
+}
+
+export interface PlanRetryRequest {
+  /** The tab's last committed run's `planId`. */
+  planId: string
+  tabId: string
+  executionId: ExecutionId
+}
+
+export interface PlanDmlRequest {
+  profileId: string
+  tabId: string
+  executionId: ExecutionId
+  statement: string
+  database?: string
+  container?: string
 }
 
 /**
@@ -85,6 +110,71 @@ export class QueryExecutionClient {
       method: 'getMetadata',
       profileId
     })
+  }
+
+  /** One Document Write (ADR 0004). Expected failures (`conflict`,
+   * `precondition-failed`, `not-found`) resolve as typed results; only
+   * unexpected ones, and a read-only refusal, reject. */
+  async writeDocument(profileId: string, write: DocumentWrite): Promise<DocumentWriteResult> {
+    return this.sendForResult<DocumentWriteResult>({
+      id: randomUUID(),
+      method: 'writeDocument',
+      profileId,
+      write
+    })
+  }
+
+  async readDocument(profileId: string, document: ReadDocumentRequest): Promise<ReadDocumentResult> {
+    return this.sendForResult<ReadDocumentResult>({
+      id: randomUUID(),
+      method: 'readDocument',
+      profileId,
+      document
+    })
+  }
+
+  /** Plans a DML Statement run (ADR 0004 amendments): `onProgress` sees
+   * the Driving Query's progress, the promise resolves with the plan's
+   * numbers (no `planId` when nothing matched). Cancellable by Execution ID. */
+  planDml(
+    request: PlanDmlRequest,
+    onProgress: (progress: DmlPlanningProgress) => void
+  ): Promise<DmlPlanSummary> {
+    return this.sendForResult<DmlPlanSummary>(
+      { id: randomUUID(), method: 'planDml', ...request },
+      onProgress
+    )
+  }
+
+  /** Plans a Retry of the tab's last committed run (ADR 0004 amendment):
+   * resolves with the plan's numbers plus `scopeCount`. Cancellable by
+   * Execution ID. */
+  planRetry(
+    request: PlanRetryRequest,
+    onProgress: (progress: DmlPlanningProgress) => void
+  ): Promise<DmlRetrySummary> {
+    return this.sendForResult<DmlRetrySummary>(
+      { id: randomUUID(), method: 'planRetry', ...request },
+      onProgress
+    )
+  }
+
+  /** Writes exactly the held DML Plan, streaming one Write Outcome row per
+   * document. Cancellable by Execution ID. */
+  commitDml(planId: string, executionId: ExecutionId): AsyncIterable<ResultChunk> {
+    const id = randomUUID()
+    const queue = new AsyncQueue<ResultChunk>()
+    this.pendingStreams.set(id, queue)
+    this.ensureChild().postMessage({ id, method: 'commitDml', planId, executionId })
+    return queue
+  }
+
+  async discardPlan(planId: string): Promise<void> {
+    await this.sendForResult({ id: randomUUID(), method: 'discardPlan', planId })
+  }
+
+  async releaseTab(tabId: string): Promise<void> {
+    await this.sendForResult({ id: randomUUID(), method: 'releaseTab', tabId })
   }
 
   /** Fire-and-forget by design, mirroring `DatabaseProvider.cancel()`'s own
@@ -167,9 +257,16 @@ export class QueryExecutionClient {
     this.pendingStreams.clear()
   }
 
-  private sendForResult<T>(request: QueryExecutionRequest): Promise<T> {
+  private sendForResult<T>(
+    request: QueryExecutionRequest,
+    onProgress?: (progress: DmlPlanningProgress) => void
+  ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      this.pendingResults.set(request.id, { resolve: resolve as (value: unknown) => void, reject })
+      this.pendingResults.set(request.id, {
+        resolve: resolve as (value: unknown) => void,
+        reject,
+        onProgress
+      })
       this.ensureChild().postMessage(request)
     })
   }
@@ -177,6 +274,11 @@ export class QueryExecutionClient {
   private onMessage(response: QueryExecutionResponse): void {
     if (response.kind === 'refreshSecret') {
       void this.answerSecretRefresh(response.id, response.profileId)
+      return
+    }
+
+    if (response.kind === 'progress') {
+      this.pendingResults.get(response.id)?.onProgress?.(response.value)
       return
     }
 

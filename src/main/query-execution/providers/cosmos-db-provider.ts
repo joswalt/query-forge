@@ -11,6 +11,23 @@ import type {
   SecretRefresher,
   TestResult
 } from '@shared/types/database-provider'
+import { isNoneValue, MAX_PATCH_OPERATIONS } from '@shared/types/document-writer'
+import { readPartitionKeyPath } from '@shared/partition-key-path'
+import type { DrivingQuery } from '@shared/dml/dml-statement'
+import type {
+  ContainerTarget,
+  DrivingQueryOptions,
+  DrivingQueryPage,
+  DocumentPatchOperation,
+  DocumentWrite,
+  DocumentWriteOptions,
+  DocumentWriteResult,
+  DocumentWriter,
+  PartitionKeyValue,
+  ReadDocumentRequest,
+  ReadDocumentResult,
+  StoredDocument
+} from '@shared/types/document-writer'
 import { RefreshingTokenSource } from '../refreshing-token-source'
 import { toConnectionErrorMessage } from '../scrub-error-message'
 
@@ -31,7 +48,11 @@ export interface CosmosDatabaseLike {
   read(): Promise<unknown>
   container(id: string): CosmosContainerLike
   readonly containers: {
-    readAll(): { fetchAll(): Promise<{ resources: Array<{ id: string }> }> }
+    readAll(): {
+      fetchAll(): Promise<{
+        resources: Array<{ id: string; partitionKey?: { paths?: string[] } }>
+      }>
+    }
   }
 }
 
@@ -40,16 +61,91 @@ export interface CosmosFeedResponseLike {
   requestCharge: number
   /** `FeedResponse.hasMoreResults` — true while a continuation token remains. */
   hasMoreResults?: boolean
+  /** Present with `populateQueryMetrics`. Typed `string` by the SDK, but at
+   * runtime an object keyed by partition key range id whose values are
+   * `QueryMetrics`; read only through `retrievedDocuments`. */
+  queryMetrics?: unknown
+}
+
+/** The `RequestOptions` this Provider sets on a point operation. The
+ * access condition `type` is a plain string in the SDK, and anything other
+ * than exactly `"IfMatch"` silently becomes If-None-Match, so it is pinned
+ * here. `contentResponseOnWriteEnabled` is deliberately absent: setting it
+ * to false throws on non-batch item operations. */
+export interface CosmosItemOptionsLike {
+  accessCondition?: { type: 'IfMatch'; condition: string }
+  priorityLevel?: 'Low'
+}
+
+/** `ItemResponse`'s useful slice: `resource` is `undefined` for a 404 read. */
+export interface CosmosItemResponseLike {
+  resource?: unknown
+  requestCharge: number
+}
+
+export type CosmosPatchOperationLike =
+  | { op: 'set'; path: string; value: unknown }
+  | { op: 'remove'; path: string }
+
+/** `container.item(id, partitionKey)`'s point operations. */
+export interface CosmosItemLike {
+  read(options?: CosmosItemOptionsLike): Promise<CosmosItemResponseLike>
+  replace(body: unknown, options?: CosmosItemOptionsLike): Promise<CosmosItemResponseLike>
+  patch(
+    body: { operations: CosmosPatchOperationLike[] },
+    options?: CosmosItemOptionsLike
+  ): Promise<CosmosItemResponseLike>
+  delete(options?: CosmosItemOptionsLike): Promise<CosmosItemResponseLike>
+}
+
+/** The SDK's `SqlQuerySpec`: query text plus named parameters. */
+export interface CosmosQuerySpecLike {
+  query: string
+  parameters?: Array<{ name: string; value: unknown }>
 }
 
 export interface CosmosContainerLike {
   read(): Promise<{ resource?: { partitionKey?: { paths?: string[] } } }>
+  /** Always called with an explicit partition key: the SDK targets the
+   * None key when it is omitted (ADR 0004). */
+  item(id: string, partitionKey: PartitionKeyValue): CosmosItemLike
   readonly items: {
+    create(body: object, options?: CosmosItemOptionsLike): Promise<CosmosItemResponseLike>
     query(
-      query: string,
-      options?: { maxItemCount?: number; abortSignal?: AbortSignal }
+      query: string | CosmosQuerySpecLike,
+      options?: {
+        maxItemCount?: number
+        abortSignal?: AbortSignal
+        priorityLevel?: 'Low'
+        populateQueryMetrics?: boolean
+      }
     ): { getAsyncIterator(): AsyncIterable<CosmosFeedResponseLike> }
   }
+}
+
+/**
+ * Sums `retrievedDocumentCount`/`retrievedDocumentSize` over a page's
+ * query metrics, one entry per partition key range. Nothing when the page
+ * carries no usable metrics (e.g. an emulator that doesn't send them).
+ */
+function retrievedDocuments(
+  queryMetrics: unknown
+): { retrievedDocumentCount: number; retrievedDocumentSize: number } | Record<string, never> {
+  if (queryMetrics === null || typeof queryMetrics !== 'object') return {}
+  let retrievedDocumentCount = 0
+  let retrievedDocumentSize = 0
+  let found = false
+  for (const metrics of Object.values(queryMetrics as Record<string, unknown>)) {
+    const { retrievedDocumentCount: count, retrievedDocumentSize: size } = (metrics ?? {}) as {
+      retrievedDocumentCount?: unknown
+      retrievedDocumentSize?: unknown
+    }
+    if (typeof count !== 'number' || typeof size !== 'number') continue
+    retrievedDocumentCount += count
+    retrievedDocumentSize += size
+    found = true
+  }
+  return found ? { retrievedDocumentCount, retrievedDocumentSize } : {}
 }
 
 /** A minimal `@azure/core-auth` `TokenCredential` shape — just enough for
@@ -168,10 +264,14 @@ const DEFAULT_PAGE_SIZE = 100
  * Service; owns its own `CosmosClient` and never touches `safeStorage` or
  * Secret Ciphertext directly (ADR 0001).
  */
-export class CosmosDbProvider implements DatabaseProvider {
+export class CosmosDbProvider implements DatabaseProvider, DocumentWriter {
   private client: CosmosClientLike | undefined
   private config: CosmosConnectionConfig | undefined
   private readonly abortControllers = new Map<ExecutionId, AbortController>()
+  /** Each container's partition key paths, read once from its definition
+   * and keyed by database/container. A container's partition key can't
+   * change, so entries are never invalidated, only dropped on disconnect. */
+  private readonly partitionKeyPathsByContainer = new Map<string, Promise<string[]>>()
 
   constructor(private readonly clientFactory: CosmosClientFactory = defaultClientFactory) {}
 
@@ -218,6 +318,7 @@ export class CosmosDbProvider implements DatabaseProvider {
     this.client = undefined
     this.config = undefined
     this.abortControllers.clear()
+    this.partitionKeyPathsByContainer.clear()
   }
 
   async *executeQuery(query: string, options: QueryOptions = {}): AsyncIterable<ResultChunk> {
@@ -238,6 +339,11 @@ export class CosmosDbProvider implements DatabaseProvider {
         .query(query, { maxItemCount: DEFAULT_PAGE_SIZE, abortSignal: controller.signal })
         .getAsyncIterator()
 
+      // Read (once per container) alongside the first page. Best-effort:
+      // without it no row is addressable, but the query still runs.
+      const partitionKeyPaths = this.partitionKeyPathsOf(options).catch(() => undefined)
+      let isFirstChunk = true
+
       const maxRows = options.maxRows
       let returned = 0
       for await (const page of iterator) {
@@ -251,9 +357,15 @@ export class CosmosDbProvider implements DatabaseProvider {
         // sliced, or the server still holds a continuation. A query with
         // exactly `maxRows` results is therefore not flagged.
         const truncated = capped && (rows.length < page.resources.length || !!page.hasMoreResults)
+        const paths = isFirstChunk ? await partitionKeyPaths : undefined
+        isFirstChunk = false
         yield {
           rows,
-          meta: { ru: page.requestCharge, ...(truncated ? { truncated: true } : {}) }
+          meta: {
+            ru: page.requestCharge,
+            ...(truncated ? { truncated: true } : {}),
+            ...(paths ? { partitionKeyPaths: paths } : {})
+          }
         }
 
         // Leaving the loop calls the SDK iterator's `return()`; it fetches
@@ -293,53 +405,169 @@ export class CosmosDbProvider implements DatabaseProvider {
         objects.push({
           name: d.id,
           kind: 'database',
-          children: containers.map(
-            (c): DatabaseMetadataObject => ({ name: c.id, kind: 'container', database: d.id })
-          )
+          children: containers.map((c) => toContainerObject(c.id, d.id, c.partitionKey?.paths))
         })
       }
       return { objects }
     }
 
-    const database = this.client.database(this.config.database)
+    const databaseId = this.config.database
+    const database = this.client.database(databaseId)
 
     if (!this.config.container) {
+      // `containers.readAll` already carries each container's partition
+      // key definition, so its children cost nothing extra.
       const { resources } = await database.containers.readAll().fetchAll()
       return {
-        objects: resources.map(
-          (c): DatabaseMetadataObject => ({
-            name: c.id,
-            kind: 'container',
-            database: this.config?.database
-          })
-        )
+        objects: resources.map((c) => toContainerObject(c.id, databaseId, c.partitionKey?.paths))
       }
     }
 
-    const container = this.requireContainer()
-    const { resource } = await container.read()
-    const partitionKeyPaths = resource?.partitionKey?.paths ?? []
-
     return {
       objects: [
-        {
-          name: this.config.container,
-          kind: 'container',
-          database: this.config.database,
-          children: partitionKeyPaths.map((path): DatabaseMetadataObject => ({
-            name: path,
-            kind: 'partition-key'
-          }))
-        }
+        toContainerObject(this.config.container, databaseId, await this.partitionKeyPathsOf())
       ]
     }
+  }
+
+  async writeDocument(
+    write: DocumentWrite,
+    options: DocumentWriteOptions = {}
+  ): Promise<DocumentWriteResult> {
+    const container = this.requireContainer(write)
+    const priority: CosmosItemOptionsLike = options.priorityLevel
+      ? { priorityLevel: options.priorityLevel }
+      : {}
+    const ifMatch = (etag: string): CosmosItemOptionsLike => ({
+      accessCondition: { type: 'IfMatch', condition: etag },
+      ...priority
+    })
+    try {
+      switch (write.kind) {
+        case 'create': {
+          // `items.create` takes its partition key from the body, so the
+          // body must agree with the address; and it invents a random `id`
+          // when the body has none, so the `id` is always sent explicitly.
+          // An explicit partition key can't be passed instead (story 145):
+          // in @azure/cosmos 4.10.1 `create(body, options)` always derives
+          // it with `extractPartitionKeys(body, definition)` and ignores
+          // any `partitionKey` in the request options.
+          assertBodyMatchesAddress(write, await this.partitionKeyPathsOf(write))
+          return stored(await container.items.create({ ...write.body, id: write.id }, priority))
+        }
+        case 'replace':
+          return stored(
+            await container
+              .item(write.id, write.partitionKey)
+              .replace(write.body, ifMatch(write.ifMatch))
+          )
+        case 'patch':
+          if (write.operations.length > MAX_PATCH_OPERATIONS) {
+            throw new Error(
+              `A patch can change at most ${MAX_PATCH_OPERATIONS} properties at once (got ${write.operations.length}).`
+            )
+          }
+          return stored(
+            await container
+              .item(write.id, write.partitionKey)
+              .patch(
+                { operations: write.operations.map(toSdkPatchOperation) },
+                ifMatch(write.ifMatch)
+              )
+          )
+        case 'delete': {
+          const { requestCharge } = await container
+            .item(write.id, write.partitionKey)
+            .delete(ifMatch(write.ifMatch))
+          return { outcome: 'success', requestCharge }
+        }
+      }
+    } catch (err) {
+      const outcome = EXPECTED_WRITE_FAILURES.get(statusCodeOf(err))
+      if (outcome) return { outcome, requestCharge: errorRequestCharge(err) }
+      throw err
+    }
+  }
+
+  async readDocument(request: ReadDocumentRequest): Promise<ReadDocumentResult> {
+    const { resource, requestCharge } = await this.requireContainer(request)
+      .item(request.id, request.partitionKey)
+      .read()
+    // The SDK resolves a 404 point-read with `resource: undefined` instead
+    // of throwing.
+    if (resource === undefined) return { outcome: 'not-found', requestCharge }
+    return { outcome: 'success', document: resource as StoredDocument, requestCharge }
+  }
+
+  readPartitionKeyPaths(target: ContainerTarget): Promise<string[]> {
+    return this.partitionKeyPathsOf(target)
+  }
+
+  async *runDrivingQuery(
+    query: DrivingQuery,
+    options: DrivingQueryOptions
+  ): AsyncIterable<DrivingQueryPage> {
+    const container = this.requireContainer(options)
+    const controller = new AbortController()
+    if (options.executionId) this.abortControllers.set(options.executionId, controller)
+    try {
+      // No `maxRows`: a Driving Query is never capped by a Row Limit; the
+      // Query Execution Service stops iterating at its ceiling instead.
+      // Low priority so bulk work yields to the application's traffic
+      // (ignored by accounts without priority-based execution).
+      const iterator = container.items
+        .query(
+          { query: query.query, parameters: query.parameters },
+          {
+            maxItemCount: DEFAULT_PAGE_SIZE,
+            abortSignal: controller.signal,
+            priorityLevel: 'Low',
+            // For the average document size behind the rough write-RU band.
+            populateQueryMetrics: true
+          }
+        )
+        .getAsyncIterator()
+      for await (const page of iterator) {
+        yield {
+          rows: page.resources,
+          requestCharge: page.requestCharge,
+          ...retrievedDocuments(page.queryMetrics)
+        }
+      }
+    } finally {
+      if (options.executionId) this.abortControllers.delete(options.executionId)
+    }
+  }
+
+  /** The container's partition key paths from its cached definition. A
+   * failed read is not cached, so the next call tries again. */
+  private partitionKeyPathsOf(target?: { database?: string; container?: string }): Promise<string[]> {
+    const container = this.requireContainer(target)
+    const key = JSON.stringify([
+      target?.database ?? this.config?.database,
+      target?.container ?? this.config?.container
+    ])
+    let paths = this.partitionKeyPathsByContainer.get(key)
+    if (!paths) {
+      paths = container.read().then(({ resource }) => resource?.partitionKey?.paths ?? [])
+      this.partitionKeyPathsByContainer.set(key, paths)
+      paths.catch(() => {
+        if (this.partitionKeyPathsByContainer.get(key) === paths) {
+          this.partitionKeyPathsByContainer.delete(key)
+        }
+      })
+    }
+    return paths
   }
 
   /** Centralizes the "connected, with database + container configured"
    * precondition that both `executeQuery` and `getMetadata`'s fully-scoped
    * branch need, rather than repeating the `client.database(...).container(...)`
    * chain at each call site. */
-  private requireContainer(options?: QueryOptions): CosmosContainerLike {
+  private requireContainer(options?: {
+    database?: string
+    container?: string
+  }): CosmosContainerLike {
     const database = options?.database ?? this.config?.database
     const container = options?.container ?? this.config?.container
     if (!this.client || !database || !container) {
@@ -349,6 +577,84 @@ export class CosmosDbProvider implements DatabaseProvider {
     }
     return this.client.database(database).container(container)
   }
+}
+
+/** A container node for Database Metadata, with its partition key paths as
+ * `partition-key` children. */
+function toContainerObject(
+  name: string,
+  database: string,
+  partitionKeyPaths: string[] = []
+): DatabaseMetadataObject {
+  return {
+    name,
+    kind: 'container',
+    database,
+    children: partitionKeyPaths.map((path) => ({ name: path, kind: 'partition-key' }))
+  }
+}
+
+/** The HTTP statuses a Document Write expects and reports as typed
+ * outcomes: 409 is only ever the `id` clash on create, 412 a Concurrent
+ * Change. */
+const EXPECTED_WRITE_FAILURES = new Map<number | undefined, 'conflict' | 'precondition-failed' | 'not-found'>([
+  [409, 'conflict'],
+  [412, 'precondition-failed'],
+  [404, 'not-found']
+])
+
+function statusCodeOf(err: unknown): number | undefined {
+  const code = (err as { code?: unknown } | null)?.code
+  return typeof code === 'number' ? code : undefined
+}
+
+/** A failed point operation's RU charge exists only in its error headers. */
+function errorRequestCharge(err: unknown): number {
+  const headers = (err as { headers?: Record<string, unknown> } | null)?.headers
+  const charge = Number(headers?.['x-ms-request-charge'])
+  return Number.isFinite(charge) ? charge : 0
+}
+
+function stored(response: CosmosItemResponseLike): DocumentWriteResult {
+  return {
+    outcome: 'success',
+    document: response.resource as StoredDocument,
+    requestCharge: response.requestCharge
+  }
+}
+
+/**
+ * Refuses a create whose body would land at a different address than the
+ * Document Write names: a body `id` other than the write's, or a partition
+ * key level whose body value differs from the address (a missing property
+ * is the None value `{}`). Paths are Cosmos partition key paths such as
+ * `/customerId` or `/address/zip`.
+ */
+function assertBodyMatchesAddress(
+  write: { id: string; partitionKey: PartitionKeyValue; body: object },
+  partitionKeyPaths: string[]
+): void {
+  const body = write.body as Record<string, unknown>
+  if (body.id !== undefined && body.id !== write.id) {
+    throw new Error(`The document's id doesn't match the address "${write.id}".`)
+  }
+  const levels = Array.isArray(write.partitionKey) ? write.partitionKey : [write.partitionKey]
+  partitionKeyPaths.forEach((path, index) => {
+    const expected = levels[index]
+    const actual = readPartitionKeyPath(body, path)
+    const matches = isNoneValue(expected) ? !actual.found : actual.found && actual.value === expected
+    if (!matches) {
+      throw new Error(`The document's ${path} doesn't match the partition key value it is addressed by.`)
+    }
+  })
+}
+
+/** Copies only the fields the SDK patch operation needs, so nothing else
+ * riding on a Document Write's operation reaches the wire. */
+function toSdkPatchOperation(operation: DocumentPatchOperation): CosmosPatchOperationLike {
+  return operation.op === 'set'
+    ? { op: 'set', path: operation.path, value: operation.value }
+    : { op: 'remove', path: operation.path }
 }
 
 function requireCosmosConfig(profile: ConnectionProfile): CosmosConnectionConfig {

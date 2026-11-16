@@ -6,14 +6,43 @@ import type {
 } from '@shared/types/database-provider'
 import { getExtractor, type ExtractorId, type ExtractorOptions } from '@shared/extractors/extract'
 import { inferTableName } from '@shared/extractors/infer-table-name'
+import {
+  detectDmlStatement,
+  dmlMatchesQuery,
+  parseDmlStatement,
+  type DmlVerb
+} from '@shared/dml/dml-statement'
+import { requiresWriteConfirmation } from '@shared/write-confirmation'
 import { FALLBACK_TABLE_NAME } from '@shared/extractors/sql-extractors'
+import type { DocumentWrite, StoredDocument } from '@shared/types/document-writer'
 import { QueryEditor, type QueryEditorHandle } from '../editor/QueryEditor'
 import { initialExportState, type ExportState } from '../results/export-state'
 import { useExtractorSettings } from '../results/extractor-settings'
+import { addressOf, type DocumentAddress } from '../results/addressable-row'
+import {
+  editSessionReducer,
+  editSessionsReducer,
+  findEditSession,
+  hasUnsavedEdits,
+  initialEditSessionsState,
+  isBusy,
+  planDelete,
+  planSave,
+  planSaveAsNew,
+  type DocumentTarget,
+  type EditSession,
+  type EditSessionMode,
+  type EditSessionEvent,
+  type EditSessionsAction,
+  type EditSessionsState
+} from '../results/edit-session'
+import { remoteErrorMessage } from '../results/remote-error'
 import { CloseIcon, PlayIcon, PlusIcon } from '../icons'
 import { ENVIRONMENT_LABEL, groupByEnvironment } from '../connection-environment'
 import { QueryResultsView, type ExportLoadedRequest } from './QueryResultsView'
 import { EditorResizer, useEditorHeight } from './EditorResizer'
+import { DmlConfirmStrip, DmlRunReport } from './DmlRunPanels'
+import { retryScope } from './dml-run-state'
 import {
   initialQueryRunState,
   MAX_DISPLAY_ROWS,
@@ -45,6 +74,9 @@ interface QueryTabState {
   tableNameOverride: string | undefined
   run: QueryRunState
   exportState: ExportState
+  /** Documents open in the drawer (Cosmos DB). Kept per tab and across
+   * re-runs: a session is tied to its document's address, not a row. */
+  editSessions: EditSessionsState
 }
 
 /** The table name inferred for a tab, if any (Extractors story 38): the Cosmos
@@ -53,6 +85,13 @@ interface QueryTabState {
  * changes until the user edits the Table field. */
 function inferredTableName(tab: QueryTabState): string | undefined {
   return tab.options?.container ?? inferTableName(tab.queryText)
+}
+
+/** Whether the Connection Profile a run's rows came from takes Document
+ * Writes: it still exists and isn't read-only. */
+function isWritableProfile(connections: ConnectionProfile[], connectionId: string | undefined): boolean {
+  const profile = connections.find((c) => c.id === connectionId)
+  return profile !== undefined && !profile.readOnly
 }
 
 function tableNameFor(tab: QueryTabState): string {
@@ -100,7 +139,8 @@ function createTab(index: number, seed?: OpenQuerySeed): QueryTabState {
     rowLimit: DEFAULT_ROW_LIMIT,
     tableNameOverride: undefined,
     run: initialQueryRunState,
-    exportState: initialExportState
+    exportState: initialExportState,
+    editSessions: initialEditSessionsState
   }
 }
 
@@ -227,11 +267,28 @@ export const QueryWorkspace = forwardRef<
   const nextIndexRef = useRef(restored.tabs.length + 1)
   const executionsRef = useRef(new Map<string, ExecutionHandle>())
   const exportExecutionsRef = useRef(new Map<string, ExecutionHandle>())
+  const nextEditSessionKeyRef = useRef(1)
+  /** Tabs that planned a DML Statement, so closing one sends `releaseTab`. */
+  const dmlTabsRef = useRef(new Set<string>())
+  /** Bumped each time Cmd/Ctrl+Enter is swallowed at a DML confirmation. */
+  const [blockedShortcut, setBlockedShortcut] = useState(0)
+  /** A "DML matches" tab just opened, to run once it is in `tabs`. */
+  const [pendingMatchesRun, setPendingMatchesRun] = useState<string | null>(null)
   const [extractorSettings, updateExtractorSettings] = useExtractorSettings()
   const editorRef = useRef<QueryEditorHandle>(null)
   const editorHeight = useEditorHeight()
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId)
+
+  useEffect(() => {
+    if (!pendingMatchesRun) return
+    const tab = tabs.find((t) => t.id === pendingMatchesRun)
+    if (!tab) return
+    setPendingMatchesRun(null)
+    handleExecute(tab.id, tab.queryText)
+    // handleExecute reads the latest tabs; only a newly opened matches tab should run.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingMatchesRun, tabs])
 
   // The name field belongs to the tab it was opened on.
   useEffect(() => setSaveName(null), [activeTabId])
@@ -282,6 +339,283 @@ export const QueryWorkspace = forwardRef<
     updateTab(tabId, (t) => ({ ...t, run: queryRunReducer(t.run, action) }))
   }
 
+  function dispatchEdit(tabId: string, action: EditSessionsAction): void {
+    updateTab(tabId, (t) => ({ ...t, editSessions: editSessionsReducer(t.editSessions, action) }))
+  }
+
+  function dispatchSession(tabId: string, key: number, event: EditSessionEvent): void {
+    dispatchEdit(tabId, { type: 'session', key, event })
+  }
+
+  /** Edit document… (stories 15 to 19) and Delete document… (story 2):
+   * open the drawer at once, then read the latest version of the document.
+   * A row's own data is never edited or deleted. */
+  function handleEditDocument(tabId: string, row: unknown, mode: EditSessionMode = 'edit'): void {
+    const tab = tabs.find((t) => t.id === tabId)
+    const target = tab?.run.documentTarget
+    const partitionKeyPaths = tab?.run.partitionKeyPaths
+    if (!tab || !target || !partitionKeyPaths) return
+    const check = addressOf(row, partitionKeyPaths)
+    if (!check.addressable) return
+    openDocument(tabId, tab.editSessions, target, partitionKeyPaths, check.address, row, mode)
+  }
+
+  /** Opens (or focuses) the edit session of the document at `address` and
+   * reads its latest version. `row` is the grid row it came from, if any
+   * (for the `_rid` guard). */
+  function openDocument(
+    tabId: string,
+    editSessions: EditSessionsState,
+    target: DocumentTarget,
+    partitionKeyPaths: readonly string[],
+    address: DocumentAddress,
+    row: unknown,
+    mode: EditSessionMode = 'edit'
+  ): void {
+    const existing = findEditSession(editSessions, target, address)
+    const key = existing?.key ?? nextEditSessionKeyRef.current++
+    const action: EditSessionsAction = { type: 'opened', key, target, partitionKeyPaths, address, row, mode }
+    // An open session is focused; switching it to Delete reads it again.
+    const next = editSessionsReducer(editSessions, action).sessions.find((s) => s.key === key)
+    dispatchEdit(tabId, action)
+    if (existing && (existing.phase === 'reading' || next?.phase !== 'reading')) return
+    readLatestVersion(tabId, key, target, address)
+  }
+
+  /** Point-reads an edit session's document; a document found deleted
+   * strikes its rows through. */
+  function readLatestVersion(
+    tabId: string,
+    key: number,
+    target: DocumentTarget,
+    address: DocumentAddress
+  ): void {
+    window.api.documents
+      .read(target.connectionId, { ...address, database: target.database, container: target.container })
+      .then((result) => {
+        if (result.outcome === 'success') {
+          dispatchSession(tabId, key, { type: 'readSucceeded', document: result.document })
+        } else {
+          dispatchSession(tabId, key, { type: 'readNotFound' })
+          dispatchRun(tabId, { type: 'documentGone', target, address })
+        }
+      })
+      .catch((err) =>
+        dispatchSession(tabId, key, { type: 'readFailed', message: remoteErrorMessage(err) })
+      )
+  }
+
+  /** New document (stories 4, 21, 26): into the container the tab's rows
+   * came from; prefilled `from` an edit session's body and address. */
+  function handleNewDocument(tabId: string, from?: number): void {
+    const tab = tabs.find((t) => t.id === tabId)
+    const target = tab?.run.documentTarget
+    const partitionKeyPaths = tab?.run.partitionKeyPaths
+    if (!target || !partitionKeyPaths) return
+    const key = nextEditSessionKeyRef.current++
+    dispatchEdit(tabId, { type: 'newDocumentOpened', key, target, partitionKeyPaths, from })
+  }
+
+  /** Open existing after an `id` clash (story 46): the clashing document in
+   * its own edit session, next to the draft. */
+  function handleOpenExisting(tabId: string, key: number, address: DocumentAddress): void {
+    const tab = tabs.find((t) => t.id === tabId)
+    const session = tab?.editSessions.sessions.find((s) => s.key === key)
+    if (!tab || !session) return
+    openDocument(tabId, tab.editSessions, session.target, session.partitionKeyPaths, address, undefined)
+  }
+
+  /** Delete document (stories 30, 34, 43, 44, 48): a delete with the
+   * session's etag. Done (or already deleted): the rows leave the grid and a
+   * toast follows. A Concurrent Change aborts it. */
+  function handleDeleteDocument(tabId: string, key: number): void {
+    const session = tabs.find((t) => t.id === tabId)?.editSessions.sessions.find((s) => s.key === key)
+    if (!session || session.saving) return
+    const plan = planDelete(session)
+    if (!plan.ok) {
+      dispatchSession(tabId, key, { type: 'saveRefused', notice: plan.notice })
+      return
+    }
+    const { target, address } = session
+    dispatchSession(tabId, key, { type: 'deleteStarted' })
+    window.api.documents
+      .write(target.connectionId, plan.write)
+      .then((result) => {
+        if (result.outcome === 'success') {
+          dispatchSession(tabId, key, { type: 'deleteSucceeded', requestCharge: result.requestCharge })
+        } else if (result.outcome === 'conflict') {
+          dispatchSession(tabId, key, {
+            type: 'deleteFailed',
+            message: 'The server refused the delete as an id clash.'
+          })
+          return
+        } else {
+          dispatchSession(tabId, key, {
+            type: 'deleteOutcome',
+            outcome: result.outcome,
+            requestCharge: result.requestCharge
+          })
+          if (result.outcome === 'precondition-failed') return
+        }
+        dispatchRun(tabId, { type: 'documentDeleted', target, address })
+      })
+      .catch((err) => dispatchSession(tabId, key, { type: 'deleteFailed', message: remoteErrorMessage(err) }))
+  }
+
+  /** Review current version: read the document again into the drawer. */
+  function handleReviewDocument(tabId: string, key: number): void {
+    const session = tabs.find((t) => t.id === tabId)?.editSessions.sessions.find((s) => s.key === key)
+    if (!session || session.saving) return
+    dispatchSession(tabId, key, { type: 'reviewRequested' })
+    readLatestVersion(tabId, key, session.target, session.address)
+  }
+
+  function findSession(tabId: string, key: number): EditSession | undefined {
+    return tabs.find((t) => t.id === tabId)?.editSessions.sessions.find((s) => s.key === key)
+  }
+
+  /** Save (stories 22, 24, 29, 33 to 36, 39): a replace with the session's
+   * etag (from the compare read, in the compare view); the grid row updates
+   * in place on success. Create for a New document (stories 31, 45): the
+   * created document goes to the top of the grid. */
+  function handleSaveDocument(tabId: string, key: number): void {
+    const session = findSession(tabId, key)
+    if (!session || isBusy(session) || (!session.serverCopy && !session.newDocument)) return
+    const plan = planSave(session)
+    if (!plan.ok) {
+      dispatchSession(tabId, key, { type: 'saveRefused', notice: plan.notice })
+      return
+    }
+    sendSave(tabId, session, plan.write)
+  }
+
+  /** Save as new document after a 404 on Save (story 47): a create at the
+   * same address with the edits. The struck-through row is restored. */
+  function handleSaveAsNew(tabId: string, key: number): void {
+    const session = findSession(tabId, key)
+    if (!session || isBusy(session)) return
+    const plan = planSaveAsNew(session)
+    if (!plan.ok) {
+      dispatchSession(tabId, key, { type: 'saveRefused', notice: plan.notice })
+      return
+    }
+    sendSave(tabId, session, plan.write, true)
+  }
+
+  /** Compare after a Concurrent Change (story 38): read the current version
+   * into the compare view, keeping the draft. */
+  function handleCompare(tabId: string, key: number): void {
+    const session = findSession(tabId, key)
+    if (!session || isBusy(session) || !session.serverCopy) return
+    dispatchSession(tabId, key, { type: 'compareRequested' })
+    readCurrentVersion(tabId, key, session.target, session.address)
+  }
+
+  /** Overwrite with mine (story 41), compare view only: a fresh read, then
+   * a replace with that read's etag. Never an unconditional write. The draft
+   * sent is the one on screen when it was pressed (and confirmed, on prod). */
+  function handleOverwrite(tabId: string, key: number): void {
+    const session = findSession(tabId, key)
+    if (!session || !session.comparing || isBusy(session)) return
+    const overwriting = editSessionReducer(session, { type: 'overwriteRequested' })
+    dispatchSession(tabId, key, { type: 'overwriteRequested' })
+    readCurrentVersion(tabId, key, session.target, session.address, (document) => {
+      const read = editSessionReducer(overwriting, { type: 'currentVersionRead', document })
+      const plan = planSave(read)
+      if (!plan.ok) {
+        dispatchSession(tabId, key, { type: 'saveRefused', notice: plan.notice })
+        return
+      }
+      sendSave(tabId, read, plan.write)
+    })
+  }
+
+  /** Reload (story 42): discard the edits and read the current version. */
+  function handleReload(tabId: string, key: number): void {
+    const session = findSession(tabId, key)
+    if (!session || isBusy(session)) return
+    dispatchSession(tabId, key, { type: 'reloadRequested' })
+    readLatestVersion(tabId, key, session.target, session.address)
+  }
+
+  /** Reads the current version for Compare or Overwrite with mine; a
+   * document found deleted strikes its rows through (story 32). */
+  function readCurrentVersion(
+    tabId: string,
+    key: number,
+    target: DocumentTarget,
+    address: DocumentAddress,
+    then?: (document: StoredDocument) => void
+  ): void {
+    window.api.documents
+      .read(target.connectionId, { ...address, database: target.database, container: target.container })
+      .then((result) => {
+        if (result.outcome === 'success') {
+          dispatchSession(tabId, key, { type: 'currentVersionRead', document: result.document })
+          then?.(result.document)
+        } else {
+          dispatchSession(tabId, key, { type: 'currentVersionNotFound' })
+          dispatchRun(tabId, { type: 'documentGone', target, address })
+        }
+      })
+      .catch((err) =>
+        dispatchSession(tabId, key, { type: 'currentVersionReadFailed', message: remoteErrorMessage(err) })
+      )
+  }
+
+  /** Sends a Save, Create, Overwrite or Save as new document and applies the
+   * outcome to the edit session and the grid. */
+  function sendSave(tabId: string, session: EditSession, write: DocumentWrite, asNew = false): void {
+    const { key, target, address, serverCopy: previous } = session
+    if (write.kind === 'create') {
+      dispatchSession(tabId, key, {
+        type: 'saveStarted',
+        address: { id: write.id, partitionKey: write.partitionKey },
+        asNew
+      })
+    } else {
+      dispatchSession(tabId, key, { type: 'saveStarted' })
+    }
+    window.api.documents
+      .write(target.connectionId, write)
+      .then((result) => {
+        if (result.outcome === 'success') {
+          if (!result.document) {
+            dispatchSession(tabId, key, {
+              type: 'saveFailed',
+              message: 'The server did not return the saved document.'
+            })
+            return
+          }
+          const document = result.document
+          dispatchSession(tabId, key, {
+            type: 'saveSucceeded',
+            document,
+            requestCharge: result.requestCharge
+          })
+          if (write.kind === 'create' && !asNew) {
+            dispatchRun(tabId, { type: 'documentCreated', target, document })
+          } else if (previous) {
+            dispatchRun(tabId, { type: 'documentSaved', target, address, document, previous })
+          }
+          return
+        }
+        dispatchSession(tabId, key, {
+          type: 'saveOutcome',
+          outcome: result.outcome,
+          requestCharge: result.requestCharge
+        })
+        if (result.outcome === 'not-found' && write.kind !== 'create') {
+          dispatchRun(tabId, { type: 'documentGone', target, address })
+        }
+        // In the compare view a Concurrent Change refreshes the server side.
+        if (result.outcome === 'precondition-failed' && session.comparing) {
+          readCurrentVersion(tabId, key, target, address)
+        }
+      })
+      .catch((err) => dispatchSession(tabId, key, { type: 'saveFailed', message: remoteErrorMessage(err) }))
+  }
+
   function handleNewTab(): void {
     const tab = createTab(nextIndexRef.current++)
     setTabs((prev) => [...prev, tab])
@@ -289,14 +623,29 @@ export const QueryWorkspace = forwardRef<
   }
 
   function handleCloseTab(id: string): void {
+    // Unsaved document edits in the tab's drawer are lost with it (story 27).
+    const closing = tabs.find((tab) => tab.id === id)
+    if (
+      closing?.editSessions.sessions.some(hasUnsavedEdits) &&
+      !window.confirm('Discard your unsaved document edits in this tab?')
+    ) {
+      return
+    }
     // Closing a tab mid-run must not silently abandon a live, RU-consuming
-    // query — cancel it first, same as the Cancel button would.
+    // query — cancel it first, same as the Cancel button would. A DML
+    // commit is the exception (story 141): it runs to its end so its Query
+    // History Entry records what was really written.
     const execution = executionsRef.current.get(id)
-    if (execution) {
+    if (execution && closing?.run.dml?.phase !== 'committing') {
       execution.cancelRequested = true
       execution.cancel()
     }
     executionsRef.current.delete(id)
+    // Drops anything the Query Execution Service holds for this tab (a
+    // DML Plan at the confirmation, the last committed run) and keeps a
+    // run still going from holding anything once it ends. Only tabs that
+    // ran DML hold anything.
+    if (dmlTabsRef.current.delete(id)) window.api.dml.releaseTab(id).catch(() => {})
 
     // Computed from the current render's `tabs`/`activeTabId` directly
     // (not via a `setTabs` functional updater) — this handler runs once per
@@ -316,6 +665,14 @@ export const QueryWorkspace = forwardRef<
     const tab = tabs.find((t) => t.id === tabId)
     if (!tab) return
 
+    // One run at a time per tab (story 111). Cmd/Ctrl+Enter reaches here
+    // even while Run is disabled; at a DML confirmation it is swallowed
+    // with a hint, so repeating Run never commits a bulk write (story 91).
+    if (tab.run.status === 'running') {
+      if (tab.run.dml?.phase === 'confirming') setBlockedShortcut((n) => n + 1)
+      return
+    }
+
     if (!tab.connectionId) {
       dispatchRun(tabId, {
         type: 'failed',
@@ -326,9 +683,42 @@ export const QueryWorkspace = forwardRef<
       return
     }
 
+    // A DML Statement in a Cosmos tab (stories 71-73) never reaches
+    // `queryStream.execute`: a malformed one shows its syntax error before
+    // anything is sent. Partition key paths aren't known here, so SET on a
+    // partition key path is left to the Query Execution Service's re-parse.
+    const connection = connections.find((c) => c.id === tab.connectionId)
+    if (connection?.config.kind === 'cosmos-db' && detectDmlStatement(queryText)) {
+      const parsed = parseDmlStatement(queryText)
+      if (parsed.ok) {
+        const container = tab.options?.container ?? connection.config.container ?? ''
+        handlePlanDml(tab, tab.connectionId, queryText, parsed.statement.verb, container)
+        return
+      }
+      const now = Date.now()
+      dispatchRun(tabId, { type: 'started', startedAt: now })
+      dispatchRun(tabId, {
+        type: 'failed',
+        message: `DML syntax error: ${parsed.error.message}`,
+        finishedAt: now,
+        cancelled: false
+      })
+      return
+    }
+
     const startedAt = Date.now()
     updateTab(tabId, (t) => ({ ...t, lastExecutedQuery: queryText }))
-    dispatchRun(tabId, { type: 'started', startedAt })
+    // Document Writes from these rows go to the container they came from,
+    // even if the Container picker changes later.
+    const documentTarget: DocumentTarget | undefined =
+      connection?.config.kind === 'cosmos-db'
+        ? {
+            connectionId: tab.connectionId,
+            database: tab.options?.database,
+            container: tab.options?.container
+          }
+        : undefined
+    dispatchRun(tabId, { type: 'started', startedAt, documentTarget })
 
     // Placeholder registered *before* the `query:start` round-trip below
     // resolves — without it, a Cancel click during that (brief, but real)
@@ -379,7 +769,153 @@ export const QueryWorkspace = forwardRef<
       })
   }
 
+  /** Plans a DML Statement (stories 75, 76): the Query Execution Service
+   * runs its Driving Query and holds a DML Plan for this tab. */
+  function handlePlanDml(
+    tab: QueryTabState,
+    connectionId: string,
+    statement: string,
+    verb: DmlVerb,
+    container: string
+  ): void {
+    const tabId = tab.id
+    dmlTabsRef.current.add(tabId)
+    // A DML run leaves nothing for "Export all matching rows" to re-run.
+    updateTab(tabId, (t) => ({ ...t, lastExecutedQuery: undefined }))
+    dispatchRun(tabId, {
+      type: 'dmlPlanningStarted',
+      startedAt: Date.now(),
+      verb,
+      container,
+      statement
+    })
+
+    const handle: ExecutionHandle = { cancel: () => {}, cancelRequested: false }
+    executionsRef.current.set(tabId, handle)
+    window.api.dml
+      .plan(connectionId, tabId, statement, tab.options, {
+        onProgress: (progress) => dispatchRun(tabId, { type: 'dmlPlanningProgress', progress }),
+        onPlanned: (summary) => {
+          executionsRef.current.delete(tabId)
+          dispatchRun(tabId, { type: 'dmlPlanned', summary, at: Date.now() })
+        },
+        onError: (message) => {
+          const cancelled = executionsRef.current.get(tabId)?.cancelRequested ?? false
+          executionsRef.current.delete(tabId)
+          dispatchRun(tabId, { type: 'failed', message, finishedAt: Date.now(), cancelled })
+        }
+      })
+      .then((resolved) => attachCancel(tabId, handle, resolved.cancel))
+      .catch((err) => failSetup(tabId, err))
+  }
+
+  /** "Retry N not written" (stories 115 to 122): the Query Execution
+   * Service re-plans the tab's last committed run's own statement, scoped
+   * to the documents it left not written, so the editor's text never
+   * matters (story 118). The run report stays until the Retry commits. */
+  function handleRetryDml(tabId: string): void {
+    const tab = tabs.find((t) => t.id === tabId)
+    const dml = tab?.run.dml
+    if (!tab?.connectionId || (dml?.phase !== 'done' && dml?.phase !== 'stopped')) return
+    const { planId } = dml
+    if (planId === undefined || retryScope(dml) === undefined) return
+    dispatchRun(tabId, { type: 'dmlRetryPlanningStarted', startedAt: Date.now() })
+
+    const handle: ExecutionHandle = { cancel: () => {}, cancelRequested: false }
+    executionsRef.current.set(tabId, handle)
+    window.api.dml
+      .planRetry(tab.connectionId, tabId, planId, {
+        onProgress: (progress) => dispatchRun(tabId, { type: 'dmlPlanningProgress', progress }),
+        onPlanned: (summary) => {
+          executionsRef.current.delete(tabId)
+          dispatchRun(tabId, { type: 'dmlPlanned', summary, at: Date.now() })
+        },
+        onError: (message) => {
+          const cancelled = executionsRef.current.get(tabId)?.cancelRequested ?? false
+          executionsRef.current.delete(tabId)
+          dispatchRun(tabId, { type: 'failed', message, finishedAt: Date.now(), cancelled })
+        }
+      })
+      .then((resolved) => attachCancel(tabId, handle, resolved.cancel))
+      .catch((err) => failSetup(tabId, err))
+  }
+
+  /** "Preview as query ↗" (stories 88, 89): a new "DML matches" tab on
+   * the same connection and container runs `SELECT *` over the planned
+   * statement's `WHERE` under the normal Row Limit. The DML tab stays
+   * busy with its plan held, to confirm or cancel on return. */
+  function handleOpenDmlMatches(tabId: string): void {
+    const tab = tabs.find((t) => t.id === tabId)
+    const dml = tab?.run.dml
+    if (!tab || dml?.phase !== 'confirming') return
+    const queryText = dmlMatchesQuery(dml.statement)
+    if (!queryText) return
+    const matchesTab = createTab(nextIndexRef.current++, {
+      title: 'DML matches',
+      queryText,
+      connectionId: tab.connectionId,
+      options: tab.options
+    })
+    setTabs((prev) => [...prev, matchesTab])
+    setActiveTabId(matchesTab.id)
+    setPendingMatchesRun(matchesTab.id)
+  }
+
+  /** Confirm at the strip: writes exactly the held DML Plan (story 95). */
+  function handleConfirmDml(tabId: string): void {
+    const tab = tabs.find((t) => t.id === tabId)
+    const dml = tab?.run.dml
+    if (!tab?.connectionId || dml?.phase !== 'confirming') return
+    dispatchRun(tabId, { type: 'dmlCommitStarted' })
+
+    const handle: ExecutionHandle = { cancel: () => {}, cancelRequested: false }
+    executionsRef.current.set(tabId, handle)
+    window.api.dml
+      .commit(tab.connectionId, dml.planId, {
+        onChunk: (chunk) => dispatchRun(tabId, { type: 'chunk', chunk }),
+        onDone: () => {
+          executionsRef.current.delete(tabId)
+          dispatchRun(tabId, { type: 'done', finishedAt: Date.now() })
+        },
+        onError: (message) => {
+          executionsRef.current.delete(tabId)
+          dispatchRun(tabId, { type: 'failed', message, finishedAt: Date.now(), cancelled: false })
+        }
+      })
+      .then((resolved) => attachCancel(tabId, handle, resolved.cancel))
+      .catch((err) => failSetup(tabId, err))
+  }
+
+  /** Swaps a placeholder handle's `cancel` for the real one, honoring a
+   * cancel requested during the `query:start` round trip. */
+  function attachCancel(tabId: string, handle: ExecutionHandle, cancel: () => void): void {
+    if (!executionsRef.current.has(tabId)) return
+    handle.cancel = cancel
+    if (handle.cancelRequested) cancel()
+  }
+
+  function failSetup(tabId: string, err: unknown): void {
+    executionsRef.current.delete(tabId)
+    dispatchRun(tabId, {
+      type: 'failed',
+      message: err instanceof Error ? err.message : String(err),
+      finishedAt: Date.now(),
+      cancelled: false
+    })
+  }
+
+  /** Cancel (toolbar or strip/report) means: stop planning, discard a
+   * DML Plan at the confirmation (story 94), or Stop a commit after its
+   * in-flight writes (story 99), or cancel a query. */
   function handleCancel(tabId: string): void {
+    const dml = tabs.find((t) => t.id === tabId)?.run.dml
+    if (dml?.phase === 'confirming') {
+      window.api.dml.discard(dml.planId).catch(() => {})
+      dispatchRun(tabId, { type: 'dmlDiscarded', finishedAt: Date.now() })
+      return
+    }
+    if (dml?.phase === 'committing') dispatchRun(tabId, { type: 'dmlStopRequested' })
+
     const execution = executionsRef.current.get(tabId)
     if (!execution) return
     execution.cancelRequested = true
@@ -573,6 +1109,19 @@ export const QueryWorkspace = forwardRef<
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeConnectionId, needsContainerPicker, hasContainerList, activeIsConnected, activeListUnavailable])
+
+  // Disconnect drops each tab's last committed run in the Query Execution
+  // Service, so its "Retry N not written" goes too (story 126).
+  useEffect(() => {
+    if (!connectedIds) return
+    setTabs((prev) =>
+      prev.map((t) =>
+        t.connectionId && !connectedIds.includes(t.connectionId) && retryScope(t.run.dml) !== undefined
+          ? { ...t, run: queryRunReducer(t.run, { type: 'dmlLastRunDropped' }) }
+          : t
+      )
+    )
+  }, [connectedIds])
 
   async function handleSaveToFile(): Promise<void> {
     if (!activeTab) return
@@ -819,6 +1368,19 @@ export const QueryWorkspace = forwardRef<
             </form>
           )}
 
+          <DmlConfirmStrip
+            key={activeTab.run.dml?.phase === 'confirming' ? activeTab.run.dml.planId : undefined}
+            dml={activeTab.run.dml}
+            // Read from the current profile on every render, so an
+            // Environment edited meanwhile is honoured (decision 05).
+            production={requiresWriteConfirmation(
+              connections.find((c) => c.id === activeTab.connectionId)
+            )}
+            blockedShortcut={blockedShortcut}
+            onConfirm={() => handleConfirmDml(activeTab.id)}
+            onCancel={() => handleCancel(activeTab.id)}
+          />
+
           <QueryEditor
             key={activeTab.id}
             ref={editorRef}
@@ -829,6 +1391,13 @@ export const QueryWorkspace = forwardRef<
           />
 
           <EditorResizer {...editorHeight} />
+
+          <DmlRunReport
+            dml={activeTab.run.dml}
+            onCancel={() => handleCancel(activeTab.id)}
+            onOpenMatchesQuery={() => handleOpenDmlMatches(activeTab.id)}
+            onRetry={() => handleRetryDml(activeTab.id)}
+          />
 
           <QueryResultsView
             run={activeTab.run}
@@ -842,6 +1411,44 @@ export const QueryWorkspace = forwardRef<
             onExportLoaded={(request) => void handleExportLoaded(activeTab.id, request)}
             onExportAll={(resultSet) => handleExportAll(activeTab.id, resultSet)}
             onCancelExport={() => handleCancelExport(activeTab.id)}
+            documentEditing={
+              // Write actions are hidden on a read-only Connection Profile
+              // (story 13); the Query Execution Service refuses regardless.
+              isWritableProfile(connections, activeTab.run.documentTarget?.connectionId)
+                ? {
+                    state: activeTab.editSessions,
+                    // Looked up on every render, so the Write Confirmation policy and
+                    // the prod strip follow an Environment edited meanwhile (story 58).
+                    connectionProfile: connections.find(
+                      (c) => c.id === activeTab.run.documentTarget?.connectionId
+                    ),
+                    onEdit: (row) => handleEditDocument(activeTab.id, row),
+                    onSelect: (key) => dispatchEdit(activeTab.id, { type: 'selected', key }),
+                    onClose: (key) => dispatchEdit(activeTab.id, { type: 'closeRequested', key }),
+                    onDiscard: (key) => dispatchEdit(activeTab.id, { type: 'closed', key }),
+                    onKeepEditing: () => dispatchEdit(activeTab.id, { type: 'closeCancelled' }),
+                    onCompare: (key) => handleCompare(activeTab.id, key),
+                    onBackToEditor: (key) =>
+                      dispatchSession(activeTab.id, key, { type: 'compareClosed' }),
+                    onOverwrite: (key) => handleOverwrite(activeTab.id, key),
+                    onReload: (key) => handleReload(activeTab.id, key),
+                    onSaveAsNew: (key) => handleSaveAsNew(activeTab.id, key),
+                    onDraftChange: (key, text) =>
+                      dispatchSession(activeTab.id, key, { type: 'draftChanged', text }),
+                    onSave: (key) => handleSaveDocument(activeTab.id, key),
+                    onRequestDelete: (row) => handleEditDocument(activeTab.id, row, 'delete'),
+                    onDelete: (key) => handleDeleteDocument(activeTab.id, key),
+                    onReview: (key) => handleReviewDocument(activeTab.id, key),
+                    onEditInstead: (key) =>
+                      dispatchSession(activeTab.id, key, { type: 'editRequested' }),
+                    onToastShown: (key) => dispatchEdit(activeTab.id, { type: 'toastShown', key }),
+                    onNewDocument: (from) => handleNewDocument(activeTab.id, from),
+                    onNewDocumentFieldsChange: (key, fields) =>
+                      dispatchSession(activeTab.id, key, { type: 'newDocumentFieldsChanged', fields }),
+                    onOpenExisting: (key, address) => handleOpenExisting(activeTab.id, key, address)
+                  }
+                : undefined
+            }
           />
         </div>
       )}

@@ -40,6 +40,19 @@ export class ReadOnlyViolationError extends Error {
   }
 }
 
+/** A Document Write (Cosmos DB) attempted on a read-only Connection
+ * Profile. Unlike the Azure SQL keyword guard this is exact, not
+ * best-effort: every Document Write is a change. */
+export class DocumentWriteRefusedError extends Error {
+  constructor() {
+    super(
+      'This connection is read-only: documents cannot be created, changed or deleted. ' +
+        'Edit the connection and clear "read-only" to write.'
+    )
+    this.name = 'DocumentWriteRefusedError'
+  }
+}
+
 /**
  * Removes comments, string literals, and bracket/quote-delimited identifiers
  * so keyword scanning never trips over (or is evaded by) their contents.

@@ -13,6 +13,13 @@ import type {
   ResultChunk,
   TestResult
 } from '@shared/types/database-provider'
+import type {
+  DocumentWrite,
+  DocumentWriteResult,
+  ReadDocumentRequest,
+  ReadDocumentResult
+} from '@shared/types/document-writer'
+import type { DmlPlanningProgress, DmlPlanSummary } from '@shared/types/dml-run'
 import type { ExtractorId, ExtractorOptions } from '@shared/extractors/extract'
 import type { QueryHistoryEntry } from '@shared/types/query-history'
 import type { Preferences } from '@shared/types/preferences'
@@ -66,6 +73,23 @@ const queryExecutionApi = {
 }
 
 export type QueryExecutionApi = typeof queryExecutionApi
+
+/**
+ * The renderer's path to Cosmos DB Document Writes and point-reads (ADR
+ * 0004), proxied through main to the Query Execution Service. Expected
+ * failures (`conflict`, `precondition-failed`, `not-found`) resolve as typed
+ * results; a read-only refusal or an unexpected error rejects with a
+ * scrubbed message. A read-only Connection Profile is refused in the Query
+ * Execution Service whatever the renderer shows.
+ */
+const documentsApi = {
+  write: (profileId: string, write: DocumentWrite): Promise<DocumentWriteResult> =>
+    ipcRenderer.invoke('document:write', { profileId, write }),
+  read: (profileId: string, request: ReadDocumentRequest): Promise<ReadDocumentResult> =>
+    ipcRenderer.invoke('document:read', { profileId, ...request })
+}
+
+export type DocumentsApi = typeof documentsApi
 
 export interface QueryExecutionHandle {
   /** The id main minted for this run — exposed so the renderer can
@@ -138,6 +162,124 @@ const queryStreamApi = {
 }
 
 export type QueryStreamApi = typeof queryStreamApi
+
+export interface DmlPlanHandlers {
+  onProgress: (progress: DmlPlanningProgress) => void
+  onPlanned: (summary: DmlPlanSummary) => void
+  onError: (message: string) => void
+}
+
+/** Subscribes to an execution's channels before anything is sent, so no
+ * event is missed; each terminal handler tears every listener down. */
+function listenOnce(
+  executionId: string,
+  listeners: Record<string, (...args: unknown[]) => void>,
+  terminal: string[]
+): void {
+  const attached = Object.entries(listeners).map(([prefix, listener]) => {
+    const channel = `${prefix}:${executionId}`
+    const wrapped = (_event: IpcRendererEvent, ...args: unknown[]): void => {
+      if (terminal.includes(prefix)) cleanup()
+      listener(...args)
+    }
+    ipcRenderer.on(channel, wrapped)
+    return { channel, wrapped }
+  })
+  function cleanup(): void {
+    for (const { channel, wrapped } of attached) ipcRenderer.removeListener(channel, wrapped)
+  }
+}
+
+/**
+ * The renderer's path to DML Statement runs (Cosmos DB, ADR 0004
+ * amendments). `plan` runs the Driving Query and holds a DML Plan for the
+ * tab; `commit` writes exactly that plan, streaming Write Outcome rows like
+ * a query; both are cancelled through the returned handle. `discard` drops
+ * a held plan and `releaseTab` drops everything held for a closed tab.
+ * Read-only is enforced in the Query Execution Service.
+ */
+const dmlApi = {
+  plan: async (
+    profileId: string,
+    tabId: string,
+    statement: string,
+    target: { database?: string; container?: string } | undefined,
+    handlers: DmlPlanHandlers
+  ): Promise<QueryExecutionHandle> => {
+    const { executionId }: { executionId: ExecutionId } = await ipcRenderer.invoke('query:start')
+    listenOnce(
+      executionId,
+      {
+        'dml:progress': (progress) => handlers.onProgress(progress as DmlPlanningProgress),
+        'dml:planned': (summary) => handlers.onPlanned(summary as DmlPlanSummary),
+        'query:error': (message) => handlers.onError(message as string)
+      },
+      ['dml:planned', 'query:error']
+    )
+    ipcRenderer.send('dml:plan', {
+      profileId,
+      tabId,
+      executionId,
+      statement,
+      database: target?.database,
+      container: target?.container
+    })
+    return {
+      executionId,
+      cancel: () => ipcRenderer.send('query:cancel', { profileId, executionId })
+    }
+  },
+  /** Plans a Retry of the tab's last committed run (`planId`, its plan).
+   * The Query Execution Service re-runs that run's own statement, never
+   * the editor's. `onPlanned` receives a `DmlRetrySummary`. */
+  planRetry: async (
+    profileId: string,
+    tabId: string,
+    planId: string,
+    handlers: DmlPlanHandlers
+  ): Promise<QueryExecutionHandle> => {
+    const { executionId }: { executionId: ExecutionId } = await ipcRenderer.invoke('query:start')
+    listenOnce(
+      executionId,
+      {
+        'dml:progress': (progress) => handlers.onProgress(progress as DmlPlanningProgress),
+        'dml:planned': (summary) => handlers.onPlanned(summary as DmlPlanSummary),
+        'query:error': (message) => handlers.onError(message as string)
+      },
+      ['dml:planned', 'query:error']
+    )
+    ipcRenderer.send('dml:planRetry', { planId, tabId, executionId })
+    return {
+      executionId,
+      cancel: () => ipcRenderer.send('query:cancel', { profileId, executionId })
+    }
+  },
+  commit: async (
+    profileId: string,
+    planId: string,
+    handlers: QueryStreamHandlers
+  ): Promise<QueryExecutionHandle> => {
+    const { executionId }: { executionId: ExecutionId } = await ipcRenderer.invoke('query:start')
+    listenOnce(
+      executionId,
+      {
+        'query:chunk': (chunk) => handlers.onChunk(chunk as ResultChunk),
+        'query:done': () => handlers.onDone(),
+        'query:error': (message) => handlers.onError(message as string)
+      },
+      ['query:done', 'query:error']
+    )
+    ipcRenderer.send('dml:commit', { planId, executionId })
+    return {
+      executionId,
+      cancel: () => ipcRenderer.send('query:cancel', { profileId, executionId })
+    }
+  },
+  discard: (planId: string): Promise<void> => ipcRenderer.invoke('dml:discard', planId),
+  releaseTab: (tabId: string): Promise<void> => ipcRenderer.invoke('dml:releaseTab', tabId)
+}
+
+export type DmlApi = typeof dmlApi
 
 export interface ExportHandle {
   executionId: string
@@ -301,6 +443,8 @@ const api = {
   connections: connectionsApi,
   queryExecution: queryExecutionApi,
   queryStream: queryStreamApi,
+  documents: documentsApi,
+  dml: dmlApi,
   export: exportApi,
   history: historyApi,
   preferences: preferencesApi,

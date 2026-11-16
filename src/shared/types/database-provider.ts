@@ -1,4 +1,5 @@
 import type { ConnectionProfile } from './connection-profile'
+import type { DmlCommitProgress, DmlCommitSummary } from './dml-run'
 
 /**
  * The plaintext form of a credential (GLOSSARY.md: "Decrypted Secret"). Exists
@@ -48,6 +49,15 @@ export interface ResultChunk {
     /** Cosmos DB only: set on the final chunk of a run that stopped at
      * `QueryOptions.maxRows` with more rows still available server-side. */
     truncated?: boolean
+    /** Cosmos DB only: set on the first chunk of a query, the queried
+     * container's partition key paths (e.g. `['/customerId']`), so the
+     * renderer can tell which rows are Addressable Rows. Absent means no
+     * row is addressable. */
+    partitionKeyPaths?: string[]
+    /** Cosmos DB DML commit only: progress so far, on every chunk. */
+    dmlProgress?: DmlCommitProgress
+    /** Cosmos DB DML commit only: the run's summary, on the last chunk. */
+    dmlSummary?: DmlCommitSummary
   }
 }
 

@@ -1,4 +1,21 @@
 import type { ResultChunk } from '@shared/types/database-provider'
+import type { StoredDocument } from '@shared/types/document-writer'
+import { emptyOutcomeCounts } from '@shared/types/dml-run'
+import {
+  addressOf,
+  isFullDocument,
+  sameAddress,
+  type DocumentAddress
+} from '../results/addressable-row'
+import { sameTarget, type DocumentTarget } from '../results/edit-session'
+import {
+  dmlAfterDone,
+  dmlAfterFailure,
+  retryScope,
+  withCommitChunkMeta,
+  type DmlRunAction,
+  type DmlRunState
+} from './dml-run-state'
 
 /**
  * Upper bound on rows retained for display per query run, summed across all
@@ -35,7 +52,13 @@ export interface ResultSetState {
   rows: unknown[]
   /** True row count of this set, uncapped. */
   rowCount: number
+  /** Rows changed by a Document Write since the run, by row index: `edited`
+   * after a save (tinted), `gone` when found deleted (struck through),
+   * `created` by New document (at the top). Absent until the first one. */
+  rowMarks?: Record<number, RowMark>
 }
+
+export type RowMark = 'edited' | 'gone' | 'created'
 
 export interface QueryRunState {
   status: QueryRunStatus
@@ -53,6 +76,19 @@ export interface QueryRunState {
   finishedAt: number | undefined
   /** Set only for a genuine failure, never for a user-requested cancel. */
   errorMessage: string | undefined
+  /** Cosmos DB only: where this run's rows came from, captured at Run time,
+   * so a Document Write goes to that container even if the tab's Container
+   * picker changes afterwards. Never set for a DML Statement run. */
+  documentTarget?: DocumentTarget
+  /** Cosmos DB only: the container's partition key paths, from the first
+   * Result Chunk that carried them. Absent means no row is addressable. */
+  partitionKeyPaths?: string[]
+  /** Set while (and after) the run is a Cosmos DB DML Statement: its phase
+   * from planning to done (see dml-run-state.ts). Undefined for a query. */
+  dml?: DmlRunState
+  /** While a Retry is planned or confirmed: the finished run it retries,
+   * shown again if the Retry is cancelled, discarded or fails to plan. */
+  retryOf?: QueryRunState
 }
 
 export const initialQueryRunState: QueryRunState = {
@@ -67,7 +103,25 @@ export const initialQueryRunState: QueryRunState = {
 }
 
 export type QueryRunAction =
-  | { type: 'started'; startedAt: number }
+  | { type: 'started'; startedAt: number; documentTarget?: DocumentTarget }
+  /** A drawer save stored `document` at `address`: matching rows update in
+   * place. `previous` is the server copy the save started from. */
+  | {
+      type: 'documentSaved'
+      target: DocumentTarget
+      address: DocumentAddress
+      document: StoredDocument
+      previous: StoredDocument
+    }
+  /** The document at `address` no longer exists. Both document actions
+   * apply only to a run of the same `target` container. */
+  | { type: 'documentGone'; target: DocumentTarget; address: DocumentAddress }
+  /** New document created `document` in `target`: it goes to the top of
+   * the grid (story 31). */
+  | { type: 'documentCreated'; target: DocumentTarget; document: StoredDocument }
+  /** A drawer delete removed the document at `address` (or found it
+   * already deleted): its rows leave the grid. */
+  | { type: 'documentDeleted'; target: DocumentTarget; address: DocumentAddress }
   | { type: 'chunk'; chunk: ResultChunk }
   | { type: 'done'; finishedAt: number }
   | {
@@ -84,6 +138,7 @@ export type QueryRunAction =
        */
       cancelled: boolean
     }
+  | DmlRunAction
 
 /**
  * Pure state machine for one query tab's in-flight/most-recent execution.
@@ -94,7 +149,44 @@ export type QueryRunAction =
 export function queryRunReducer(state: QueryRunState, action: QueryRunAction): QueryRunState {
   switch (action.type) {
     case 'started':
-      return { ...initialQueryRunState, status: 'running', startedAt: action.startedAt }
+      return {
+        ...initialQueryRunState,
+        status: 'running',
+        startedAt: action.startedAt,
+        documentTarget: action.documentTarget
+      }
+
+    case 'documentSaved':
+      if (!sameTarget(state.documentTarget, action.target)) return state
+      return markRows(state, action.address, 'edited', (row) =>
+        rowAfterSave(row, action.document, action.previous)
+      )
+
+    case 'documentGone':
+      if (!sameTarget(state.documentTarget, action.target)) return state
+      return markRows(state, action.address, 'gone', (row) => row)
+
+    case 'documentCreated': {
+      if (!sameTarget(state.documentTarget, action.target)) return state
+      const [first = { rows: [], rowCount: 0 }, ...rest] = state.resultSets
+      // Prepending shifts every row down one, so the marks shift with them.
+      const rowMarks: Record<number, RowMark> = { 0: 'created' }
+      for (const [index, mark] of Object.entries(first.rowMarks ?? {})) {
+        rowMarks[Number(index) + 1] = mark
+      }
+      return {
+        ...state,
+        resultSets: [
+          { rows: [action.document, ...first.rows], rowCount: first.rowCount + 1, rowMarks },
+          ...rest
+        ],
+        rowCount: state.rowCount + 1
+      }
+    }
+
+    case 'documentDeleted':
+      if (!sameTarget(state.documentTarget, action.target)) return state
+      return removeRows(state, action.address)
 
     case 'chunk': {
       const ru = action.chunk.meta?.ru
@@ -114,24 +206,269 @@ export function queryRunReducer(state: QueryRunState, action: QueryRunAction): Q
         resultSets,
         rowCount: state.rowCount + action.chunk.rows.length,
         ruTotal: ru === undefined ? state.ruTotal : (state.ruTotal ?? 0) + ru,
-        stoppedAtRowLimit: state.stoppedAtRowLimit || action.chunk.meta?.truncated === true
+        stoppedAtRowLimit: state.stoppedAtRowLimit || action.chunk.meta?.truncated === true,
+        partitionKeyPaths: state.partitionKeyPaths ?? action.chunk.meta?.partitionKeyPaths,
+        dml: withCommitChunkMeta(state.dml, action.chunk.meta)
       }
     }
 
-    case 'done':
-      return { ...state, status: 'success', finishedAt: action.finishedAt }
+    case 'done': {
+      const dml = dmlAfterDone(state.dml)
+      return {
+        ...state,
+        status: dml?.phase === 'stopped' ? 'cancelled' : 'success',
+        finishedAt: action.finishedAt,
+        dml
+      }
+    }
 
     case 'failed':
+      if (state.retryOf && state.dml?.phase === 'planning') {
+        // Backing out of a Retry costs nothing: the run report comes back,
+        // with the reason when planning failed rather than was cancelled.
+        const original = state.retryOf
+        const report = original.dml
+        if (action.cancelled || (report?.phase !== 'done' && report?.phase !== 'stopped')) {
+          return original
+        }
+        return { ...original, dml: { ...report, retryError: action.message } }
+      }
       return {
         ...state,
         status: action.cancelled ? 'cancelled' : 'error',
         finishedAt: action.finishedAt,
-        errorMessage: action.cancelled ? undefined : action.message
+        errorMessage: action.cancelled ? undefined : action.message,
+        dml: dmlAfterFailure(state.dml, action.cancelled)
       }
+
+    case 'dmlPlanningStarted':
+      return {
+        ...initialQueryRunState,
+        status: 'running',
+        startedAt: action.startedAt,
+        dml: {
+          phase: 'planning',
+          verb: action.verb,
+          container: action.container,
+          statement: action.statement,
+          matched: 0,
+          requestCharge: 0
+        }
+      }
+
+    case 'dmlRetryPlanningStarted': {
+      const scopeCount = retryScope(state.dml)
+      if (scopeCount === undefined || (state.dml?.phase !== 'done' && state.dml?.phase !== 'stopped')) {
+        return state
+      }
+      const { verb, container, statement } = state.dml
+      const { retryError: _shownBefore, ...report } = state.dml
+      return {
+        ...state,
+        status: 'running',
+        startedAt: action.startedAt,
+        finishedAt: undefined,
+        errorMessage: undefined,
+        retryOf: { ...state, dml: report },
+        dml: {
+          phase: 'planning',
+          verb,
+          container,
+          statement,
+          matched: 0,
+          requestCharge: 0,
+          retry: { scopeCount }
+        }
+      }
+    }
+
+    case 'dmlLastRunDropped': {
+      if (state.dml?.phase !== 'done' && state.dml?.phase !== 'stopped') return state
+      const { planId: _dropped, ...report } = state.dml
+      return { ...state, dml: report }
+    }
+
+    case 'dmlPlanningProgress':
+      if (state.dml?.phase !== 'planning') return state
+      return {
+        ...state,
+        dml: {
+          ...state.dml,
+          matched: action.progress.matched,
+          requestCharge: action.progress.requestCharge
+        }
+      }
+
+    case 'dmlPlanned': {
+      if (state.dml?.phase !== 'planning') return state
+      const { verb, container, statement, retry } = state.dml
+      const {
+        planId,
+        matchCount,
+        drivingQueryRequestCharge,
+        averageDocumentSize,
+        partitionKeyPaths,
+        sample
+      } = action.summary
+      if (planId === undefined || matchCount === 0) {
+        return {
+          ...state,
+          status: 'success',
+          finishedAt: action.at,
+          retryOf: undefined,
+          dml: {
+            phase: 'zero-matches',
+            verb,
+            container,
+            drivingQueryRequestCharge,
+            ...(retry ? { retry } : {})
+          }
+        }
+      }
+      return {
+        ...state,
+        dml: {
+          ...(retry ? { retry } : {}),
+          phase: 'confirming',
+          verb,
+          container,
+          statement,
+          planId,
+          matchCount,
+          drivingQueryRequestCharge,
+          ...(averageDocumentSize !== undefined ? { averageDocumentSize } : {}),
+          partitionKeyPaths,
+          sample
+        }
+      }
+    }
+
+    case 'dmlDiscarded':
+      if (state.dml?.phase !== 'confirming') return state
+      // Discarding a Retry returns to the run it retries (story 123).
+      if (state.retryOf) return state.retryOf
+      return {
+        ...state,
+        status: 'cancelled',
+        finishedAt: action.finishedAt,
+        dml: { phase: 'discarded', verb: state.dml.verb, container: state.dml.container }
+      }
+
+    case 'dmlCommitStarted': {
+      if (state.dml?.phase !== 'confirming') return state
+      const { verb, container, statement, planId, matchCount, drivingQueryRequestCharge, retry } =
+        state.dml
+      // A Retry's outcome rows replace the original run's (story 124).
+      const rows = retry
+        ? {
+            resultSets: [],
+            rowCount: 0,
+            ruTotal: undefined,
+            stoppedAtRowLimit: false,
+            partitionKeyPaths: undefined
+          }
+        : {}
+      return {
+        ...state,
+        ...rows,
+        retryOf: undefined,
+        dml: {
+          ...(retry ? { retry: true as const } : {}),
+          phase: 'committing',
+          verb,
+          container,
+          statement,
+          planId,
+          matchCount,
+          drivingQueryRequestCharge,
+          progress: { completed: 0, total: matchCount, requestCharge: 0, counts: emptyOutcomeCounts() },
+          stopRequested: false,
+          summary: undefined
+        }
+      }
+    }
+
+    case 'dmlStopRequested':
+      if (state.dml?.phase !== 'committing') return state
+      return { ...state, dml: { ...state.dml, stopRequested: true } }
 
     default:
       return state
   }
+}
+
+/** Replaces and marks every retained row whose address is `address`. Index
+ * based, so rows never shift under an open context menu or selection. */
+function markRows(
+  state: QueryRunState,
+  address: DocumentAddress,
+  mark: RowMark,
+  update: (row: Record<string, unknown>) => unknown
+): QueryRunState {
+  let changed = false
+  const resultSets = state.resultSets.map((set) => {
+    let rows = set.rows
+    let rowMarks = set.rowMarks
+    set.rows.forEach((row, index) => {
+      const check = addressOf(row, state.partitionKeyPaths)
+      if (!check.addressable || !sameAddress(check.address, address)) return
+      if (rows === set.rows) rows = [...set.rows]
+      rows[index] = update(row as Record<string, unknown>)
+      rowMarks = { ...rowMarks, [index]: mark }
+    })
+    if (rows === set.rows) return set
+    changed = true
+    return { ...set, rows, rowMarks }
+  })
+  return changed ? { ...state, resultSets } : state
+}
+
+/** Removes every retained row whose address is `address`, moving later
+ * row marks up with their rows and counting the rows out of `rowCount`. */
+function removeRows(state: QueryRunState, address: DocumentAddress): QueryRunState {
+  let removedTotal = 0
+  const resultSets = state.resultSets.map((set) => {
+    const rows: unknown[] = []
+    const rowMarks: Record<number, RowMark> = {}
+    set.rows.forEach((row, index) => {
+      const check = addressOf(row, state.partitionKeyPaths)
+      if (check.addressable && sameAddress(check.address, address)) return
+      const mark = set.rowMarks?.[index]
+      if (mark) rowMarks[rows.length] = mark
+      rows.push(row)
+    })
+    const removed = set.rows.length - rows.length
+    if (removed === 0) return set
+    removedTotal += removed
+    return {
+      ...set,
+      rows,
+      rowCount: Math.max(0, set.rowCount - removed),
+      rowMarks: set.rowMarks ? rowMarks : undefined
+    }
+  })
+  if (removedTotal === 0) return state
+  return { ...state, resultSets, rowCount: Math.max(0, state.rowCount - removedTotal) }
+}
+
+/**
+ * A saved row as the grid should now show it. A full document becomes the
+ * stored document. A projection keeps its own columns: those the document
+ * has are refreshed, those the save removed are dropped, and any other
+ * column (an alias or computed value, not a document property) stays.
+ */
+function rowAfterSave(
+  row: Record<string, unknown>,
+  document: StoredDocument,
+  previous: StoredDocument
+): unknown {
+  if (isFullDocument(row)) return document
+  const next: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(row)) {
+    if (Object.hasOwn(document, key)) next[key] = document[key]
+    else if (!Object.hasOwn(previous, key)) next[key] = value
+  }
+  return next
 }
 
 /** Rows currently held for display, across every Result Set. */

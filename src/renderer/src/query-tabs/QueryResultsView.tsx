@@ -6,16 +6,29 @@ import {
   type ExtractorId,
   type ExtractorOptions
 } from '@shared/extractors/extract'
+import { addressOf, notAddressableReason, sameAddress } from '../results/addressable-row'
 import { CellInspector } from '../results/CellInspector'
+import { DocumentDrawer, type DocumentDrawerProps } from '../results/DocumentDrawer'
 import { planCopy, type CopyPlan } from '../results/copy-plan'
 import type { ExportState } from '../results/export-state'
 import type { ExtractorSettings } from '../results/extractor-settings'
-import { ResultsGrid, type GridCopy } from '../results/ResultsGrid'
+import { ResultsGrid, type GridCopy, type GridRowAction } from '../results/ResultsGrid'
 import { ResultsJsonView } from '../results/ResultsJsonView'
 import brandMark from '../assets/brand/queryforge-icon-transparent-1024.png'
 import { retainedRowCount, type QueryRunState } from './query-run-reducer'
 
 type ViewMode = 'table' | 'json'
+
+export interface DocumentEditingProps extends DocumentDrawerProps {
+  /** Opens (or focuses) an edit session for an Addressable Row. */
+  onEdit: (row: unknown) => void
+  /** Opens the drawer in delete mode for an Addressable Row. */
+  onRequestDelete: (row: unknown) => void
+}
+
+const EDIT_DOCUMENT = 'Edit document…'
+const DELETE_DOCUMENT = 'Delete document…'
+const GONE_REASON = 'This document no longer exists. Re-run the query to refresh the results.'
 
 const TOAST_MS = 2500
 
@@ -52,8 +65,13 @@ export function QueryResultsView({
   onTableNameChange,
   onExportLoaded,
   onExportAll,
-  onCancelExport
+  onCancelExport,
+  documentEditing
 }: {
+  /** Cosmos DB on a writable Connection Profile only: Edit document… on
+   * Addressable Rows and the drawer. Absent hides every write action
+   * (Azure SQL, read-only profiles). */
+  documentEditing?: DocumentEditingProps
   run: QueryRunState
   exportState: ExportState
   extractorSettings: ExtractorSettings
@@ -100,6 +118,15 @@ export function QueryResultsView({
     const timer = setTimeout(() => setToast(null), TOAST_MS)
     return () => clearTimeout(timer)
   }, [toast])
+  // A finished drawer delete: show its toast once, then let the edit
+  // sessions forget it.
+  const deleteToast = documentEditing?.state.toast
+  const onToastShown = documentEditing?.onToastShown
+  useEffect(() => {
+    if (!deleteToast || !onToastShown) return
+    setToast({ message: deleteToast.message, id: Date.now() })
+    onToastShown(deleteToast.key)
+  }, [deleteToast, onToastShown])
   /** An oversized copy waiting on "copy anyway / export instead"
    * (Extractors story 11). */
   const [pendingCopy, setPendingCopy] = useState<{
@@ -131,14 +158,74 @@ export function QueryResultsView({
     if (plan.needsSizeConfirmation) setPendingCopy({ plan, rows: copy.rows, extractorId })
     else writeClipboard(plan)
   }
+  const rowMarks = current?.rowMarks
+  const activeSession = documentEditing?.state.sessions.find(
+    (s) => s.key === documentEditing.state.activeKey
+  )
+
+  /** A write action for a row (Edit document…, Delete document…): enabled
+   * only on a live Addressable Row. */
+  function documentAction(
+    rowIndex: number,
+    label: string,
+    open: (row: unknown) => void
+  ): GridRowAction {
+    const row = currentRows[rowIndex]
+    const onSelect = (): void => open(row)
+    if (rowMarks?.[rowIndex] === 'gone') return { label, onSelect, disabledReason: GONE_REASON }
+    const check = addressOf(row, run.partitionKeyPaths)
+    return check.addressable
+      ? { label, onSelect }
+      : { label, onSelect, disabledReason: notAddressableReason(run.partitionKeyPaths, check.missing) }
+  }
+
+  function editAction(rowIndex: number): GridRowAction | undefined {
+    return documentEditing ? documentAction(rowIndex, EDIT_DOCUMENT, documentEditing.onEdit) : undefined
+  }
+
+  /** New document (story 4): Cosmos DB results on a writable profile only
+   * (`documentEditing` is absent otherwise, story 13). Shown even when the
+   * query returned no rows. */
+  const newDocumentButton = documentEditing && (
+    <button
+      type="button"
+      className="query-results__new-document"
+      disabled={!run.partitionKeyPaths}
+      title={
+        run.partitionKeyPaths
+          ? 'Create a document in the container these results came from'
+          : "QueryForge doesn't know this container's partition key, so it can't create documents in it."
+      }
+      onClick={() => documentEditing.onNewDocument()}
+    >
+      + New document
+    </button>
+  )
+
+  function editRowClassName(rowIndex: number): string | undefined {
+    const mark = rowMarks?.[rowIndex]
+    const classes = [mark ? `is-${mark}` : '']
+    if (activeSession && !activeSession.newDocument) {
+      const check = addressOf(currentRows[rowIndex], run.partitionKeyPaths)
+      if (check.addressable && sameAddress(check.address, activeSession.address)) {
+        classes.push('is-editing')
+      }
+    }
+    return classes.filter(Boolean).join(' ') || undefined
+  }
+
   const truncated = retainedRowCount(run) < run.rowCount
+  // A DML Statement run reports itself above the results (DmlRunReport);
+  // until its commit streams outcome rows there is nothing to show here.
+  const dmlBeforeCommit =
+    run.dml !== undefined && !['committing', 'done', 'stopped', 'error'].includes(run.dml.phase)
   const hasRows = multiSet
     ? run.resultSets.some((set) => set.rowCount > 0)
     : currentRows.length > 0
 
   return (
     <div className="query-results">
-      {run.status !== 'idle' && (
+      {run.status !== 'idle' && !dmlBeforeCommit && (
         <div className="query-results__status" data-status={run.status}>
           <span className="status-pill" data-status={run.status}>
             {run.status}
@@ -167,7 +254,7 @@ export function QueryResultsView({
       )}
 
       {run.status === 'error' && run.errorMessage && <p role="alert">{run.errorMessage}</p>}
-      {run.status === 'cancelled' && <p className="empty">Query cancelled.</p>}
+      {run.status === 'cancelled' && !run.dml && <p className="empty">Query cancelled.</p>}
       {run.stoppedAtRowLimit && run.status !== 'running' && (
         <p className="query-results__notice" role="status">
           Stopped after {run.rowCount.toLocaleString()} rows to save request units — more rows
@@ -211,6 +298,8 @@ export function QueryResultsView({
                 JSON
               </button>
             </div>
+
+            {newDocumentButton}
 
             <div className="extractor-strip" aria-label="Copy and export format">
               <label className="extractor-strip__field">
@@ -283,23 +372,26 @@ export function QueryResultsView({
                 Export loaded…
               </button>
             </span>
-            <span className="query-results__export-group query-results__export-group--all">
-              <button
-                type="button"
-                title={
-                  `Runs the query again and writes every matching row of the selected result as ${activeExtractor.label}. Cosmos DB charges request units for the second run.` +
-                  (activeExtractor.buffersAllRows
-                    ? ` ${activeExtractor.label} holds every row in memory before writing; JSON or JSON Lines stream instead.`
-                    : '')
-                }
-                onClick={() => onExportAll(setIndex)}
-              >
-                Export all matching…
-              </button>
-              {activeExtractor.buffersAllRows && (
-                <span className="query-results__export-label">holds all rows in memory</span>
-              )}
-            </span>
+            {/* Outcome rows can't be re-run; Export loaded already has all of them. */}
+            {!run.dml && (
+              <span className="query-results__export-group query-results__export-group--all">
+                <button
+                  type="button"
+                  title={
+                    `Runs the query again and writes every matching row of the selected result as ${activeExtractor.label}. Cosmos DB charges request units for the second run.` +
+                    (activeExtractor.buffersAllRows
+                      ? ` ${activeExtractor.label} holds every row in memory before writing; JSON or JSON Lines stream instead.`
+                      : '')
+                  }
+                  onClick={() => onExportAll(setIndex)}
+                >
+                  Export all matching…
+                </button>
+                {activeExtractor.buffersAllRows && (
+                  <span className="query-results__export-label">holds all rows in memory</span>
+                )}
+              </span>
+            )}
           </div>
 
           {pendingCopy && (
@@ -371,6 +463,16 @@ export function QueryResultsView({
               columns={columns}
               streaming={streaming}
               onCopy={handleCopy}
+              rowActions={
+                documentEditing
+                  ? (rowIndex) => [
+                      documentAction(rowIndex, EDIT_DOCUMENT, documentEditing.onEdit),
+                      documentAction(rowIndex, DELETE_DOCUMENT, documentEditing.onRequestDelete)
+                    ]
+                  : undefined
+              }
+              rowGutterAction={documentEditing ? editAction : undefined}
+              rowClassName={editRowClassName}
               onExpandCell={(value) => {
                 setInspectedCell(value)
                 setInspection((n) => n + 1)
@@ -390,8 +492,8 @@ export function QueryResultsView({
         </>
       )}
 
-      {!hasRows && run.status === 'success' && (
-        <p className="empty">The query ran but returned no rows.</p>
+      {!hasRows && run.status === 'success' && !run.dml && (
+        <p className="empty">The query ran but returned no rows. {newDocumentButton}</p>
       )}
 
       {run.status === 'idle' && (
@@ -407,6 +509,8 @@ export function QueryResultsView({
           {toast.message}
         </div>
       )}
+
+      {documentEditing && <DocumentDrawer {...documentEditing} />}
 
       {inspectorOpen && (
         <CellInspector
