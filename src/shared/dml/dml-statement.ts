@@ -11,6 +11,7 @@
  */
 
 import type { PartitionKeyValue } from '../types/document-writer'
+import { partitionKeyPathSegments } from '../partition-key-path'
 
 export type DmlVerb = 'DELETE' | 'UPDATE'
 
@@ -420,14 +421,6 @@ function refuseProtectedTarget(
       fail(`SET ${target} is not allowed: it would change the partition key path ${keyPath}.`)
     }
   }
-}
-
-/** `/a/b` → `['a', 'b']`; a quoted segment (`/"odd key"`) is unquoted. */
-function partitionKeyPathSegments(path: string): string[] {
-  return path
-    .split('/')
-    .filter((segment) => segment !== '')
-    .map((segment) => (/^".*"$/.test(segment) ? segment.slice(1, -1) : segment))
 }
 
 /** RFC 6901: `~` → `~0`, `/` → `~1`. */

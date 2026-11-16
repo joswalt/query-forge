@@ -1,4 +1,5 @@
 import { isRecord } from '@shared/is-record'
+import { partitionKeyPathSegments, readPath } from '@shared/partition-key-path'
 import type { PartitionKeyLevelValue, PartitionKeyValue } from '@shared/types/document-writer'
 
 /** What addresses one Cosmos DB document: `id` plus its partition key value. */
@@ -20,30 +21,9 @@ export type AddressCheck =
  * is a full document, not a projection. */
 const FULL_DOCUMENT_MARKERS = ['_rid', '_self', '_etag', '_ts'] as const
 
-/** `/address/zip` → `['address', 'zip']` (JSON pointer unescaping). */
-export function partitionKeyPathSegments(path: string): string[] {
-  return path
-    .split('/')
-    .slice(1)
-    .map((segment) => segment.replace(/~1/g, '/').replace(/~0/g, '~'))
-}
-
 /** `/address/zip` → `address.zip`, how a partition key field is named to the user. */
 export function partitionKeyFieldName(path: string): string {
   return partitionKeyPathSegments(path).join('.')
-}
-
-/** Reads a nested property; `found: false` when any step is missing. */
-export function readPath(
-  value: unknown,
-  segments: readonly string[]
-): { found: true; value: unknown } | { found: false } {
-  let current = value
-  for (const segment of segments) {
-    if (!isRecord(current) || !Object.hasOwn(current, segment)) return { found: false }
-    current = current[segment]
-  }
-  return { found: true, value: current }
 }
 
 /** A row carrying the system properties: a whole stored document. */

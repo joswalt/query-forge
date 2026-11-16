@@ -5,11 +5,10 @@ import type {
   PartitionKeyValue,
   StoredDocument
 } from '@shared/types/document-writer'
+import { partitionKeyPathSegments, readPath } from '@shared/partition-key-path'
 import {
   isOutOfDate,
   partitionKeyFieldName,
-  partitionKeyPathSegments,
-  readPath,
   sameAddress,
   type DocumentAddress
 } from './addressable-row'
