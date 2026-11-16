@@ -77,6 +77,10 @@ export interface DmlPlanSummary {
   verb: DmlVerb
   matchCount: number
   drivingQueryRequestCharge: number
+  /** Mean stored size in bytes of the documents the Driving Query
+   * retrieved (`retrievedDocumentSize / retrievedDocumentCount`). Absent
+   * when Cosmos DB returned no query metrics. */
+  averageDocumentSize?: number
   partitionKeyPaths: string[]
   sample: DmlSampleDocument[]
 }

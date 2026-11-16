@@ -60,6 +60,10 @@ export interface CosmosFeedResponseLike {
   requestCharge: number
   /** `FeedResponse.hasMoreResults` — true while a continuation token remains. */
   hasMoreResults?: boolean
+  /** Present with `populateQueryMetrics`. Typed `string` by the SDK, but at
+   * runtime an object keyed by partition key range id whose values are
+   * `QueryMetrics`; read only through `retrievedDocuments`. */
+  queryMetrics?: unknown
 }
 
 /** The `RequestOptions` this Provider sets on a point operation. The
@@ -108,9 +112,39 @@ export interface CosmosContainerLike {
     create(body: object, options?: CosmosItemOptionsLike): Promise<CosmosItemResponseLike>
     query(
       query: string | CosmosQuerySpecLike,
-      options?: { maxItemCount?: number; abortSignal?: AbortSignal; priorityLevel?: 'Low' }
+      options?: {
+        maxItemCount?: number
+        abortSignal?: AbortSignal
+        priorityLevel?: 'Low'
+        populateQueryMetrics?: boolean
+      }
     ): { getAsyncIterator(): AsyncIterable<CosmosFeedResponseLike> }
   }
+}
+
+/**
+ * Sums `retrievedDocumentCount`/`retrievedDocumentSize` over a page's
+ * query metrics, one entry per partition key range. Nothing when the page
+ * carries no usable metrics (e.g. an emulator that doesn't send them).
+ */
+function retrievedDocuments(
+  queryMetrics: unknown
+): { retrievedDocumentCount: number; retrievedDocumentSize: number } | Record<string, never> {
+  if (queryMetrics === null || typeof queryMetrics !== 'object') return {}
+  let retrievedDocumentCount = 0
+  let retrievedDocumentSize = 0
+  let found = false
+  for (const metrics of Object.values(queryMetrics as Record<string, unknown>)) {
+    const { retrievedDocumentCount: count, retrievedDocumentSize: size } = (metrics ?? {}) as {
+      retrievedDocumentCount?: unknown
+      retrievedDocumentSize?: unknown
+    }
+    if (typeof count !== 'number' || typeof size !== 'number') continue
+    retrievedDocumentCount += count
+    retrievedDocumentSize += size
+    found = true
+  }
+  return found ? { retrievedDocumentCount, retrievedDocumentSize } : {}
 }
 
 /** A minimal `@azure/core-auth` `TokenCredential` shape — just enough for
@@ -479,11 +513,21 @@ export class CosmosDbProvider implements DatabaseProvider, DocumentWriter {
       const iterator = container.items
         .query(
           { query: query.query, parameters: query.parameters },
-          { maxItemCount: DEFAULT_PAGE_SIZE, abortSignal: controller.signal, priorityLevel: 'Low' }
+          {
+            maxItemCount: DEFAULT_PAGE_SIZE,
+            abortSignal: controller.signal,
+            priorityLevel: 'Low',
+            // For the average document size behind the rough write-RU band.
+            populateQueryMetrics: true
+          }
         )
         .getAsyncIterator()
       for await (const page of iterator) {
-        yield { rows: page.resources, requestCharge: page.requestCharge }
+        yield {
+          rows: page.resources,
+          requestCharge: page.requestCharge,
+          ...retrievedDocuments(page.queryMetrics)
+        }
       }
     } finally {
       if (options.executionId) this.abortControllers.delete(options.executionId)

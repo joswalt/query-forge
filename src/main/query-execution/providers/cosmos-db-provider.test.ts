@@ -38,14 +38,19 @@ class FakeCosmosClient implements CosmosClientLike {
   readAllDatabases: Array<{ id: string }> = []
   readAllContainers: Array<{ id: string; partitionKey?: { paths?: string[] } }> = []
   containerPartitionKeyPaths: string[] = ['/partitionKey']
-  queryPages: Array<{ resources: unknown[]; requestCharge: number; hasMoreResults?: boolean }> =
-    []
+  queryPages: Array<{
+    resources: unknown[]
+    requestCharge: number
+    hasMoreResults?: boolean
+    queryMetrics?: unknown
+  }> = []
   pagesServed = 0
   lastQuery:
     | {
         query: string | { query: string; parameters?: Array<{ name: string; value: unknown }> }
         abortSignal?: AbortSignal
         priorityLevel?: 'Low'
+        populateQueryMetrics?: boolean
       }
     | undefined
   lastTarget: { database: string; container: string } | undefined
@@ -100,7 +105,8 @@ class FakeCosmosClient implements CosmosClientLike {
             this.lastQuery = {
               query,
               abortSignal: options?.abortSignal,
-              ...(options?.priorityLevel ? { priorityLevel: options.priorityLevel } : {})
+              ...(options?.priorityLevel ? { priorityLevel: options.priorityLevel } : {}),
+              ...(options?.populateQueryMetrics ? { populateQueryMetrics: true } : {})
             }
             this.lastTarget = { database: id, container: containerId }
             const pages = this.queryPages
@@ -873,6 +879,38 @@ describe('CosmosDbProvider as a DocumentWriter', () => {
       ])
       expect(client.lastTarget).toEqual({ database: 'other-db', container: 'customers' })
       expect(client.lastQuery).toMatchObject({ query: drivingQuery, priorityLevel: 'Low' })
+    })
+
+    it('asks for query metrics and reports each page’s retrieved documents summed over partition key ranges', async () => {
+      const client = new FakeCosmosClient()
+      // At runtime `queryMetrics` is an object keyed by partition key
+      // range id, despite the SDK typing it as a string.
+      client.queryPages = [
+        {
+          resources: [{ id: '1' }],
+          requestCharge: 2,
+          queryMetrics: {
+            '0': { retrievedDocumentCount: 2, retrievedDocumentSize: 3000 },
+            '1': { retrievedDocumentCount: 1, retrievedDocumentSize: 500 }
+          }
+        },
+        { resources: [{ id: '2' }], requestCharge: 1 }
+      ]
+      const provider = await connected(client)
+
+      const pages = []
+      for await (const page of provider.runDrivingQuery(
+        { query: 'SELECT c.id FROM c WHERE true', parameters: [] },
+        {}
+      )) {
+        pages.push(page)
+      }
+
+      expect(client.lastQuery?.populateQueryMetrics).toBe(true)
+      expect(pages).toEqual([
+        { rows: [{ id: '1' }], requestCharge: 2, retrievedDocumentCount: 3, retrievedDocumentSize: 3500 },
+        { rows: [{ id: '2' }], requestCharge: 1 }
+      ])
     })
 
     it('cancel() abandons a running Driving Query by its Execution ID', async () => {

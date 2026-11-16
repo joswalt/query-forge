@@ -308,6 +308,29 @@ describe('QueryExecutionService DML Statements', () => {
       })
     })
 
+    it('reports the average document size from the Driving Query’s retrieved documents', async () => {
+      const provider = new FakeCosmosProvider()
+      provider.pages = [
+        { rows: matches(1, 2), requestCharge: 3, retrievedDocumentCount: 2, retrievedDocumentSize: 3000 },
+        { rows: matches(3, 4), requestCharge: 3, retrievedDocumentCount: 3, retrievedDocumentSize: 7000 }
+      ]
+      const service = await connected(provider)
+
+      const summary = planSummary(await call(service, planRequest()))
+
+      expect(summary.averageDocumentSize).toBe(2000)
+    })
+
+    it('leaves the average document size out when no query metrics came back', async () => {
+      const provider = new FakeCosmosProvider()
+      provider.pages = [{ rows: matches(1, 2), requestCharge: 3 }]
+      const service = await connected(provider)
+
+      const summary = planSummary(await call(service, planRequest()))
+
+      expect(summary).not.toHaveProperty('averageDocumentSize')
+    })
+
     it('samples the first 10 matches of a DELETE by address only', async () => {
       const provider = new FakeCosmosProvider()
       provider.pages = [
