@@ -51,12 +51,12 @@ export interface ResultSetState {
   /** True row count of this set, uncapped. */
   rowCount: number
   /** Rows changed by a Document Write since the run, by row index: `edited`
-   * after a save (tinted), `gone` when found deleted (struck through).
-   * Absent until the first one. */
+   * after a save (tinted), `gone` when found deleted (struck through),
+   * `created` by New document (at the top). Absent until the first one. */
   rowMarks?: Record<number, RowMark>
 }
 
-export type RowMark = 'edited' | 'gone'
+export type RowMark = 'edited' | 'gone' | 'created'
 
 export interface QueryRunState {
   status: QueryRunStatus
@@ -111,6 +111,9 @@ export type QueryRunAction =
   /** The document at `address` no longer exists. Both document actions
    * apply only to a run of the same `target` container. */
   | { type: 'documentGone'; target: DocumentTarget; address: DocumentAddress }
+  /** New document created `document` in `target`: it goes to the top of
+   * the grid (story 31). */
+  | { type: 'documentCreated'; target: DocumentTarget; document: StoredDocument }
   | { type: 'chunk'; chunk: ResultChunk }
   | { type: 'done'; finishedAt: number }
   | {
@@ -154,6 +157,24 @@ export function queryRunReducer(state: QueryRunState, action: QueryRunAction): Q
     case 'documentGone':
       if (!sameTarget(state.documentTarget, action.target)) return state
       return markRows(state, action.address, 'gone', (row) => row)
+
+    case 'documentCreated': {
+      if (!sameTarget(state.documentTarget, action.target)) return state
+      const [first = { rows: [], rowCount: 0 }, ...rest] = state.resultSets
+      // Prepending shifts every row down one, so the marks shift with them.
+      const rowMarks: Record<number, RowMark> = { 0: 'created' }
+      for (const [index, mark] of Object.entries(first.rowMarks ?? {})) {
+        rowMarks[Number(index) + 1] = mark
+      }
+      return {
+        ...state,
+        resultSets: [
+          { rows: [action.document, ...first.rows], rowCount: first.rowCount + 1, rowMarks },
+          ...rest
+        ],
+        rowCount: state.rowCount + 1
+      }
+    }
 
     case 'chunk': {
       const ru = action.chunk.meta?.ru

@@ -273,6 +273,42 @@ describe('queryRunReducer with Addressable Rows', () => {
     expect(next).toEqual(run)
   })
 
+  it('puts a created document at the top of the grid, marked created, keeping the other rows marks', () => {
+    let run = cosmosRun(
+      [
+        { id: 'a1', customerId: 'c1', ...system },
+        { id: 'a2', customerId: 'c1', ...system }
+      ],
+      ['/customerId']
+    )
+    run = queryRunReducer(run, { type: 'documentGone', target, address: { id: 'a2', partitionKey: 'c1' } })
+    const created = { id: 'n1', customerId: 'c9', name: 'New', ...system }
+    const next = queryRunReducer(run, { type: 'documentCreated', target, document: created })
+
+    expect(next.resultSets[0].rows).toEqual([created, ...run.resultSets[0].rows])
+    expect(next.resultSets[0].rowMarks).toEqual({ 0: 'created', 2: 'gone' })
+    expect(next.resultSets[0].rowCount).toBe(3)
+    expect(next.rowCount).toBe(3)
+    expect(next.ruTotal).toBe(2.5)
+  })
+
+  it('shows a created document in a run that returned no rows', () => {
+    const run = cosmosRun([], ['/customerId'])
+    const created = { id: 'n1', customerId: 'c9', ...system }
+    const next = queryRunReducer(run, { type: 'documentCreated', target, document: created })
+    expect(next.resultSets).toEqual([{ rows: [created], rowCount: 1, rowMarks: { 0: 'created' } }])
+  })
+
+  it('leaves the grid alone when the document was created in another container', () => {
+    const run = cosmosRun([{ id: 'a1', customerId: 'c1' }], ['/customerId'])
+    const next = queryRunReducer(run, {
+      type: 'documentCreated',
+      target: { ...target, container: 'archive' },
+      document: { id: 'n1', customerId: 'c9', ...system }
+    })
+    expect(next).toEqual(run)
+  })
+
   it('changes nothing when no row has the saved address', () => {
     const run = cosmosRun([{ id: 'a1', customerId: 'c1' }], ['/customerId'])
     const next = queryRunReducer(run, {

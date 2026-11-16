@@ -425,7 +425,7 @@ describe('planSave for a New document', () => {
     const plan = planSave(
       newDocumentDraft('n1', ['c9'], { name: 'Grace', _etag: '"e"', _ts: 1, _rid: 'r', _self: 's', _attachments: 'a' })
     )
-    expect(plan.ok && plan.write.body).toEqual({ name: 'Grace', id: 'n1', customerId: 'c9' })
+    expect(plan.ok && plan.write.kind === 'create' && plan.write.body).toEqual({ name: 'Grace', id: 'n1', customerId: 'c9' })
   })
 
   it('writes every level of a hierarchical, nested partition key into the body', () => {
