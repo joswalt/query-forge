@@ -646,6 +646,10 @@
   background: color-mix(in srgb, var(--qf-ok) 9%, transparent);
 }
 
+.results-grid__row.is-created {
+  background: color-mix(in srgb, var(--qf-accent) 10%, transparent);
+}
+
 .results-grid__row.is-gone .results-grid__cell:not(.is-rownum) {
   text-decoration: line-through;
   opacity: 0.5;
@@ -799,9 +803,40 @@
   text-decoration: underline;
 }
 
-.document-drawer__link[aria-disabled='true'] {
-  color: var(--qf-muted);
-  cursor: default;
+/* New document's editable id and partition key fields. */
+.document-drawer__fields {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.document-drawer__fields label {
+  display: grid;
+  grid-template-columns: minmax(96px, auto) 1fr 52px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.document-drawer__fields input {
+  min-width: 0;
+  font-family: var(--qf-font-mono);
+}
+
+.document-drawer__fields input[aria-invalid='true'] {
+  border-color: var(--qf-err);
+}
+
+.document-drawer__fields label > span:first-child {
+  grid-column: 1;
+}
+
+.document-drawer__kind {
+  font-size: 11px;
+}
+
+.document-drawer__notice button {
+  margin-left: 6px;
 }
 
 .document-drawer__notice {

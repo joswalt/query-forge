@@ -1,12 +1,14 @@
-import type { PartitionKeyLevelValue } from '@shared/types/document-writer'
+import type { PartitionKeyLevelValue, PartitionKeyValue } from '@shared/types/document-writer'
 import { JsonEditor } from '../editor/JsonEditor'
-import { partitionKeyFieldName } from './addressable-row'
+import { partitionKeyFieldName, type DocumentAddress } from './addressable-row'
 import {
   hasUnsavedEdits,
+  parsePartitionKeyInput,
   SYSTEM_PROPERTIES,
   type EditNotice,
   type EditSession,
-  type EditSessionsState
+  type EditSessionsState,
+  type NewDocumentFields
 } from './edit-session'
 
 export interface DocumentDrawerProps {
@@ -15,8 +17,12 @@ export interface DocumentDrawerProps {
   onClose: (key: number) => void
   onDraftChange: (key: number, text: string) => void
   onSave: (key: number) => void
-  /** "Different address? New document"; inert until New document exists. */
-  onNewDocument?: () => void
+  /** New document: empty, or prefilled `from` an edit session ("Different
+   * address? New document"). */
+  onNewDocument: (from?: number) => void
+  onNewDocumentFieldsChange: (key: number, fields: NewDocumentFields) => void
+  /** After an `id` clash: open the document already at `address`. */
+  onOpenExisting: (key: number, address: DocumentAddress) => void
 }
 
 /**
@@ -42,15 +48,15 @@ export function DocumentDrawer(props: DocumentDrawerProps): React.JSX.Element | 
               aria-selected={s.key === session.key}
               onClick={() => props.onSelect(s.key)}
             >
-              {s.address.id}
+              {s.newDocument ? 'New document' : s.address.id}
               {hasUnsavedEdits(s) ? ' •' : ''}
             </button>
           ))}
         </div>
       )}
       <header className="document-drawer__head">
-        <strong>Edit document</strong>
-        <code className="document-drawer__id">{session.address.id}</code>
+        <strong>{session.newDocument ? 'New document' : 'Edit document'}</strong>
+        {!session.newDocument && <code className="document-drawer__id">{session.address.id}</code>}
         <span className="document-drawer__spacer" />
         <button
           type="button"
@@ -72,7 +78,9 @@ function SessionBody({
   onClose,
   onDraftChange,
   onSave,
-  onNewDocument
+  onNewDocument,
+  onNewDocumentFieldsChange,
+  onOpenExisting
 }: DocumentDrawerProps & { session: EditSession }): React.JSX.Element {
   switch (session.phase) {
     case 'reading':
@@ -108,17 +116,31 @@ function SessionBody({
       )
     case 'editing': {
       const dirty = hasUnsavedEdits(session)
+      const { newDocument } = session
       return (
         <div className="document-drawer__body">
-          <AddressChips session={session} onNewDocument={onNewDocument} />
-          {session.notice && <Notice notice={session.notice} />}
+          {newDocument ? (
+            <NewDocumentAddress
+              session={session}
+              fields={newDocument}
+              onChange={(fields) => onNewDocumentFieldsChange(session.key, fields)}
+            />
+          ) : (
+            <AddressChips session={session} onNewDocument={() => onNewDocument(session.key)} />
+          )}
+          {session.notice && (
+            <Notice
+              notice={session.notice}
+              onOpenExisting={(address) => onOpenExisting(session.key, address)}
+            />
+          )}
           <JsonEditor
             key={`${session.key}:${session.revision}`}
             initialValue={session.draft}
-            ariaLabel={`Body of ${session.address.id}`}
+            ariaLabel={newDocument ? 'Body of the new document' : `Body of ${session.address.id}`}
             onChange={(text) => onDraftChange(session.key, text)}
           />
-          <SystemProperties document={session.serverCopy} />
+          {!newDocument && <SystemProperties document={session.serverCopy} />}
           <div className="document-drawer__actions">
             <span className="document-drawer__spacer" />
             <button type="button" onClick={() => onClose(session.key)}>
@@ -130,7 +152,13 @@ function SessionBody({
               disabled={session.saving || !dirty}
               onClick={() => onSave(session.key)}
             >
-              {session.saving ? 'Saving…' : 'Save'}
+              {newDocument
+                ? session.saving
+                  ? 'Creating…'
+                  : 'Create'
+                : session.saving
+                  ? 'Saving…'
+                  : 'Save'}
             </button>
           </div>
         </div>
@@ -151,7 +179,7 @@ function AddressChips({
   onNewDocument
 }: {
   session: EditSession
-  onNewDocument?: () => void
+  onNewDocument: () => void
 }): React.JSX.Element {
   const paths = session.partitionKeyPaths
   const levels: PartitionKeyLevelValue[] =
@@ -175,8 +203,8 @@ function AddressChips({
       <button
         type="button"
         className="btn--ghost document-drawer__link"
-        aria-disabled={onNewDocument ? undefined : true}
-        onClick={() => onNewDocument?.()}
+        title="Open a New document with this body, at an id and partition key you choose"
+        onClick={onNewDocument}
       >
         Different address? New document
       </button>
@@ -184,12 +212,107 @@ function AddressChips({
   )
 }
 
-function Notice({ notice }: { notice: EditNotice }): React.JSX.Element {
+/** What a partition key field's text will be sent as, so `72712` (a number)
+ * and `"72712"` (a string) are told apart before Create. */
+function valueKind(text: string): string {
+  if (text === '') return ''
+  const value = parsePartitionKeyInput(text)
+  return value === null ? 'null' : typeof value
+}
+
+/** New document's editable `id` and partition key fields (story 26), one
+ * per level of a hierarchical key. */
+function NewDocumentAddress({
+  session,
+  fields,
+  onChange
+}: {
+  session: EditSession
+  fields: NewDocumentFields
+  onChange: (fields: NewDocumentFields) => void
+}): React.JSX.Element {
+  const clashed = session.notice?.kind === 'id-clash'
+  return (
+    <div className="document-drawer__fields">
+      <label>
+        <span>id</span>
+        <input
+          value={fields.id}
+          placeholder="unique within the partition"
+          aria-invalid={clashed || undefined}
+          disabled={session.saving}
+          spellCheck={false}
+          onChange={(e) => onChange({ ...fields, id: e.target.value })}
+        />
+      </label>
+      {session.partitionKeyPaths.map((path, i) => {
+        const text = fields.partitionKey[i] ?? ''
+        return (
+          <label key={path}>
+            <span>
+              {partitionKeyFieldName(path)}{' '}
+              <span className="document-drawer__muted">
+                (partition key{session.partitionKeyPaths.length > 1 ? `, level ${i + 1}` : ''})
+              </span>
+            </span>
+            <input
+              value={text}
+              placeholder='text, or a JSON number, true, false, null or "quoted string"'
+              disabled={session.saving}
+              spellCheck={false}
+              onChange={(e) => {
+                const partitionKey = [...fields.partitionKey]
+                partitionKey[i] = e.target.value
+                onChange({ ...fields, partitionKey })
+              }}
+            />
+            <span className="document-drawer__muted document-drawer__kind">{valueKind(text)}</span>
+          </label>
+        )
+      })}
+    </div>
+  )
+}
+
+/** A partition key value as the user reads it in a message. */
+function partitionKeyLabel(value: PartitionKeyValue): string {
+  return Array.isArray(value) ? `[${value.map(levelLabel).join(', ')}]` : levelLabel(value)
+}
+
+function Notice({
+  notice,
+  onOpenExisting
+}: {
+  notice: EditNotice
+  onOpenExisting: (address: DocumentAddress) => void
+}): React.JSX.Element {
   switch (notice.kind) {
     case 'saved':
       return (
         <p className="document-drawer__notice document-drawer__notice--ok" role="status">
           Saved · {notice.requestCharge.toFixed(2)} RU
+        </p>
+      )
+    case 'created':
+      return (
+        <p className="document-drawer__notice document-drawer__notice--ok" role="status">
+          Created · {notice.requestCharge.toFixed(2)} RU
+        </p>
+      )
+    case 'id-clash':
+      return (
+        <p className="document-drawer__notice document-drawer__notice--error" role="alert">
+          A document with id <code>{notice.address.id}</code> already exists in partition{' '}
+          <code>{partitionKeyLabel(notice.address.partitionKey)}</code>.{' '}
+          <button type="button" onClick={() => onOpenExisting(notice.address)}>
+            Open existing
+          </button>
+        </p>
+      )
+    case 'invalid-address':
+      return (
+        <p className="document-drawer__notice document-drawer__notice--error" role="alert">
+          {notice.message}
         </p>
       )
     case 'address-changed':

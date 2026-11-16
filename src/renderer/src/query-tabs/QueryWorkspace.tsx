@@ -11,7 +11,7 @@ import { FALLBACK_TABLE_NAME } from '@shared/extractors/sql-extractors'
 import { QueryEditor, type QueryEditorHandle } from '../editor/QueryEditor'
 import { initialExportState, type ExportState } from '../results/export-state'
 import { useExtractorSettings } from '../results/extractor-settings'
-import { addressOf } from '../results/addressable-row'
+import { addressOf, type DocumentAddress } from '../results/addressable-row'
 import {
   editSessionsReducer,
   findEditSession,
@@ -329,9 +329,21 @@ export const QueryWorkspace = forwardRef<
     if (!tab || !target || !partitionKeyPaths) return
     const check = addressOf(row, partitionKeyPaths)
     if (!check.addressable) return
-    const { address } = check
+    openDocument(tabId, tab.editSessions, target, partitionKeyPaths, check.address, row)
+  }
 
-    const existing = findEditSession(tab.editSessions, target, address)
+  /** Opens (or focuses) the edit session of the document at `address` and
+   * reads its latest version. `row` is the grid row it came from, if any
+   * (for the `_rid` guard). */
+  function openDocument(
+    tabId: string,
+    editSessions: EditSessionsState,
+    target: DocumentTarget,
+    partitionKeyPaths: readonly string[],
+    address: DocumentAddress,
+    row: unknown
+  ): void {
+    const existing = findEditSession(editSessions, target, address)
     if (existing) {
       dispatchEdit(tabId, { type: 'selected', key: existing.key })
       return
@@ -353,20 +365,50 @@ export const QueryWorkspace = forwardRef<
       )
   }
 
+  /** New document (stories 4, 21, 26): into the container the tab's rows
+   * came from; prefilled `from` an edit session's body and address. */
+  function handleNewDocument(tabId: string, from?: number): void {
+    const tab = tabs.find((t) => t.id === tabId)
+    const target = tab?.run.documentTarget
+    const partitionKeyPaths = tab?.run.partitionKeyPaths
+    if (!target || !partitionKeyPaths) return
+    const key = nextEditSessionKeyRef.current++
+    dispatchEdit(tabId, { type: 'newDocumentOpened', key, target, partitionKeyPaths, from })
+  }
+
+  /** Open existing after an `id` clash (story 46): the clashing document in
+   * its own edit session, next to the draft. */
+  function handleOpenExisting(tabId: string, key: number, address: DocumentAddress): void {
+    const tab = tabs.find((t) => t.id === tabId)
+    const session = tab?.editSessions.sessions.find((s) => s.key === key)
+    if (!tab || !session) return
+    openDocument(tabId, tab.editSessions, session.target, session.partitionKeyPaths, address, undefined)
+  }
+
   /** Save (stories 22, 24, 29, 33 to 36): a replace with the session's
-   * etag; the grid row updates in place on success. */
+   * etag; the grid row updates in place on success. Create for a New
+   * document (stories 31, 45): the created document goes to the top of the
+   * grid. */
   function handleSaveDocument(tabId: string, key: number): void {
     const session = tabs.find((t) => t.id === tabId)?.editSessions.sessions.find((s) => s.key === key)
-    if (!session || session.saving || !session.serverCopy) return
+    if (!session || session.saving || (!session.serverCopy && !session.newDocument)) return
     const plan = planSave(session)
     if (!plan.ok) {
       dispatchSession(tabId, key, { type: 'saveRefused', notice: plan.notice })
       return
     }
     const { target, address, serverCopy: previous } = session
-    dispatchSession(tabId, key, { type: 'saveStarted' })
+    const write = plan.write
+    if (write.kind === 'create') {
+      dispatchSession(tabId, key, {
+        type: 'saveStarted',
+        address: { id: write.id, partitionKey: write.partitionKey }
+      })
+    } else {
+      dispatchSession(tabId, key, { type: 'saveStarted' })
+    }
     window.api.documents
-      .write(target.connectionId, plan.write)
+      .write(target.connectionId, write)
       .then((result) => {
         if (result.outcome === 'success') {
           if (!result.document) {
@@ -382,7 +424,10 @@ export const QueryWorkspace = forwardRef<
             document,
             requestCharge: result.requestCharge
           })
-          dispatchRun(tabId, { type: 'documentSaved', target, address, document, previous })
+          if (write.kind === 'create') dispatchRun(tabId, { type: 'documentCreated', target, document })
+          else if (previous) {
+            dispatchRun(tabId, { type: 'documentSaved', target, address, document, previous })
+          }
           return
         }
         dispatchSession(tabId, key, {
@@ -390,7 +435,9 @@ export const QueryWorkspace = forwardRef<
           outcome: result.outcome,
           requestCharge: result.requestCharge
         })
-        if (result.outcome === 'not-found') dispatchRun(tabId, { type: 'documentGone', target, address })
+        if (result.outcome === 'not-found' && write.kind !== 'create') {
+          dispatchRun(tabId, { type: 'documentGone', target, address })
+        }
       })
       .catch((err) => dispatchSession(tabId, key, { type: 'saveFailed', message: remoteErrorMessage(err) }))
   }
@@ -1110,7 +1157,11 @@ export const QueryWorkspace = forwardRef<
                     onClose: (key) => dispatchEdit(activeTab.id, { type: 'closed', key }),
                     onDraftChange: (key, text) =>
                       dispatchSession(activeTab.id, key, { type: 'draftChanged', text }),
-                    onSave: (key) => handleSaveDocument(activeTab.id, key)
+                    onSave: (key) => handleSaveDocument(activeTab.id, key),
+                    onNewDocument: (from) => handleNewDocument(activeTab.id, from),
+                    onNewDocumentFieldsChange: (key, fields) =>
+                      dispatchSession(activeTab.id, key, { type: 'newDocumentFieldsChanged', fields }),
+                    onOpenExisting: (key, address) => handleOpenExisting(activeTab.id, key, address)
                   }
                 : undefined
             }

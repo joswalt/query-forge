@@ -169,10 +169,29 @@ export function QueryResultsView({
         }
   }
 
+  /** New document (story 4): Cosmos DB results on a writable profile only
+   * (`documentEditing` is absent otherwise, story 13). Shown even when the
+   * query returned no rows. */
+  const newDocumentButton = documentEditing && (
+    <button
+      type="button"
+      className="query-results__new-document"
+      disabled={!run.partitionKeyPaths}
+      title={
+        run.partitionKeyPaths
+          ? 'Create a document in the container these results came from'
+          : "QueryForge doesn't know this container's partition key, so it can't create documents in it."
+      }
+      onClick={() => documentEditing.onNewDocument()}
+    >
+      + New document
+    </button>
+  )
+
   function editRowClassName(rowIndex: number): string | undefined {
     const mark = rowMarks?.[rowIndex]
     const classes = [mark ? `is-${mark}` : '']
-    if (activeSession) {
+    if (activeSession && !activeSession.newDocument) {
       const check = addressOf(currentRows[rowIndex], run.partitionKeyPaths)
       if (check.addressable && sameAddress(check.address, activeSession.address)) {
         classes.push('is-editing')
@@ -265,6 +284,8 @@ export function QueryResultsView({
                 JSON
               </button>
             </div>
+
+            {newDocumentButton}
 
             <div className="extractor-strip" aria-label="Copy and export format">
               <label className="extractor-strip__field">
@@ -458,7 +479,7 @@ export function QueryResultsView({
       )}
 
       {!hasRows && run.status === 'success' && !run.dml && (
-        <p className="empty">The query ran but returned no rows.</p>
+        <p className="empty">The query ran but returned no rows. {newDocumentButton}</p>
       )}
 
       {run.status === 'idle' && (
