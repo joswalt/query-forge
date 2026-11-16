@@ -3,10 +3,18 @@ import { randomUUID } from 'node:crypto'
 import type { DatabaseProvider, DecryptedSecret } from '@shared/types/database-provider'
 import { isDocumentWriter } from '@shared/types/document-writer'
 import type { DocumentWriter } from '@shared/types/document-writer'
-import type { DmlPlanSummary } from '@shared/types/dml-run'
+import type { DmlPlanSummary, DmlRetrySummary } from '@shared/types/dml-run'
 import { assertReadOnlyQuery, DocumentWriteRefusedError } from './read-only-guard'
 import { toExecutionErrorMessage } from './scrub-error-message'
-import { buildDmlPlan, commitDmlPlan, DmlPlanStore, type DmlRun } from './dml-execution'
+import {
+  buildDmlPlan,
+  buildRetryPlan,
+  commitDmlPlan,
+  DmlPlanStore,
+  LastCommittedRunStore,
+  type DmlPlan,
+  type DmlRun
+} from './dml-execution'
 import type { QueryExecutionRequest, QueryExecutionResponse } from './protocol'
 
 export type ProviderFactory = (config: ConnectionConfig) => DatabaseProvider
@@ -34,6 +42,8 @@ export class QueryExecutionService {
 
   /** Held DML Plans, at most one per tab (ADR 0004 amendments). */
   private readonly dmlPlans = new DmlPlanStore()
+  /** Each tab's last committed run, which a Retry re-plans from. */
+  private readonly lastCommittedRuns = new LastCommittedRunStore()
   /** Planning and commit runs in progress, by Execution ID, so `cancel`
    * can stop a commit the service itself is dispatching. */
   private readonly dmlRuns = new Map<string, DmlRun>()
@@ -77,6 +87,7 @@ export class QueryExecutionService {
           }
           this.profiles.delete(request.profileId)
           this.dmlPlans.dropProfile(request.profileId)
+          this.lastCommittedRuns.dropProfile(request.profileId)
           send({ id: request.id, kind: 'result', value: undefined, done: true })
           return
         }
@@ -131,6 +142,8 @@ export class QueryExecutionService {
             throw new DocumentWriteRefusedError()
           }
           this.dmlPlans.dropTab(request.tabId)
+          // A plan for an ordinary statement ends any Retry of the last run.
+          this.lastCommittedRuns.dropTab(request.tabId)
           const writer = this.requireDocumentWriter(request.profileId)
           const plan = await this.trackDmlRun(request.executionId, (run) =>
             buildDmlPlan(
@@ -146,20 +159,30 @@ export class QueryExecutionService {
               (progress) => send({ id: request.id, kind: 'progress', value: progress, done: false })
             )
           )
-          const matchCount = plan.documents.length
-          // Zero matches: nothing to confirm, so nothing is held.
-          if (matchCount > 0) this.dmlPlans.hold(plan)
-          const summary: DmlPlanSummary = {
-            ...(matchCount > 0 ? { planId: plan.planId } : {}),
-            verb: plan.verb,
-            matchCount,
-            drivingQueryRequestCharge: plan.drivingQueryRequestCharge,
-            ...(plan.averageDocumentSize !== undefined
-              ? { averageDocumentSize: plan.averageDocumentSize }
-              : {}),
-            partitionKeyPaths: plan.partitionKeyPaths,
-            sample: plan.sample
+          send({ id: request.id, kind: 'result', value: this.holdPlan(plan), done: true })
+          return
+        }
+
+        case 'planRetry': {
+          const committed = this.lastCommittedRuns.get(request.tabId)
+          if (!committed || committed.planId !== request.planId) {
+            throw new Error(
+              'This run can no longer be retried (another plan in this tab, or its connection closed). ' +
+                'Run the statement again.'
+            )
           }
+          // Read-only covers a Retry too (story 127), before any query runs.
+          if (this.profiles.get(committed.profileId)?.readOnly) {
+            throw new DocumentWriteRefusedError()
+          }
+          this.dmlPlans.dropTab(request.tabId)
+          const writer = this.requireDocumentWriter(committed.profileId)
+          const { plan, scopeCount } = await this.trackDmlRun(request.executionId, (run) =>
+            buildRetryPlan(writer, committed, request.executionId, run, (progress) =>
+              send({ id: request.id, kind: 'progress', value: progress, done: false })
+            )
+          )
+          const summary: DmlRetrySummary = { ...this.holdPlan(plan), scopeCount }
           send({ id: request.id, kind: 'result', value: summary, done: true })
           return
         }
@@ -176,11 +199,20 @@ export class QueryExecutionService {
           const writer = this.requireDocumentWriter(plan.profileId)
           // A plan is written once: committing drops it.
           this.dmlPlans.drop(plan.planId)
-          await this.trackDmlRun(request.executionId, (run) =>
+          const documents = await this.trackDmlRun(request.executionId, (run) =>
             commitDmlPlan(writer, plan, run, (chunk) =>
               send({ id: request.id, kind: 'chunk', value: chunk, done: false })
             )
           )
+          // Replaces the tab's last committed run, a Retry's included.
+          this.lastCommittedRuns.keep({
+            planId: plan.planId,
+            profileId: plan.profileId,
+            tabId: plan.tabId,
+            statement: plan.statement,
+            target: plan.target,
+            documents
+          })
           send({ id: request.id, kind: 'result', value: undefined, done: true })
           return
         }
@@ -193,6 +225,7 @@ export class QueryExecutionService {
 
         case 'releaseTab': {
           this.dmlPlans.dropTab(request.tabId)
+          this.lastCommittedRuns.dropTab(request.tabId)
           send({ id: request.id, kind: 'result', value: undefined, done: true })
           return
         }
@@ -220,6 +253,24 @@ export class QueryExecutionService {
         message: toExecutionErrorMessage(err),
         done: true
       })
+    }
+  }
+
+  /** Holds a plan with matches (zero matches: nothing to confirm, so
+   * nothing is held) and returns its summary. */
+  private holdPlan(plan: DmlPlan): DmlPlanSummary {
+    const matchCount = plan.documents.length
+    if (matchCount > 0) this.dmlPlans.hold(plan)
+    return {
+      ...(matchCount > 0 ? { planId: plan.planId } : {}),
+      verb: plan.verb,
+      matchCount,
+      drivingQueryRequestCharge: plan.drivingQueryRequestCharge,
+      ...(plan.averageDocumentSize !== undefined
+        ? { averageDocumentSize: plan.averageDocumentSize }
+        : {}),
+      partitionKeyPaths: plan.partitionKeyPaths,
+      sample: plan.sample
     }
   }
 

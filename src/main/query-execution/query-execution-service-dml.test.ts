@@ -66,6 +66,8 @@ class FakeCosmosProvider implements DatabaseProvider, DocumentWriter {
     outcome: 'success',
     requestCharge: 5
   })
+  /** When set, decides each Driving Query's pages instead of `pages`. */
+  respond?: (query: DrivingQuery) => DrivingQueryPage[]
   /** Called after each page is served, before the next is requested. */
   afterPage: (pageIndex: number) => void = () => {}
 
@@ -92,7 +94,8 @@ class FakeCosmosProvider implements DatabaseProvider, DocumentWriter {
     options: DrivingQueryOptions
   ): AsyncIterable<DrivingQueryPage> {
     this.drivingQueries.push({ query, options })
-    for (const [index, page] of this.pages.entries()) {
+    const pages = this.respond ? this.respond(query) : this.pages
+    for (const [index, page] of pages.entries()) {
       this.pagesServed++
       yield page
       this.afterPage(index)
@@ -892,6 +895,337 @@ describe('QueryExecutionService DML Statements', () => {
       await call(service, { id: 'c', method: 'connect', profile: cosmosProfile(), secret: undefined })
 
       await expectDropped(service, provider, planId)
+    })
+  })
+
+  describe('Retry', () => {
+    type Outcome = 'success' | 'precondition-failed' | 'not-found' | 'throws'
+
+    /** Commits a DELETE of `doc-1`…`doc-<n>` in tab-1 where each document's
+     * Document Write ends as `outcomes` says (`success` otherwise). */
+    async function committed(
+      n: number,
+      outcomes: Record<string, Outcome> = {},
+      provider = new FakeCosmosProvider()
+    ): Promise<{ provider: FakeCosmosProvider; service: QueryExecutionService; planId: string }> {
+      provider.pages = [{ rows: matches(1, n), requestCharge: 1 }]
+      provider.onWrite = async (write) => {
+        const outcome = outcomes[write.id] ?? 'success'
+        if (outcome === 'throws') throw new Error('Service unavailable')
+        return { outcome, requestCharge: 5 }
+      }
+      const service = await connected(provider)
+      const planId = await plan(service)
+      await call(service, commitRequest(planId))
+      provider.onWrite = async () => ({ outcome: 'success', requestCharge: 5 })
+      provider.writes = []
+      return { provider, service, planId }
+    }
+
+    /** Cosmos DB evaluating a Driving Query over `current`, the rows that
+     * match the statement's WHERE today. A scoped one's `IN` lists match
+     * any combination of the listed ids and partition key values. */
+    function scopedTo(current: Array<Record<string, unknown>>, requestCharge = 2) {
+      return (query: DrivingQuery): DrivingQueryPage[] => {
+        if (query.parameters.length === 0) return [{ rows: current, requestCharge }]
+        const values = (prefix: string): unknown[] =>
+          query.parameters.filter((p) => p.name.startsWith(prefix)).map((p) => p.value)
+        const ids = values('@id')
+        const keys = values('@pk1_')
+        return [
+          {
+            rows: current.filter((row) => ids.includes(row.id) && keys.includes(row.__pkv1)),
+            requestCharge
+          }
+        ]
+      }
+    }
+
+    function retryRequest(
+      planId: string,
+      overrides: Partial<Extract<QueryExecutionRequest, { method: 'planRetry' }>> = {}
+    ): QueryExecutionRequest {
+      return {
+        id: 'retry',
+        method: 'planRetry',
+        planId,
+        tabId: 'tab-1',
+        executionId: 'exec-retry',
+        ...overrides
+      }
+    }
+
+    const match = (n: number, etag = `"e${n}"`, key = `cust-${n}`): Record<string, unknown> => ({
+      id: `doc-${n}`,
+      _etag: etag,
+      _rid: `r${n}`,
+      __pkv1: key,
+      __pk1: true
+    })
+
+    it('re-plans only the documents not written or unchanged, scoped to their addresses, with scopeCount', async () => {
+      const { provider, service, planId } = await committed(5, {
+        'doc-2': 'precondition-failed',
+        'doc-3': 'throws',
+        'doc-4': 'not-found'
+      })
+      provider.respond = scopedTo([match(1), match(2), match(3), match(5)])
+
+      const summary = planSummary(await call(service, retryRequest(planId)))
+
+      expect(summary).toEqual({
+        planId: expect.any(String),
+        verb: 'DELETE',
+        matchCount: 2,
+        scopeCount: 2,
+        drivingQueryRequestCharge: 2,
+        partitionKeyPaths: ['/customerId'],
+        sample: [
+          { id: 'doc-2', partitionKey: 'cust-2' },
+          { id: 'doc-3', partitionKey: 'cust-3' }
+        ]
+      })
+      const { query, options } = provider.drivingQueries.at(-1)!
+      expect(query.query).toContain('WHERE (c.status = "stale") AND c.id IN')
+      expect(query.parameters.map((p) => p.value)).toEqual(['doc-2', 'doc-3', 'cust-2', 'cust-3'])
+      expect(options).toEqual({ executionId: 'exec-retry' })
+    })
+
+    it('commits against current versions, leaving documents that no longer match or were deleted without a Write Outcome', async () => {
+      const { provider, service, planId } = await committed(4, {
+        'doc-2': 'precondition-failed',
+        'doc-3': 'precondition-failed',
+        'doc-4': 'throws'
+      })
+      // doc-2 changed (new _etag) and still matches; doc-3 no longer
+      // matches; doc-4 was deleted.
+      provider.respond = scopedTo([match(1), match(2, '"e2-v2"')])
+      const retry = planSummary(await call(service, retryRequest(planId)))
+
+      const responses = await call(service, commitRequest(retry.planId!, 'exec-retry-commit'))
+
+      expect(retry).toMatchObject({ matchCount: 1, scopeCount: 3 })
+      expect(provider.writes.map((w) => w.write)).toEqual([
+        { kind: 'delete', id: 'doc-2', partitionKey: 'cust-2', ifMatch: '"e2-v2"' }
+      ])
+      expect(outcomeRows(responses)).toEqual([
+        { id: 'doc-2', customerId: 'cust-2', outcome: 'written', requestCharge: 5, message: '' }
+      ])
+      expect(summaryOf(responses)).toMatchObject({ counts: { ...noOutcomes, written: 1 } })
+    })
+
+    it('re-evaluates SET against the current version of an UPDATE', async () => {
+      const provider = new FakeCosmosProvider()
+      provider.pages = [
+        { rows: [{ ...match(1), __set1: 6, __def1: true, __cur1: 5 }], requestCharge: 1 }
+      ]
+      provider.onWrite = async () => ({ outcome: 'precondition-failed', requestCharge: 1 })
+      const service = await connected(provider)
+      const planId = await plan(service, { statement: 'UPDATE c SET c.n = c.n + 1 WHERE c.n < 10' })
+      await call(service, commitRequest(planId))
+      provider.onWrite = async () => ({ outcome: 'success', requestCharge: 5 })
+      provider.respond = scopedTo([{ ...match(1, '"e1-v2"'), __set1: 8, __def1: true, __cur1: 7 }])
+
+      const retry = planSummary(await call(service, retryRequest(planId)))
+      await call(service, commitRequest(retry.planId!))
+
+      expect(provider.drivingQueries.at(-1)!.query.query).toContain('(c.n + 1) AS __set1')
+      expect(provider.drivingQueries.at(-1)!.query.query).toContain('WHERE (c.n < 10) AND')
+      expect(provider.writes.at(-1)!.write).toEqual({
+        kind: 'patch',
+        id: 'doc-1',
+        partitionKey: 'cust-1',
+        ifMatch: '"e1-v2"',
+        operations: [{ op: 'set', path: '/n', value: 8 }]
+      })
+    })
+
+    it('keeps only exact id and partition key matches', async () => {
+      const { provider, service, planId } = await committed(2, {
+        'doc-1': 'precondition-failed',
+        'doc-2': 'precondition-failed'
+      })
+      // doc-1 also exists in cust-2: the IN lists match it, its address doesn't.
+      provider.respond = scopedTo([match(1), match(1, '"other"', 'cust-2'), match(2)])
+
+      const retry = planSummary(await call(service, retryRequest(planId)))
+
+      expect(retry.matchCount).toBe(2)
+      expect(retry.sample).toEqual([
+        { id: 'doc-1', partitionKey: 'cust-1' },
+        { id: 'doc-2', partitionKey: 'cust-2' }
+      ])
+    })
+
+    it('runs the scoped Driving Query in chunks of at most 1,000 addresses, one after another', async () => {
+      const failing = Object.fromEntries(
+        Array.from({ length: 2_500 }, (_, i) => [`doc-${i + 1}`, 'precondition-failed' as const])
+      )
+      const { provider, service, planId } = await committed(2_500, failing)
+      provider.drivingQueries = []
+      provider.respond = scopedTo(
+        Array.from({ length: 2_500 }, (_, i) => match(i + 1)),
+        1.5
+      )
+
+      const responses = await call(service, retryRequest(planId))
+
+      expect(provider.drivingQueries).toHaveLength(3)
+      expect(
+        provider.drivingQueries.map((q) => q.query.parameters.filter((p) => p.name.startsWith('@id')).length)
+      ).toEqual([1_000, 1_000, 500])
+      expect(planSummary(responses)).toMatchObject({
+        matchCount: 2_500,
+        scopeCount: 2_500,
+        drivingQueryRequestCharge: 4.5
+      })
+      expect(responses.filter((r) => r.kind === 'progress').map((r) => r.value)).toEqual([
+        { matched: 1_000, requestCharge: 1.5 },
+        { matched: 2_000, requestCharge: 3 },
+        { matched: 2_500, requestCharge: 4.5 }
+      ])
+    })
+
+    it('cancel stops between chunks and keeps no DML Plan', async () => {
+      const failing = Object.fromEntries(
+        Array.from({ length: 2_500 }, (_, i) => [`doc-${i + 1}`, 'precondition-failed' as const])
+      )
+      const { provider, service, planId } = await committed(2_500, failing)
+      provider.drivingQueries = []
+      provider.respond = scopedTo(Array.from({ length: 2_500 }, (_, i) => match(i + 1)))
+      provider.afterPage = () =>
+        void service.handle(
+          { id: 'x', method: 'cancel', profileId: 'profile-1', executionId: 'exec-retry' },
+          () => {}
+        )
+
+      const responses = await call(service, retryRequest(planId))
+
+      expect(terminal(responses).kind).toBe('error')
+      expect(provider.drivingQueries).toHaveLength(1)
+      expect(provider.canceledExecutionIds).toContain('exec-retry')
+    })
+
+    it('a Retry can itself be retried, scoped to what the Retry left not written', async () => {
+      const { provider, service, planId } = await committed(3, {
+        'doc-1': 'precondition-failed',
+        'doc-2': 'precondition-failed'
+      })
+      provider.respond = scopedTo([match(1, '"e1-v2"'), match(2, '"e2-v2"')])
+      const retry = planSummary(await call(service, retryRequest(planId)))
+      provider.onWrite = async (write) => ({
+        outcome: write.id === 'doc-2' ? 'precondition-failed' : 'success',
+        requestCharge: 5
+      })
+      await call(service, commitRequest(retry.planId!))
+      provider.respond = scopedTo([match(2, '"e2-v3"')])
+
+      const again = planSummary(await call(service, retryRequest(retry.planId!)))
+
+      expect(again).toMatchObject({ matchCount: 1, scopeCount: 1 })
+      expect(provider.drivingQueries.at(-1)!.query.parameters.map((p) => p.value)).toEqual([
+        'doc-2',
+        'cust-2'
+      ])
+      // The committed Retry replaced the original run.
+      expect(errorMessage(await call(service, retryRequest(planId)))).toContain(
+        'can no longer be retried'
+      )
+    })
+
+    it('a read-only profile refuses a Retry before any Driving Query runs', async () => {
+      const { provider, service, planId } = await committed(2, { 'doc-1': 'precondition-failed' })
+      provider.drivingQueries = []
+      await call(service, { id: 'c', method: 'connect', profile: cosmosProfile(true), secret: undefined })
+
+      const responses = await call(service, retryRequest(planId))
+
+      expect(errorMessage(responses)).toContain('read-only')
+      expect(provider.drivingQueries).toEqual([])
+    })
+
+    describe('the last committed run', () => {
+      async function retryable(): Promise<{
+        provider: FakeCosmosProvider
+        service: QueryExecutionService
+        planId: string
+      }> {
+        const held = await committed(2, { 'doc-1': 'precondition-failed' })
+        held.provider.respond = scopedTo([match(1)])
+        return held
+      }
+
+      it('survives discarding a Retry at the confirmation', async () => {
+        const { service, planId } = await retryable()
+        const retry = planSummary(await call(service, retryRequest(planId)))
+        await call(service, { id: 'd', method: 'discardPlan', planId: retry.planId! })
+
+        expect(planSummary(await call(service, retryRequest(planId))).matchCount).toBe(1)
+      })
+
+      it('is dropped by a plan for an ordinary statement in the tab, even a refused one', async () => {
+        const { service, planId } = await retryable()
+
+        await call(service, planRequest({ statement: 'DELETE FROM c' }))
+
+        expect(errorMessage(await call(service, retryRequest(planId)))).toContain(
+          'can no longer be retried'
+        )
+      })
+
+      it('is left alone by a plan in another tab', async () => {
+        const { service, planId } = await retryable()
+
+        await plan(service, { tabId: 'tab-2' })
+
+        expect(planSummary(await call(service, retryRequest(planId))).matchCount).toBe(1)
+      })
+
+      it('belongs to its tab', async () => {
+        const { service, planId } = await retryable()
+
+        expect(errorMessage(await call(service, retryRequest(planId, { tabId: 'tab-2' })))).toContain(
+          'can no longer be retried'
+        )
+      })
+
+      it('is dropped by releaseTab', async () => {
+        const { service, planId } = await retryable()
+
+        await call(service, { id: 'r', method: 'releaseTab', tabId: 'tab-1' })
+
+        expect(errorMessage(await call(service, retryRequest(planId)))).toContain(
+          'can no longer be retried'
+        )
+      })
+
+      it('is dropped by disconnect', async () => {
+        const { service, planId } = await retryable()
+
+        await call(service, { id: 'x', method: 'disconnect', profileId: 'profile-1' })
+        await call(service, { id: 'c', method: 'connect', profile: cosmosProfile(), secret: undefined })
+
+        expect(errorMessage(await call(service, retryRequest(planId)))).toContain(
+          'can no longer be retried'
+        )
+      })
+
+      it('is replaced when another run in the tab commits', async () => {
+        const { provider, service, planId } = await retryable()
+        provider.respond = undefined
+        provider.pages = [{ rows: matches(5, 5), requestCharge: 1 }]
+        provider.onWrite = async () => ({ outcome: 'precondition-failed', requestCharge: 1 })
+        const second = await plan(service)
+        await call(service, commitRequest(second))
+        provider.respond = scopedTo([match(5)])
+
+        expect(errorMessage(await call(service, retryRequest(planId)))).toContain(
+          'can no longer be retried'
+        )
+        expect(planSummary(await call(service, retryRequest(second))).sample).toEqual([
+          { id: 'doc-5', partitionKey: 'cust-5' }
+        ])
+      })
     })
   })
 })

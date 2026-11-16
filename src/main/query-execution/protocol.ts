@@ -13,7 +13,7 @@ import type {
   ReadDocumentRequest,
   ReadDocumentResult
 } from '@shared/types/document-writer'
-import type { DmlPlanningProgress, DmlPlanSummary } from '@shared/types/dml-run'
+import type { DmlPlanningProgress, DmlPlanSummary, DmlRetrySummary } from '@shared/types/dml-run'
 
 /**
  * Correlation id for one request/response exchange over the main↔utility
@@ -66,6 +66,12 @@ export type QueryExecutionRequest =
   /** Writes exactly the held DML Plan, streaming one Write Outcome row per
    * document as `chunk`s of one Result Set. Cancellable by Execution ID. */
   | { id: RequestId; method: 'commitDml'; planId: string; executionId: ExecutionId }
+  /** Plans a Retry (GLOSSARY.md) of the tab's last committed run, named by
+   * its `planId`: re-runs that run's statement scoped to the documents it
+   * left not written, holding an ordinary DML Plan for `tabId`. Sends
+   * `progress`, then a `result` with a `DmlRetrySummary`. Cancellable by
+   * Execution ID. */
+  | { id: RequestId; method: 'planRetry'; planId: string; tabId: string; executionId: ExecutionId }
   /** Drops a held DML Plan (Cancel at the confirmation). */
   | { id: RequestId; method: 'discardPlan'; planId: string }
   /** The tab closed: drops everything held for it. */
@@ -77,7 +83,7 @@ export type QueryExecutionRequest =
 /**
  * `chunk` responses (`done: false`) may be sent zero or more times per
  * Request ID before exactly one terminal `result` or `error` response
- * (`done: true`) — only `executeQuery` and `commitDml` send `chunk` responses (and only `planDml` sends `progress`); every
+ * (`done: true`) — only `executeQuery` and `commitDml` send `chunk` responses (and only `planDml` and `planRetry` send `progress`); every
  * other method goes straight to a single terminal response. This shape is
  * deliberately many-replies-capable even though Phase 2's own methods
  * (`connect`/`testConnection`/`disconnect`/`getMetadata`) only ever need
@@ -86,7 +92,7 @@ export type QueryExecutionRequest =
  */
 export type QueryExecutionResponse =
   | { id: RequestId; kind: 'chunk'; value: ResultChunk; done: false }
-  /** `planDml` only: Driving Query progress before its terminal `result`. */
+  /** `planDml` and `planRetry`: Driving Query progress before the terminal `result`. */
   | { id: RequestId; kind: 'progress'; value: DmlPlanningProgress; done: false }
   | {
       id: RequestId
@@ -97,6 +103,7 @@ export type QueryExecutionResponse =
         | DocumentWriteResult
         | ReadDocumentResult
         | DmlPlanSummary
+        | DmlRetrySummary
         | undefined
       done: true
     }

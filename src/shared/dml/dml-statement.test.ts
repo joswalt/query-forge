@@ -463,7 +463,7 @@ describe('scoping a Retry Driving Query to the documents not written', () => {
     const chunks = result.ok ? result.chunks : []
     expect(chunks.length).toBe(3)
     for (const chunk of chunks) {
-      const bytes = chunk.addresses.reduce((sum, a) => sum + a.id.length + a.partitionKey.length, 0)
+      const bytes = chunk.addresses.reduce((sum, a) => sum + a.id.length + String(a.partitionKey).length, 0)
       expect(bytes).toBeLessThanOrEqual(256 * 1024)
     }
     // Full chunks until the last: 256 KB holds about 260 such addresses.

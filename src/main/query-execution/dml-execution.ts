@@ -3,8 +3,11 @@ import type { ResultChunk } from '@shared/types/database-provider'
 import {
   parseDmlStatement,
   translateDmlStatement,
+  translateRetry,
   type DmlOperationTemplate,
+  type DmlTranslation,
   type DmlVerb,
+  type DrivingQuery,
   type PartitionKeyColumns
 } from '@shared/dml/dml-statement'
 import type {
@@ -13,6 +16,7 @@ import type {
   DocumentWrite,
   DocumentWriteResult,
   DocumentWriter,
+  DrivingQueryOptions,
   PartitionKeyLevelValue,
   PartitionKeyValue
 } from '@shared/types/document-writer'
@@ -56,6 +60,8 @@ export interface DmlPlan {
   planId: string
   profileId: string
   tabId: string
+  /** The statement text as planned; a Retry's is the original's. */
+  statement: string
   verb: DmlVerb
   target: ContainerTarget
   partitionKeyPaths: string[]
@@ -115,6 +121,52 @@ export class DmlPlanStore {
   }
 }
 
+/** One document of a committed run: its address and Write Outcome. */
+export interface CommittedDocument {
+  id: string
+  partitionKey: PartitionKeyValue
+  outcome: WriteOutcome
+}
+
+/**
+ * A tab's last committed run (ADR 0004 amendment, Retry): what a Retry
+ * needs and nothing more, so no `SET` values or versions. `planId` is the
+ * committed plan's, which `planRetry` names.
+ */
+export interface LastCommittedRun {
+  planId: string
+  profileId: string
+  tabId: string
+  statement: string
+  target: ContainerTarget
+  documents: CommittedDocument[]
+}
+
+/**
+ * The last committed run of each tab. Replaced only when another run in
+ * the tab commits; dropped by a plan for an ordinary statement in the tab,
+ * `releaseTab` and disconnect. A Retry's planning leaves it alone.
+ */
+export class LastCommittedRunStore {
+  private readonly runs = new Map<string, LastCommittedRun>()
+
+  keep(run: LastCommittedRun): void {
+    this.runs.set(run.tabId, run)
+  }
+
+  get(tabId: string): LastCommittedRun | undefined {
+    return this.runs.get(tabId)
+  }
+
+  dropTab(tabId: string): void {
+    this.runs.delete(tabId)
+  }
+
+  dropProfile(profileId: string): void {
+    for (const [tabId, run] of this.runs) if (run.profileId === profileId) this.runs.delete(tabId)
+  }
+}
+
 export interface PlanDmlInput {
   profileId: string
   tabId: string
@@ -143,51 +195,136 @@ export async function buildDmlPlan(
   if (!translated.ok) throw new Error(`DML syntax error: ${translated.error.message}`)
   if (run.cancelled) throw new DmlRunCancelledError()
 
-  const documents: PlannedDocument[] = []
-  const sample: DmlSampleDocument[] = []
-  let requestCharge = 0
-  let retrievedDocumentCount = 0
-  let retrievedDocumentSize = 0
-  for await (const page of writer.runDrivingQuery(translated.translation.drivingQuery, {
+  const matches = new MatchCollector(translated.translation, run, onProgress)
+  await matches.collect(writer, translated.translation.drivingQuery, {
     ...input.target,
     executionId: input.executionId
-  })) {
-    requestCharge += page.requestCharge
-    retrievedDocumentCount += page.retrievedDocumentCount ?? 0
-    retrievedDocumentSize += page.retrievedDocumentSize ?? 0
-    for (const row of page.rows) {
-      const document = toPlannedDocument(row, translated.translation)
-      documents.push(document)
-      if (sample.length < DML_SAMPLE_SIZE) {
-        sample.push(toSampleDocument(row, document, translated.translation.operations))
-      }
-    }
-    // Throwing leaves the loop, which stops the provider paging further.
-    if (documents.length > MAX_DML_PLAN_DOCUMENTS) {
-      throw new Error(
-        `This ${shell.statement.verb} matches more than ${MAX_DML_PLAN_DOCUMENTS.toLocaleString('en-US')} ` +
-          'documents, so nothing was written. Narrow your WHERE and run it again.'
-      )
-    }
-    if (run.cancelled) throw new DmlRunCancelledError()
-    onProgress({ matched: documents.length, requestCharge })
+  })
+  if (matches.documents.length > MAX_DML_PLAN_DOCUMENTS) {
+    throw new Error(
+      `This ${shell.statement.verb} matches more than ${MAX_DML_PLAN_DOCUMENTS.toLocaleString('en-US')} ` +
+        'documents, so nothing was written. Narrow your WHERE and run it again.'
+    )
   }
-  // A cancelled query can also end quietly instead of throwing.
-  if (run.cancelled) throw new DmlRunCancelledError()
 
-  return {
-    planId: randomUUID(),
+  return matches.toPlan({
     profileId: input.profileId,
     tabId: input.tabId,
+    statement: input.statement,
     verb: shell.statement.verb,
     target: input.target,
-    partitionKeyPaths,
-    documents,
-    sample,
-    drivingQueryRequestCharge: requestCharge,
-    ...(retrievedDocumentCount > 0
-      ? { averageDocumentSize: retrievedDocumentSize / retrievedDocumentCount }
-      : {})
+    partitionKeyPaths
+  })
+}
+
+/**
+ * Plans a Retry (GLOSSARY.md) of the tab's last committed run: its
+ * statement's Driving Query scoped to the documents it left not written
+ * (any Write Outcome but `written`/`unchanged`), chunk by chunk, so
+ * `WHERE`, `SET` values and `_etag` come from current versions. Documents
+ * that no longer match or were deleted drop out of the plan. Cancel stops
+ * between chunks (and pages).
+ */
+export async function buildRetryPlan(
+  writer: DocumentWriter,
+  committed: LastCommittedRun,
+  executionId: string,
+  run: DmlRun,
+  onProgress: (progress: DmlPlanningProgress) => void
+): Promise<{ plan: DmlPlan; scopeCount: number }> {
+  const scope = committed.documents.filter(
+    (document) => document.outcome !== 'written' && document.outcome !== 'unchanged'
+  )
+  const partitionKeyPaths = await writer.readPartitionKeyPaths(committed.target)
+  const translated = translateRetry(committed.statement, partitionKeyPaths, scope)
+  if (!translated.ok) throw new Error(`DML syntax error: ${translated.error.message}`)
+
+  const matches = new MatchCollector(translated.translation, run, onProgress)
+  for (const chunk of translated.chunks) {
+    if (run.cancelled) throw new DmlRunCancelledError()
+    // `IN` lists match any combination of the chunk's ids and keys: keep
+    // only the exact addresses this chunk was scoped to.
+    const scoped = new Set(chunk.addresses.map(addressKey))
+    await matches.collect(writer, chunk.drivingQuery, { ...committed.target, executionId }, (document) =>
+      scoped.has(addressKey(document))
+    )
+  }
+
+  return {
+    plan: matches.toPlan({
+      profileId: committed.profileId,
+      tabId: committed.tabId,
+      statement: committed.statement,
+      verb: translated.statement.verb,
+      target: committed.target,
+      partitionKeyPaths
+    }),
+    scopeCount: scope.length
+  }
+}
+
+/** One address as a comparable key (JSON keeps `{}`, `null`, `1` and `"1"`
+ * apart). */
+function addressKey(address: { id: string; partitionKey: PartitionKeyValue }): string {
+  return JSON.stringify([address.id, address.partitionKey])
+}
+
+/** Gathers a plan's matches, sample and RU from one or more Driving
+ * Queries, reporting progress after each page. */
+class MatchCollector {
+  readonly documents: PlannedDocument[] = []
+  private readonly sample: DmlSampleDocument[] = []
+  private requestCharge = 0
+  private retrievedDocumentCount = 0
+  private retrievedDocumentSize = 0
+
+  constructor(
+    private readonly translation: DmlTranslation,
+    private readonly run: DmlRun,
+    private readonly onProgress: (progress: DmlPlanningProgress) => void
+  ) {}
+
+  async collect(
+    writer: DocumentWriter,
+    query: DrivingQuery,
+    options: DrivingQueryOptions,
+    keep: (document: PlannedDocument) => boolean = () => true
+  ): Promise<void> {
+    for await (const page of writer.runDrivingQuery(query, options)) {
+      this.requestCharge += page.requestCharge
+      this.retrievedDocumentCount += page.retrievedDocumentCount ?? 0
+      this.retrievedDocumentSize += page.retrievedDocumentSize ?? 0
+      for (const row of page.rows) {
+        const document = toPlannedDocument(row, this.translation)
+        if (!keep(document)) continue
+        this.documents.push(document)
+        if (this.sample.length < DML_SAMPLE_SIZE) {
+          this.sample.push(toSampleDocument(row, document, this.translation.operations))
+        }
+      }
+      // Leaving the loop stops the provider paging further; the caller
+      // refuses past the ceiling.
+      if (this.documents.length > MAX_DML_PLAN_DOCUMENTS) return
+      if (this.run.cancelled) throw new DmlRunCancelledError()
+      this.onProgress({ matched: this.documents.length, requestCharge: this.requestCharge })
+    }
+    // A cancelled query can also end quietly instead of throwing.
+    if (this.run.cancelled) throw new DmlRunCancelledError()
+  }
+
+  toPlan(
+    held: Pick<DmlPlan, 'profileId' | 'tabId' | 'statement' | 'verb' | 'target' | 'partitionKeyPaths'>
+  ): DmlPlan {
+    return {
+      planId: randomUUID(),
+      ...held,
+      documents: this.documents,
+      sample: this.sample,
+      drivingQueryRequestCharge: this.requestCharge,
+      ...(this.retrievedDocumentCount > 0
+        ? { averageDocumentSize: this.retrievedDocumentSize / this.retrievedDocumentCount }
+        : {})
+    }
   }
 }
 
@@ -259,14 +396,15 @@ const OUTCOME_COLUMNS = new Set(['id', 'outcome', 'requestCharge', 'message'])
  * a pool of `DML_WRITE_POOL_SIZE`, streaming one Write Outcome row per
  * document in completion order. On cancel it stops dispatching, lets
  * in-flight writes report real outcomes and marks the rest
- * `not-attempted`. The last chunk carries the summary.
+ * `not-attempted`. The last chunk carries the summary. Resolves with each
+ * document's address and Write Outcome, for the tab's last committed run.
  */
 export async function commitDmlPlan(
   writer: DocumentWriter,
   plan: DmlPlan,
   run: DmlRun,
   sendChunk: (chunk: ResultChunk) => void
-): Promise<void> {
+): Promise<CommittedDocument[]> {
   const startedAt = Date.now()
   const total = plan.documents.length
   const counts = emptyOutcomeCounts()
@@ -276,6 +414,7 @@ export async function commitDmlPlan(
   let buffer: DmlOutcomeRow[] = []
   let bufferRequestCharge = 0
   let lastSentAt = startedAt
+  const committed: CommittedDocument[] = []
 
   const progressChunk = (): ResultChunk => ({
     rows: buffer,
@@ -298,6 +437,7 @@ export async function commitDmlPlan(
   ): void => {
     counts[outcome]++
     completed++
+    committed.push({ id: document.id, partitionKey: document.partitionKey, outcome })
     writeRequestCharge += requestCharge
     bufferRequestCharge += requestCharge
     buffer.push(outcomeRow(document, columns, outcome, requestCharge, message))
@@ -336,6 +476,7 @@ export async function commitDmlPlan(
       }
     }
   })
+  return committed
 }
 
 const CONCURRENT_CHANGE_MESSAGE = 'This document changed after the DML Plan was made, so it was skipped.'

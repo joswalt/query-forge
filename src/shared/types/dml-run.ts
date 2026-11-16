@@ -85,6 +85,13 @@ export interface DmlPlanSummary {
   sample: DmlSampleDocument[]
 }
 
+/** `planRetry`'s result: an ordinary plan result, plus how many documents
+ * the Retry re-checked (`scopeCount`). `scopeCount - matchCount` no longer
+ * match or were deleted, and are left alone. */
+export interface DmlRetrySummary extends DmlPlanSummary {
+  scopeCount: number
+}
+
 /** Each commit chunk's `meta.dmlProgress`. `requestCharge` is the running
  * write RU (the Driving Query's is in the summary); `counts` the Write
  * Outcomes so far, for the run report's stacked bar. */
