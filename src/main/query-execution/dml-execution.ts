@@ -281,7 +281,7 @@ export async function commitDmlPlan(
     rows: buffer,
     meta: {
       ru: bufferRequestCharge,
-      dmlProgress: { completed, total, requestCharge: writeRequestCharge }
+      dmlProgress: { completed, total, requestCharge: writeRequestCharge, counts: { ...counts } }
     }
   })
   const flush = (): void => {

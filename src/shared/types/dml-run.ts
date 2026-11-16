@@ -86,11 +86,13 @@ export interface DmlPlanSummary {
 }
 
 /** Each commit chunk's `meta.dmlProgress`. `requestCharge` is the running
- * write RU (the Driving Query's is in the summary). */
+ * write RU (the Driving Query's is in the summary); `counts` the Write
+ * Outcomes so far, for the run report's stacked bar. */
 export interface DmlCommitProgress {
   completed: number
   total: number
   requestCharge: number
+  counts: Record<WriteOutcome, number>
 }
 
 /** The last commit chunk's `meta.dmlSummary`. */

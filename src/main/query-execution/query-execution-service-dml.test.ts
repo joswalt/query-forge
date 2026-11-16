@@ -194,6 +194,16 @@ function outcomeRows(responses: QueryExecutionResponse[]): DmlOutcomeRow[] {
   return chunksOf(responses).flatMap((chunk) => chunk.rows as DmlOutcomeRow[])
 }
 
+const noOutcomes = {
+  written: 0,
+  unchanged: 0,
+  'concurrent-change': 0,
+  'not-found': 0,
+  'expression-undefined': 0,
+  failed: 0,
+  'not-attempted': 0
+}
+
 function summaryOf(responses: QueryExecutionResponse[]): DmlCommitSummary | undefined {
   return chunksOf(responses).at(-1)?.meta?.dmlSummary
 }
@@ -530,7 +540,8 @@ describe('QueryExecutionService DML Statements', () => {
         expect(chunk.meta?.dmlProgress).toEqual({
           completed,
           total: 250,
-          requestCharge: completed * 2
+          requestCharge: completed * 2,
+          counts: { ...noOutcomes, written: completed }
         })
       }
       expect(chunks.slice(0, -1).every((chunk) => chunk.meta?.dmlSummary === undefined)).toBe(true)
