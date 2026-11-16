@@ -431,6 +431,14 @@
   font-weight: 620;
 }
 
+/* Verb + container chip of a DML entry, between the name and the pill. */
+.history-entry__dml {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-family: var(--qf-font-mono);
+  white-space: nowrap;
+}
+
 .history-entry__stats {
   display: flex;
   flex-wrap: wrap;
@@ -522,4 +530,12 @@
 
 .status-pill[data-status='cancelled'] {
   color: var(--qf-warn);
+}
+
+/* A DML commit that ran to the end but left documents unwritten: amber
+   like the run report's skipped outcomes, with a ring so it never reads
+   as a plain cancel. */
+.status-pill[data-status='partial'] {
+  color: var(--qf-warn);
+  box-shadow: inset 0 0 0 1px var(--qf-warn);
 }

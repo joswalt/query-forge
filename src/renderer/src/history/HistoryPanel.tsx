@@ -1,6 +1,37 @@
 import { useEffect, useRef, useState } from 'react'
-import type { QueryHistoryEntry } from '@shared/types/query-history'
+import type { DmlHistoryDetail, QueryHistoryEntry } from '@shared/types/query-history'
+import { WRITE_OUTCOMES, writeOutcomeLabel } from '@shared/types/dml-run'
 import { Collapsible } from '../Collapsible'
+
+/** A DML entry's chip: `DELETE · orders`. */
+function dmlChipText(dml: DmlHistoryDetail): string {
+  return [dml.verb, dml.containerName].filter(Boolean).join(' · ')
+}
+
+/** Run report tile labels read mid-sentence: `Changed by someone else`
+ * becomes `changed by someone else`; `SET was undefined` keeps its keyword. */
+function inlineLabel(label: string): string {
+  return /^[A-Z][a-z]/.test(label) ? label[0].toLowerCase() + label.slice(1) : label
+}
+
+/** A DML entry's stats line: documents matched, each non-zero Write
+ * Outcome by its run report label, duration and total RU, e.g. `1,840
+ * matched · 1,837 deleted · 3 changed by someone else · 2.4 s · 412 RU`. */
+function dmlStats(
+  dml: DmlHistoryDetail,
+  rowCount: number | undefined,
+  durationMs: number
+): string[] {
+  const verb = dml.verb ?? 'DELETE'
+  return [
+    ...(rowCount !== undefined ? [`${rowCount.toLocaleString()} matched`] : []),
+    ...WRITE_OUTCOMES.filter((o) => dml.counts[o] > 0).map(
+      (o) => `${dml.counts[o].toLocaleString()} ${inlineLabel(writeOutcomeLabel(o, verb))}`
+    ),
+    `${(durationMs / 1000).toFixed(1)} s`,
+    `${dml.totalRequestCharge.toLocaleString(undefined, { maximumFractionDigits: 2 })} RU`
+  ]
+}
 
 /**
  * Query History (user stories 50, 52, 53) — a read-only list fed by
@@ -11,6 +42,10 @@ import { Collapsible } from '../Collapsible'
  * default, matching `defaultPreferences` (preferences.ts). "Clear history"
  * is its companion retention control — opting in and later opting back out
  * doesn't by itself delete text already persisted; this button does.
+ *
+ * A DML Statement run's entry adds a verb + container chip and a stats
+ * line of its Write Outcome counts, readable with the text withheld. Copy
+ * query works the same; there is no re-run.
  */
 export function HistoryPanel(): React.JSX.Element {
   const [entries, setEntries] = useState<QueryHistoryEntry[]>([])
@@ -164,13 +199,24 @@ export function HistoryPanel(): React.JSX.Element {
             <li key={entry.id} className="history-entry" data-status={entry.status}>
               <div className="history-entry__head">
                 <strong className="history-entry__name">{entry.profileName}</strong>
+                {entry.dml && (
+                  <span className="chip history-entry__dml">{dmlChipText(entry.dml)}</span>
+                )}
                 <span className="status-pill" data-status={entry.status}>
                   {entry.status}
                 </span>
               </div>
               <div className="history-entry__stats">
-                <span>{entry.durationMs} ms</span>
-                {entry.rowCount !== undefined && <span>{entry.rowCount} rows</span>}
+                {entry.dml ? (
+                  dmlStats(entry.dml, entry.rowCount, entry.durationMs).map((part) => (
+                    <span key={part}>{part}</span>
+                  ))
+                ) : (
+                  <>
+                    <span>{entry.durationMs} ms</span>
+                    {entry.rowCount !== undefined && <span>{entry.rowCount} rows</span>}
+                  </>
+                )}
                 <time dateTime={entry.executedAt}>
                   {new Date(entry.executedAt).toLocaleString()}
                 </time>
