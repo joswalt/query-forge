@@ -24,6 +24,7 @@ import {
   DML_SAMPLE_SIZE,
   DML_WRITE_POOL_SIZE,
   emptyOutcomeCounts,
+  isNotWritten,
   MAX_DML_PLAN_DOCUMENTS,
   type DmlOutcomeRow,
   type DmlPlanningProgress,
@@ -232,9 +233,7 @@ export async function buildRetryPlan(
   run: DmlRun,
   onProgress: (progress: DmlPlanningProgress) => void
 ): Promise<{ plan: DmlPlan; scopeCount: number }> {
-  const scope = committed.documents.filter(
-    (document) => document.outcome !== 'written' && document.outcome !== 'unchanged'
-  )
+  const scope = committed.documents.filter((document) => isNotWritten(document.outcome))
   const partitionKeyPaths = await writer.readPartitionKeyPaths(committed.target)
   const translated = translateRetry(committed.statement, partitionKeyPaths, scope)
   if (!translated.ok) throw new Error(`DML syntax error: ${translated.error.message}`)

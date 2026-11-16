@@ -25,6 +25,25 @@ export const WRITE_OUTCOMES: readonly WriteOutcome[] = [
   'not-attempted'
 ]
 
+/**
+ * The Write Outcomes that leave a document not written: every one but
+ * `written` and `unchanged`. The one definition behind what a Retry covers,
+ * the run report's "Retry N not written" count and a Query History Entry's
+ * `partial` status, so the three can't drift apart.
+ */
+export const NOT_WRITTEN_OUTCOMES: readonly WriteOutcome[] = WRITE_OUTCOMES.filter(
+  (outcome) => outcome !== 'written' && outcome !== 'unchanged'
+)
+
+export function isNotWritten(outcome: WriteOutcome): boolean {
+  return NOT_WRITTEN_OUTCOMES.includes(outcome)
+}
+
+/** How many documents a run left not written (`NOT_WRITTEN_OUTCOMES`). */
+export function notWrittenCount(counts: Record<WriteOutcome, number>): number {
+  return NOT_WRITTEN_OUTCOMES.reduce((sum, outcome) => sum + counts[outcome], 0)
+}
+
 /** The ceiling on documents in one DML Plan (= `MAX_DISPLAY_ROWS`, so every
  * outcome row stays visible). The Driving Query stops at one more and the
  * run is refused before any write. */

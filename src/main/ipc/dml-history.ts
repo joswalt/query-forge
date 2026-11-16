@@ -1,6 +1,7 @@
 import { detectDmlStatement, type DmlVerb } from '@shared/dml/dml-statement'
 import {
   emptyOutcomeCounts,
+  notWrittenCount,
   type DmlCommitProgress,
   type DmlCommitSummary,
   type DmlPlanningProgress
@@ -46,15 +47,6 @@ export interface DmlHistoryContext {
 
 /** Same placeholder as a query entry for a profile deleted mid-run. */
 const DELETED_PROFILE_NAME = '(deleted connection)'
-
-/** Write Outcomes that leave a document not written by a commit that ran
- * to the end (`written` and `unchanged` count as done). */
-const UNWRITTEN_OUTCOMES = [
-  'concurrent-change',
-  'not-found',
-  'expression-undefined',
-  'failed'
-] as const
 
 /**
  * The Query History input for planning that ended without a plan: `error`
@@ -145,5 +137,7 @@ function commitStatus(ending: CommitEnding): QueryHistoryStatus {
   if (ending.kind === 'failed') return ending.wasCancelled ? 'cancelled' : 'error'
   const { counts, cancelled } = ending.summary
   if (cancelled) return 'cancelled'
-  return UNWRITTEN_OUTCOMES.some((o) => counts[o] > 0) ? 'partial' : 'success'
+  // A run that ended without a cancel attempted every document, so this is
+  // exactly what a Retry of it would cover.
+  return notWrittenCount(counts) > 0 ? 'partial' : 'success'
 }

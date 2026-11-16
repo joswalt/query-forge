@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { DmlVerb } from '@shared/dml/dml-statement'
 import {
+  notWrittenCount,
   WRITE_OUTCOMES,
   writeOutcomeLabel,
   writeOutcomeMeaning,
@@ -11,7 +12,7 @@ import {
 import { matchesTypedDmlConfirmation, typedDmlConfirmation } from '@shared/write-confirmation'
 import { retryScope, type DmlRunState } from './dml-run-state'
 import { projectedRequestCharge, writeRequestChargeBand } from './dml-ru-estimate'
-import { notWrittenCount, outcomeBarSegments, writeOutcomeTone } from './dml-run-report'
+import { outcomeBarSegments, writeOutcomeTone } from './dml-run-report'
 import './dml-run.css'
 
 const count = (n: number): string => n.toLocaleString()
