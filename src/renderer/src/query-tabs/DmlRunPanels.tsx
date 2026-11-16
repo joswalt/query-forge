@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import type { DmlVerb } from '@shared/dml/dml-statement'
 import {
   notWrittenCount,
@@ -6,8 +6,8 @@ import {
   writeOutcomeLabel,
   writeOutcomeMeaning,
   writeOutcomeTone,
+  type DmlSampleChange,
   type DmlSampleDocument,
-  type DmlSampleValue,
   type WriteOutcome
 } from '@shared/types/dml-run'
 import { isNoneValue } from '@shared/types/document-writer'
@@ -15,6 +15,7 @@ import { matchesTypedDmlConfirmation, typedDmlConfirmation } from '@shared/write
 import { retryScope, type DmlRunState } from './dml-run-state'
 import { projectedRequestCharge, writeRequestChargeBand } from './dml-ru-estimate'
 import { outcomeBarSegments } from './dml-run-report'
+import { arrayChangeSummary, sampleChangeDiff, sampleValueText } from './dml-sample-change'
 import './dml-run.css'
 
 const count = (n: number): string => n.toLocaleString()
@@ -435,12 +436,63 @@ function ReRunHint({
 }
 
 /** Longest rendering of one sampled value before it is cut short. */
-const SAMPLE_VALUE_CHARS = 60
+/**
+ * One `SET` path's current → new in the sample. An array that only gains
+ * or loses entries reads as `3 entries + {…}`; anything else as the two
+ * values truncated. Clicking toggles the full diff underneath the row.
+ */
+function SampleChangeCell({
+  change,
+  expanded,
+  onToggle
+}: {
+  change: DmlSampleChange
+  expanded: boolean
+  onToggle: () => void
+}): React.JSX.Element {
+  const summary = arrayChangeSummary(change)
+  return (
+    <button
+      type="button"
+      className="dml-sample__change"
+      aria-expanded={expanded}
+      title={expanded ? 'Hide the full change' : 'Show the full change'}
+      onClick={onToggle}
+    >
+      {summary ? (
+        <>
+          <span className="dml-muted">{summary.kept}</span> <b>{summary.delta}</b>
+        </>
+      ) : (
+        <>
+          <span className="dml-muted">{sampleValueText(change.current)}</span> → <b>{sampleValueText(change.next)}</b>
+        </>
+      )}
+      <span className="dml-sample__caret" aria-hidden="true">
+        {expanded ? '▾' : '▸'}
+      </span>
+    </button>
+  )
+}
 
-function sampleValue(value: DmlSampleValue): string {
-  if (!value.defined) return '(absent)'
-  const text = JSON.stringify(value.value) ?? String(value.value)
-  return text.length > SAMPLE_VALUE_CHARS ? `${text.slice(0, SAMPLE_VALUE_CHARS - 1)}…` : text
+/** The expanded cell: a line diff of the pretty-printed current and new
+ * values, removed lines marked `-` and added lines `+`. */
+function SampleChangeDetail({ change }: { change: DmlSampleChange }): React.JSX.Element {
+  return (
+    <div className="dml-sample__detail" role="region" aria-label={`Full change to ${change.target}`}>
+      <div className="dml-muted">
+        {change.target}: current → new
+      </div>
+      <pre className="dml-diff">
+        {sampleChangeDiff(change).map((line, i) => (
+          <div key={i} className="dml-diff__line" data-kind={line.kind}>
+            {line.kind === 'added' ? '+ ' : line.kind === 'removed' ? '- ' : '  '}
+            {line.text}
+          </div>
+        ))}
+      </pre>
+    </div>
+  )
 }
 
 /** One partition key level of a sampled address; `{}` is the None value. */
@@ -463,8 +515,11 @@ function DmlSample({
   onOpenMatchesQuery: () => void
 }): React.JSX.Element | null {
   const { sample, partitionKeyPaths } = dml
+  // The one expanded change cell, keyed by document address and SET path.
+  const [expanded, setExpanded] = useState<string>()
   if (sample.length === 0) return null
   const targets = sample[0].changes?.map((change) => change.target) ?? []
+  const columnCount = 1 + partitionKeyPaths.length + targets.length
   const levels = (document: DmlSampleDocument): unknown[] =>
     partitionKeyPaths.length === 1 ? [document.partitionKey] : (document.partitionKey as unknown[])
   return (
@@ -502,20 +557,39 @@ function DmlSample({
             </tr>
           </thead>
           <tbody>
-            {sample.map((document) => (
-              <tr key={`${document.id}\u0000${JSON.stringify(document.partitionKey)}`}>
-                <td>{document.id}</td>
-                {levels(document).map((level, i) => (
-                  <td key={partitionKeyPaths[i]}>{partitionKeyLevel(level)}</td>
-                ))}
-                {document.changes?.map((change) => (
-                  <td key={change.target}>
-                    <span className="dml-muted">{sampleValue(change.current)}</span> →{' '}
-                    <b>{sampleValue(change.next)}</b>
-                  </td>
-                ))}
-              </tr>
-            ))}
+            {sample.map((document) => {
+              const rowKey = `${document.id}\u0000${JSON.stringify(document.partitionKey)}`
+              const open = document.changes?.find((change) => `${rowKey}\u0000${change.target}` === expanded)
+              return (
+                <Fragment key={rowKey}>
+                  <tr>
+                    <td>{document.id}</td>
+                    {levels(document).map((level, i) => (
+                      <td key={partitionKeyPaths[i]}>{partitionKeyLevel(level)}</td>
+                    ))}
+                    {document.changes?.map((change) => {
+                      const cellKey = `${rowKey}\u0000${change.target}`
+                      return (
+                        <td key={change.target}>
+                          <SampleChangeCell
+                            change={change}
+                            expanded={cellKey === expanded}
+                            onToggle={() => setExpanded(cellKey === expanded ? undefined : cellKey)}
+                          />
+                        </td>
+                      )
+                    })}
+                  </tr>
+                  {open && (
+                    <tr className="dml-sample__detail-row">
+                      <td colSpan={columnCount}>
+                        <SampleChangeDetail change={open} />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              )
+            })}
           </tbody>
         </table>
       </div>

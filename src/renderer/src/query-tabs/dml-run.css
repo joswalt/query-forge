@@ -90,3 +90,20 @@
 .dml-sample__table th { text-align: left; font-weight: 600; color: var(--qf-muted); padding: 2px 14px 4px 0; white-space: nowrap; }
 .dml-sample__table td { padding: 2px 14px 2px 0; white-space: nowrap; }
 .dml-sample__more { margin: 0; }
+.dml-sample__change {
+  all: unset; cursor: pointer; display: inline-flex; align-items: baseline; gap: 4px;
+  border-radius: 4px; padding: 0 3px; margin: 0 -3px;
+}
+.dml-sample__change:hover, .dml-sample__change[aria-expanded='true'] { background: var(--qf-hover); }
+.dml-sample__change:focus-visible { outline: 2px solid var(--qf-accent); }
+.dml-sample__change .dml-muted { font-size: inherit; }
+.dml-sample__caret { color: var(--qf-muted); font-size: 10px; }
+.dml-sample__detail-row td { white-space: normal; padding: 4px 0 8px; }
+.dml-sample__detail { display: flex; flex-direction: column; gap: 4px; }
+.dml-diff {
+  margin: 0; padding: 6px 0; max-height: 320px; overflow: auto; font-size: 12px; line-height: 1.45;
+  border: 1px solid var(--qf-border-strong); border-radius: var(--qf-r-control); background: var(--qf-panel);
+}
+.dml-diff__line { padding: 0 10px; white-space: pre; }
+.dml-diff__line[data-kind='added'] { background: color-mix(in srgb, var(--qf-ok) 18%, transparent); }
+.dml-diff__line[data-kind='removed'] { background: color-mix(in srgb, var(--qf-err) 18%, transparent); }
