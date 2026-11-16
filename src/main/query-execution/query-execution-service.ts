@@ -132,9 +132,7 @@ export class QueryExecutionService {
         case 'writeDocument': {
           // Read-only is a real boundary for Document Writes too (user
           // story 50): refused here, before the provider is touched.
-          if (this.profiles.get(request.profileId)?.readOnly) {
-            throw new DocumentWriteRefusedError()
-          }
+          this.assertWritable(request.profileId)
           assertAddressedDocumentWrite(request.write)
           const result = await this.requireDocumentWriter(request.profileId).writeDocument(
             request.write
@@ -160,9 +158,7 @@ export class QueryExecutionService {
           this.lastCommittedRuns.dropTab(request.tabId)
           // Read-only covers bulk writes too (story 74): refused before the
           // Driving Query runs.
-          if (this.profiles.get(request.profileId)?.readOnly) {
-            throw new DocumentWriteRefusedError()
-          }
+          this.assertWritable(request.profileId)
           const writer = this.requireDocumentWriter(request.profileId)
           const planned = await this.trackDmlRun(request.executionId, request.tabId, (run) =>
             buildDmlPlan(
@@ -194,9 +190,7 @@ export class QueryExecutionService {
             )
           }
           // Read-only covers a Retry too (story 127), before any query runs.
-          if (this.profiles.get(committed.profileId)?.readOnly) {
-            throw new DocumentWriteRefusedError()
-          }
+          this.assertWritable(committed.profileId)
           const writer = this.requireDocumentWriter(committed.profileId)
           const retry = await this.trackDmlRun(request.executionId, request.tabId, (run) =>
             buildRetryPlan(writer, committed, request.executionId, run, (progress) =>
@@ -219,7 +213,7 @@ export class QueryExecutionService {
                 'Run the statement again.'
             )
           }
-          if (this.profiles.get(plan.profileId)?.readOnly) throw new DocumentWriteRefusedError()
+          this.assertWritable(plan.profileId)
           const writer = this.requireDocumentWriter(plan.profileId)
           // A plan is written once: committing drops it.
           this.dmlPlans.drop(plan.planId)
@@ -333,6 +327,13 @@ export class QueryExecutionService {
       this.pendingRefreshes.set(id, { resolve, reject })
       send({ id, kind: 'refreshSecret', profileId })
     })
+  }
+
+  /** Refuses any Document Write (single, DML commit, or the planning
+   * before one) on a read-only Connection Profile, before the provider is
+   * touched (stories 50, 74, 127). */
+  private assertWritable(profileId: string): void {
+    if (this.profiles.get(profileId)?.readOnly) throw new DocumentWriteRefusedError()
   }
 
   /** The DocumentWriter capability check (ADR 0004): only the Cosmos DB
