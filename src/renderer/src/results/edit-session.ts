@@ -146,6 +146,11 @@ export type EditSessionEvent =
   /** Compare, after a Concurrent Change: read the current version and open
    * the compare view, keeping the draft. */
   | { type: 'compareRequested' }
+  /** Overwrite with mine, in the compare view only: read the current
+   * version, then replace it carrying that read's etag. */
+  | { type: 'overwriteRequested' }
+  /** Reload: discard the draft and read the current version, as on open. */
+  | { type: 'reloadRequested' }
   /** The current version read for Compare or Overwrite with mine. */
   | { type: 'currentVersionRead'; document: StoredDocument }
 
@@ -314,7 +319,22 @@ export function editSessionReducer(session: EditSession, event: EditSessionEvent
       if (session.mode === 'edit' || session.saving) return session
       return { ...session, mode: 'edit', notice: undefined }
     case 'compareRequested':
+      if (isBusy(session) || session.newDocument) return session
       return { ...session, comparing: true, pendingRead: 'compare', notice: undefined }
+    case 'reloadRequested':
+      if (isBusy(session) || session.newDocument) return session
+      return {
+        ...session,
+        phase: 'reading',
+        comparing: false,
+        serverCopy: undefined,
+        etag: undefined,
+        notice: undefined
+      }
+    case 'overwriteRequested':
+      // Never an unconditional write: a fresh read supplies the etag.
+      if (!session.comparing || isBusy(session)) return session
+      return { ...session, pendingRead: 'overwrite', notice: undefined }
     case 'currentVersionRead':
       // The draft (my side) is kept; Save from here carries this etag.
       return {
@@ -637,6 +657,11 @@ function noticeForOutcome(
       // Only a create can clash; the draft is kept for another id.
       return { kind: 'id-clash', address }
   }
+}
+
+/** A Document Write or a point-read of the current version is in flight. */
+export function isBusy(session: EditSession): boolean {
+  return session.saving || session.pendingRead !== undefined
 }
 
 /** True when the draft differs from the server copy's editor text; for a

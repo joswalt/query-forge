@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   editSessionReducer,
+  hasUnsavedEdits,
   openEditSession,
   planSave,
   type EditSession,
@@ -100,6 +101,48 @@ describe('Compare after a Concurrent Change on Save', () => {
     })
     expect(JSON.parse(refreshed.draft)).toEqual({ name: 'Ada King Lovelace' })
     expect(planSave(refreshed)).toMatchObject({ ok: true, write: { ifMatch: '"etag-newest"' } })
+  })
+})
+
+describe('Overwrite with mine', () => {
+  it('is reachable only from the compare view', () => {
+    const session = concurrentlyChanged()
+    expect(apply(session, { type: 'overwriteRequested' })).toBe(session)
+  })
+
+  it('reads the current version afresh, then replaces it with my edits carrying that etag', () => {
+    const reading = apply(comparing(), { type: 'overwriteRequested' })
+    expect(reading).toMatchObject({ comparing: true, pendingRead: 'overwrite' })
+
+    const newest = { ...theirs, name: 'Augusta Ada King', _etag: '"etag-newest"' }
+    const read = apply(reading, { type: 'currentVersionRead', document: newest })
+    expect(read).toMatchObject({ pendingRead: undefined, serverCopy: newest })
+    expect(planSave(read)).toMatchObject({
+      ok: true,
+      write: { kind: 'replace', ifMatch: '"etag-newest"', body: { ...mine, id: 'a1', customerId: 'c9' } }
+    })
+  })
+})
+
+describe('Reload after a Concurrent Change on Save', () => {
+  it('discards my edits and loads the current version', () => {
+    const reloading = apply(concurrentlyChanged(), { type: 'reloadRequested' })
+    expect(reloading).toMatchObject({ phase: 'reading', notice: undefined })
+
+    const reloaded = apply(reloading, { type: 'readSucceeded', document: theirs })
+    expect(reloaded).toMatchObject({ phase: 'editing', serverCopy: theirs, etag: '"etag-theirs"' })
+    expect(JSON.parse(reloaded.draft)).toEqual({ name: 'Ada King' })
+    expect(hasUnsavedEdits(reloaded)).toBe(false)
+  })
+
+  it('from the compare view, goes back to the editor with the current version', () => {
+    const reloaded = apply(
+      comparing(),
+      { type: 'reloadRequested' },
+      { type: 'readSucceeded', document: theirs }
+    )
+    expect(reloaded).toMatchObject({ phase: 'editing', comparing: false, serverCopy: theirs })
+    expect(hasUnsavedEdits(reloaded)).toBe(false)
   })
 })
 
