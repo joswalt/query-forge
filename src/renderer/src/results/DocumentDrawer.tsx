@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import type { ConnectionEnvironment } from '@shared/types/connection-profile'
 import type { PartitionKeyLevelValue, PartitionKeyValue } from '@shared/types/document-writer'
 import { JsonEditor } from '../editor/JsonEditor'
 import { partitionKeyFieldName, type DocumentAddress } from './addressable-row'
@@ -12,9 +13,20 @@ import {
   type EditSessionsState,
   type NewDocumentFields
 } from './edit-session'
+import {
+  ConfirmWriteButtons,
+  isSaveShortcut,
+  ProdWriteStrip,
+  useWriteConfirmation,
+  type WriteConfirmationStep
+} from './WriteConfirmation'
 
 export interface DocumentDrawerProps {
   state: EditSessionsState
+  /** The Connection Profile the documents are written to, as it is now
+   * (looked up on every render, never cached), for the Write Confirmation
+   * policy and the prod header strip. */
+  connectionProfile: { environment?: ConnectionEnvironment } | undefined
   onSelect: (key: number) => void
   onClose: (key: number) => void
   onDraftChange: (key: number, text: string) => void
@@ -39,11 +51,13 @@ export interface DocumentDrawerProps {
  * The document editing drawer (decision 04, variant A): a right-side panel
  * over the results grid, one tab per edit session. Opens at once while the
  * latest version is read, then edits the body only, with the address as
- * locked chips and system properties folded away read-only.
+ * locked chips and system properties folded away read-only. On a prod
+ * Connection Profile every write takes a Write Confirmation (decision 05).
  */
 export function DocumentDrawer(props: DocumentDrawerProps): React.JSX.Element | null {
   const { state } = props
   const session = state.sessions.find((s) => s.key === state.activeKey)
+  const confirmation = useWriteConfirmation(props.connectionProfile, session)
   if (!session) return null
   const title = session.newDocument
     ? 'New document'
@@ -52,7 +66,20 @@ export function DocumentDrawer(props: DocumentDrawerProps): React.JSX.Element | 
       : 'Edit document'
 
   return (
-    <aside className="document-drawer" role="dialog" aria-label={title}>
+    <aside
+      className="document-drawer"
+      role="dialog"
+      aria-label={title}
+      data-env={confirmation.required ? 'prod' : undefined}
+      onKeyDown={(event) => {
+        if (!isSaveShortcut(event)) return
+        // Cmd/Ctrl+S is Save or Create, never Delete; on prod it is only the
+        // first step (story 56).
+        event.preventDefault()
+        if (canSave(session)) confirmation.press('save', () => props.onSave(session.key))
+      }}
+    >
+      {confirmation.required && <ProdWriteStrip />}
       {state.sessions.length > 1 && (
         <div className="document-drawer__tabs" role="tablist" aria-label="Open documents">
           {state.sessions.map((s) => (
@@ -83,14 +110,30 @@ export function DocumentDrawer(props: DocumentDrawerProps): React.JSX.Element | 
           ✕
         </button>
       </header>
-      <SessionBody {...props} session={session} />
+      <SessionBody {...props} session={session} confirmation={confirmation} />
     </aside>
   )
 }
 
-function SessionBody(props: DocumentDrawerProps & { session: EditSession }): React.JSX.Element {
+/** Save or Create can be pressed: an edit-mode session with unsaved edits. */
+function canSave(session: EditSession): boolean {
+  return (
+    session.phase === 'editing' &&
+    session.mode !== 'delete' &&
+    !session.saving &&
+    hasUnsavedEdits(session)
+  )
+}
+
+type SessionBodyProps = DocumentDrawerProps & {
+  session: EditSession
+  confirmation: WriteConfirmationStep
+}
+
+function SessionBody(props: SessionBodyProps): React.JSX.Element {
   const {
     session,
+    confirmation,
     onClose,
     onDraftChange,
     onSave,
@@ -166,23 +209,35 @@ function SessionBody(props: DocumentDrawerProps & { session: EditSession }): Rea
           {!newDocument && <SystemProperties document={session.serverCopy} />}
           <div className="document-drawer__actions">
             <span className="document-drawer__spacer" />
-            <button type="button" onClick={() => onClose(session.key)}>
-              {dirty ? 'Discard' : 'Close'}
-            </button>
-            <button
-              type="button"
-              className="btn--primary"
-              disabled={session.saving || !dirty}
-              onClick={() => onSave(session.key)}
-            >
-              {newDocument
-                ? session.saving
-                  ? 'Creating…'
-                  : 'Create'
-                : session.saving
-                  ? 'Saving…'
-                  : 'Save'}
-            </button>
+            {confirmation.awaiting === 'save' ? (
+              <ConfirmWriteButtons
+                step={confirmation}
+                write="save"
+                onConfirm={() => onSave(session.key)}
+              />
+            ) : (
+              <>
+                <button type="button" onClick={() => onClose(session.key)}>
+                  {dirty ? 'Discard' : 'Close'}
+                </button>
+                <button
+                  type="button"
+                  className="btn--primary"
+                  disabled={!canSave(session)}
+                  onClick={() => confirmation.press('save', () => onSave(session.key))}
+                >
+                  {session.saving
+                    ? newDocument
+                      ? 'Creating…'
+                      : 'Saving…'
+                    : confirmation.required
+                      ? 'Save to prod'
+                      : newDocument
+                        ? 'Create'
+                        : 'Save'}
+                </button>
+              </>
+            )}
           </div>
         </div>
       )
@@ -193,16 +248,18 @@ function SessionBody(props: DocumentDrawerProps & { session: EditSession }): Rea
 /**
  * Delete mode (stories 52, 60): a read-only, copyable preview of the version
  * just read, with an explicit Delete document button as the confirmation.
+ * On prod the button reads Delete from prod and takes a Write Confirmation.
  * After a Concurrent Change only Review current version is offered; there is
  * no delete anyway.
  */
 function DeletePreview({
   session,
+  confirmation,
   onClose,
   onDelete,
   onReview,
   onEditInstead
-}: DocumentDrawerProps & { session: EditSession }): React.JSX.Element {
+}: SessionBodyProps): React.JSX.Element {
   const text = deletePreviewText(session)
   const changed = session.notice?.kind === 'concurrent-change-on-delete'
   const [copied, setCopied] = useState<'copied' | 'failed' | undefined>(undefined)
@@ -244,26 +301,47 @@ function DeletePreview({
       </div>
       <SystemProperties document={session.serverCopy} />
       <div className="document-drawer__actions">
-        <button type="button" disabled={session.saving} onClick={() => onEditInstead(session.key)}>
-          Edit instead
-        </button>
-        <span className="document-drawer__spacer" />
-        <button type="button" onClick={() => onClose(session.key)}>
-          Cancel
-        </button>
-        {changed ? (
-          <button type="button" className="btn--primary" onClick={() => onReview(session.key)}>
-            Review current version
-          </button>
+        {confirmation.awaiting === 'delete' && !changed ? (
+          <>
+            <span className="document-drawer__spacer" />
+            <ConfirmWriteButtons
+              step={confirmation}
+              write="delete"
+              onConfirm={() => onDelete(session.key)}
+            />
+          </>
         ) : (
-          <button
-            type="button"
-            className="btn--danger"
-            disabled={session.saving}
-            onClick={() => onDelete(session.key)}
-          >
-            {session.saving ? 'Deleting…' : 'Delete document'}
-          </button>
+          <>
+            <button
+              type="button"
+              disabled={session.saving}
+              onClick={() => onEditInstead(session.key)}
+            >
+              Edit instead
+            </button>
+            <span className="document-drawer__spacer" />
+            <button type="button" onClick={() => onClose(session.key)}>
+              Cancel
+            </button>
+            {changed ? (
+              <button type="button" className="btn--primary" onClick={() => onReview(session.key)}>
+                Review current version
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn--danger"
+                disabled={session.saving}
+                onClick={() => confirmation.press('delete', () => onDelete(session.key))}
+              >
+                {session.saving
+                  ? 'Deleting…'
+                  : confirmation.required
+                    ? 'Delete from prod'
+                    : 'Delete document'}
+              </button>
+            )}
+          </>
         )}
       </div>
     </div>
