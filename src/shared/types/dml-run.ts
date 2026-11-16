@@ -1,4 +1,5 @@
 import type { DmlVerb } from '../dml/dml-statement'
+import type { PartitionKeyValue } from './document-writer'
 
 /**
  * What happened to one document of a committed DML Plan (GLOSSARY.md:
@@ -39,15 +40,45 @@ export interface DmlPlanningProgress {
   requestCharge: number
 }
 
+/** How many matches `planDml`'s `sample` holds (story 85). */
+export const DML_SAMPLE_SIZE = 10
+
+/** A value in the confirmation sample. Explicit about definedness, since
+ * an absent property and JSON `null` must read differently and `undefined`
+ * doesn't survive the trip to the renderer. */
+export type DmlSampleValue = { defined: false } | { defined: true; value: unknown }
+
+/** One `SET` path of an `UPDATE` sample: today's value and what the commit
+ * would leave there (`next` undefined: removed, or the expression came back
+ * undefined). */
+export interface DmlSampleChange {
+  /** The path as typed, e.g. `c.address.zip`. */
+  target: string
+  current: DmlSampleValue
+  next: DmlSampleValue
+}
+
+/** One match of the confirmation sample: its address and, for `UPDATE`,
+ * one change per `SET` in statement order. */
+export interface DmlSampleDocument {
+  id: string
+  partitionKey: PartitionKeyValue
+  changes?: DmlSampleChange[]
+}
+
 /**
  * `planDml`'s result. `planId` is present only when a DML Plan is held, so
- * zero matches (nothing to confirm) comes back without one.
+ * zero matches (nothing to confirm) comes back without one. `sample` is
+ * the first `DML_SAMPLE_SIZE` matches; `partitionKeyPaths` (one per level
+ * of each sample's `partitionKey`) names its address columns.
  */
 export interface DmlPlanSummary {
   planId?: string
   verb: DmlVerb
   matchCount: number
   drivingQueryRequestCharge: number
+  partitionKeyPaths: string[]
+  sample: DmlSampleDocument[]
 }
 
 /** Each commit chunk's `meta.dmlProgress`. `requestCharge` is the running

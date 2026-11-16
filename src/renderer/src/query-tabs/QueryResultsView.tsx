@@ -22,9 +22,12 @@ type ViewMode = 'table' | 'json'
 export interface DocumentEditingProps extends DocumentDrawerProps {
   /** Opens (or focuses) an edit session for an Addressable Row. */
   onEdit: (row: unknown) => void
+  /** Opens the drawer in delete mode for an Addressable Row. */
+  onRequestDelete: (row: unknown) => void
 }
 
 const EDIT_DOCUMENT = 'Edit document…'
+const DELETE_DOCUMENT = 'Delete document…'
 const GONE_REASON = 'This document no longer exists. Re-run the query to refresh the results.'
 
 const TOAST_MS = 2500
@@ -115,6 +118,15 @@ export function QueryResultsView({
     const timer = setTimeout(() => setToast(null), TOAST_MS)
     return () => clearTimeout(timer)
   }, [toast])
+  // A finished drawer delete: show its toast once, then let the edit
+  // sessions forget it.
+  const deleteToast = documentEditing?.state.toast
+  const onToastShown = documentEditing?.onToastShown
+  useEffect(() => {
+    if (!deleteToast || !onToastShown) return
+    setToast({ message: deleteToast.message, id: Date.now() })
+    onToastShown(deleteToast.key)
+  }, [deleteToast, onToastShown])
   /** An oversized copy waiting on "copy anyway / export instead"
    * (Extractors story 11). */
   const [pendingCopy, setPendingCopy] = useState<{
@@ -151,22 +163,24 @@ export function QueryResultsView({
     (s) => s.key === documentEditing.state.activeKey
   )
 
-  /** Edit document… for a row: enabled only on a live Addressable Row. */
-  function editAction(rowIndex: number): GridRowAction | undefined {
-    if (!documentEditing) return undefined
+  /** A write action for a row (Edit document…, Delete document…): enabled
+   * only on a live Addressable Row. */
+  function documentAction(
+    rowIndex: number,
+    label: string,
+    open: (row: unknown) => void
+  ): GridRowAction {
     const row = currentRows[rowIndex]
-    const onSelect = (): void => documentEditing.onEdit(row)
-    if (rowMarks?.[rowIndex] === 'gone') {
-      return { label: EDIT_DOCUMENT, onSelect, disabledReason: GONE_REASON }
-    }
+    const onSelect = (): void => open(row)
+    if (rowMarks?.[rowIndex] === 'gone') return { label, onSelect, disabledReason: GONE_REASON }
     const check = addressOf(row, run.partitionKeyPaths)
     return check.addressable
-      ? { label: EDIT_DOCUMENT, onSelect }
-      : {
-          label: EDIT_DOCUMENT,
-          onSelect,
-          disabledReason: notAddressableReason(run.partitionKeyPaths, check.missing)
-        }
+      ? { label, onSelect }
+      : { label, onSelect, disabledReason: notAddressableReason(run.partitionKeyPaths, check.missing) }
+  }
+
+  function editAction(rowIndex: number): GridRowAction | undefined {
+    return documentEditing ? documentAction(rowIndex, EDIT_DOCUMENT, documentEditing.onEdit) : undefined
   }
 
   /** New document (story 4): Cosmos DB results on a writable profile only
@@ -451,10 +465,10 @@ export function QueryResultsView({
               onCopy={handleCopy}
               rowActions={
                 documentEditing
-                  ? (rowIndex) => {
-                      const action = editAction(rowIndex)
-                      return action ? [action] : []
-                    }
+                  ? (rowIndex) => [
+                      documentAction(rowIndex, EDIT_DOCUMENT, documentEditing.onEdit),
+                      documentAction(rowIndex, DELETE_DOCUMENT, documentEditing.onRequestDelete)
+                    ]
                   : undefined
               }
               rowGutterAction={documentEditing ? editAction : undefined}

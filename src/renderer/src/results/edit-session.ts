@@ -26,7 +26,21 @@ export interface DocumentTarget {
   container?: string
 }
 
-export type EditSessionPhase = 'reading' | 'missing' | 'out-of-date' | 'read-failed' | 'editing'
+/** What the drawer offers for the document: editing its body, or a
+ * read-only preview with an explicit Delete document button. Both start
+ * from a fresh point-read. */
+export type EditSessionMode = 'edit' | 'delete'
+
+/** `editing`: the server copy is loaded (editable in edit mode, previewed
+ * in delete mode). `deleted`: the delete is done; the session leaves the
+ * drawer at once. */
+export type EditSessionPhase =
+  | 'reading'
+  | 'missing'
+  | 'out-of-date'
+  | 'read-failed'
+  | 'editing'
+  | 'deleted'
 
 /**
  * One document open in the drawer (spec "Edit session (renderer)"): the
@@ -41,6 +55,7 @@ export interface EditSession {
   address: DocumentAddress
   /** The grid row's `_rid`, if it carried one (the `_rid` guard). */
   rowRid: string | undefined
+  mode: EditSessionMode
   phase: EditSessionPhase
   serverCopy: StoredDocument | undefined
   etag: string | undefined
@@ -81,6 +96,11 @@ export type EditNotice =
   /** The etag no longer matches: someone else changed the document. */
   | { kind: 'concurrent-change' }
   | { kind: 'deleted-while-editing' }
+  /** Delete aborted: the document changed since it was read. Only Review
+   * current version follows; there is no delete anyway. */
+  | { kind: 'concurrent-change-on-delete' }
+  /** Delete done (phase `deleted`); `alreadyDeleted` for a 404. */
+  | { kind: 'deleted'; requestCharge: number; alreadyDeleted: boolean }
   | { kind: 'error'; message: string }
 
 export type EditSessionEvent =
@@ -101,6 +121,19 @@ export type EditSessionEvent =
       requestCharge: number
     }
   | { type: 'saveFailed'; message: string }
+  | { type: 'deleteStarted' }
+  | { type: 'deleteSucceeded'; requestCharge: number }
+  | { type: 'deleteOutcome'; outcome: 'precondition-failed' | 'not-found'; requestCharge: number }
+  | { type: 'deleteFailed'; message: string }
+  /** Review current version, after a Concurrent Change on Delete: read the
+   * document again. */
+  | { type: 'reviewRequested' }
+  /** Delete document… on a document already open: a Delete always starts
+   * from a fresh point-read, so read it again. */
+  | { type: 'deleteRequested' }
+  /** Edit instead (or Edit document… on an open Delete): edit the version
+   * already read. */
+  | { type: 'editRequested' }
 
 export function openEditSession(input: {
   key: number
@@ -108,6 +141,7 @@ export function openEditSession(input: {
   partitionKeyPaths: readonly string[]
   address: DocumentAddress
   row: unknown
+  mode?: EditSessionMode
 }): EditSession {
   return {
     key: input.key,
@@ -115,6 +149,7 @@ export function openEditSession(input: {
     partitionKeyPaths: input.partitionKeyPaths,
     address: input.address,
     rowRid: isRecord(input.row) && typeof input.row._rid === 'string' ? input.row._rid : undefined,
+    mode: input.mode ?? 'edit',
     phase: 'reading',
     serverCopy: undefined,
     etag: undefined,
@@ -148,6 +183,7 @@ export function openNewDocumentSession(input: {
     key: input.key,
     target: input.target,
     partitionKeyPaths: input.partitionKeyPaths,
+    mode: 'edit',
     address: { id: '', partitionKey: null },
     rowRid: undefined,
     phase: 'editing',
@@ -215,6 +251,49 @@ export function editSessionReducer(session: EditSession, event: EditSessionEvent
       return { ...session, saving: false, notice: noticeForOutcome(event.outcome, session.address) }
     case 'saveFailed':
       return { ...session, saving: false, notice: { kind: 'error', message: event.message } }
+    case 'deleteStarted':
+      return { ...session, saving: true, notice: undefined }
+    case 'deleteSucceeded':
+      return {
+        ...session,
+        saving: false,
+        phase: 'deleted',
+        notice: { kind: 'deleted', requestCharge: event.requestCharge, alreadyDeleted: false }
+      }
+    case 'deleteOutcome':
+      // Someone else already deleted it: the outcome wanted, so done.
+      if (event.outcome === 'not-found') {
+        return {
+          ...session,
+          saving: false,
+          phase: 'deleted',
+          notice: { kind: 'deleted', requestCharge: event.requestCharge, alreadyDeleted: true }
+        }
+      }
+      return { ...session, saving: false, notice: { kind: 'concurrent-change-on-delete' } }
+    case 'deleteFailed':
+      return { ...session, saving: false, notice: { kind: 'error', message: event.message } }
+    case 'reviewRequested':
+      return { ...session, phase: 'reading', serverCopy: undefined, etag: undefined, notice: undefined }
+    case 'deleteRequested':
+      if (session.mode === 'delete' || session.saving) return session
+      if (hasUnsavedEdits(session)) {
+        return {
+          ...session,
+          notice: { kind: 'error', message: 'Save or discard your edits before deleting this document.' }
+        }
+      }
+      return {
+        ...session,
+        mode: 'delete',
+        phase: 'reading',
+        serverCopy: undefined,
+        etag: undefined,
+        notice: undefined
+      }
+    case 'editRequested':
+      if (session.mode === 'edit' || session.saving) return session
+      return { ...session, mode: 'edit', notice: undefined }
   }
 }
 
@@ -223,6 +302,9 @@ export function editSessionReducer(session: EditSession, event: EditSessionEvent
 export interface EditSessionsState {
   sessions: EditSession[]
   activeKey: number | undefined
+  /** A delete just finished: shown once as a toast, then cleared with
+   * `toastShown`. `key` is the deleted edit session's. */
+  toast?: { key: number; message: string }
 }
 
 export const initialEditSessionsState: EditSessionsState = { sessions: [], activeKey: undefined }
@@ -235,6 +317,8 @@ export type EditSessionsAction =
       partitionKeyPaths: readonly string[]
       address: DocumentAddress
       row: unknown
+      /** Edit document… (default) or Delete document…. */
+      mode?: EditSessionMode
     }
   /** New document, empty, or prefilled from the edit session `from`
    * ("Different address? New document"). */
@@ -248,6 +332,7 @@ export type EditSessionsAction =
   | { type: 'selected'; key: number }
   | { type: 'closed'; key: number }
   | { type: 'session'; key: number; event: EditSessionEvent }
+  | { type: 'toastShown'; key: number }
 
 export function editSessionsReducer(
   state: EditSessionsState,
@@ -256,7 +341,14 @@ export function editSessionsReducer(
   switch (action.type) {
     case 'opened': {
       const existing = findEditSession(state, action.target, action.address)
-      if (existing) return { ...state, activeKey: existing.key }
+      if (existing) {
+        const event: EditSessionEvent = { type: action.mode === 'delete' ? 'deleteRequested' : 'editRequested' }
+        return {
+          ...state,
+          sessions: state.sessions.map((s) => (s.key === existing.key ? editSessionReducer(s, event) : s)),
+          activeKey: existing.key
+        }
+      }
       return { sessions: [...state.sessions, openEditSession(action)], activeKey: action.key }
     }
     case 'newDocumentOpened': {
@@ -268,22 +360,34 @@ export function editSessionsReducer(
     }
     case 'selected':
       return state.sessions.some((s) => s.key === action.key) ? { ...state, activeKey: action.key } : state
-    case 'closed': {
-      const sessions = state.sessions.filter((s) => s.key !== action.key)
-      const activeKey =
-        state.activeKey === action.key ? sessions[sessions.length - 1]?.key : state.activeKey
-      return { sessions, activeKey }
-    }
+    case 'closed':
+      return withoutSession(state, action.key)
     case 'session': {
-      if (!state.sessions.some((s) => s.key === action.key)) return state
-      return {
-        ...state,
-        sessions: state.sessions.map((s) =>
-          s.key === action.key ? editSessionReducer(s, action.event) : s
-        )
+      const session = state.sessions.find((s) => s.key === action.key)
+      if (!session) return state
+      const next = editSessionReducer(session, action.event)
+      if (next.phase === 'deleted' && next.notice?.kind === 'deleted') {
+        return { ...withoutSession(state, action.key), toast: { key: action.key, message: deletedToast(next) } }
       }
+      return { ...state, sessions: state.sessions.map((s) => (s.key === action.key ? next : s)) }
     }
+    case 'toastShown':
+      return state.toast?.key === action.key ? { ...state, toast: undefined } : state
   }
+}
+
+function withoutSession(state: EditSessionsState, key: number): EditSessionsState {
+  const sessions = state.sessions.filter((s) => s.key !== key)
+  const activeKey = state.activeKey === key ? sessions[sessions.length - 1]?.key : state.activeKey
+  return { ...state, sessions, activeKey }
+}
+
+/** Story 30 ("Deleted `<id>` · RU") and story 48 (a 404 is done). */
+function deletedToast(session: EditSession): string {
+  const notice = session.notice
+  if (notice?.kind === 'deleted' && notice.alreadyDeleted) return 'This document was already deleted.'
+  const charge = notice?.kind === 'deleted' ? notice.requestCharge : 0
+  return `Deleted ${session.address.id} · ${charge.toFixed(2)} RU`
 }
 
 /** The edit session already open on this document, if any. */
@@ -419,6 +523,32 @@ function planCreate(session: EditSession, fields: NewDocumentFields): SavePlan {
   }
 }
 
+/**
+ * What Delete document sends for this session: a `delete` carrying the
+ * session's etag, so a version changed since the point-read is refused as
+ * a Concurrent Change rather than removed blind.
+ */
+export function planDelete(session: EditSession): SavePlan {
+  if (session.phase !== 'editing' || session.etag === undefined) {
+    return { ok: false, notice: { kind: 'error', message: 'The document has not been read yet.' } }
+  }
+  // No delete anyway (story 44): only a fresh read can lead to a delete.
+  if (session.notice?.kind === 'concurrent-change-on-delete') {
+    return { ok: false, notice: session.notice }
+  }
+  return {
+    ok: true,
+    write: {
+      kind: 'delete',
+      id: session.address.id,
+      partitionKey: session.address.partitionKey,
+      ifMatch: session.etag,
+      database: session.target.database,
+      container: session.target.container
+    }
+  }
+}
+
 function invalidAddress(message: string): SavePlan {
   return { ok: false, notice: { kind: 'invalid-address', message } }
 }
@@ -491,6 +621,13 @@ export function hasUnsavedEdits(session: EditSession): boolean {
     session.serverCopy !== undefined &&
     session.draft !== editorText(session.serverCopy, session.partitionKeyPaths)
   )
+}
+
+/** The Delete preview (story 60): the document as it would be re-created,
+ * with `id` and partition key values but without system properties, so a
+ * copy of it is a usable manual backup. */
+export function deletePreviewText(session: EditSession): string {
+  return session.serverCopy ? JSON.stringify(stripSystemProperties(session.serverCopy), null, 2) : ''
 }
 
 function etagOf(document: StoredDocument): string | undefined {

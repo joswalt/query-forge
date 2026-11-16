@@ -1,7 +1,9 @@
+import { useEffect, useState } from 'react'
 import type { PartitionKeyLevelValue, PartitionKeyValue } from '@shared/types/document-writer'
 import { JsonEditor } from '../editor/JsonEditor'
 import { partitionKeyFieldName, type DocumentAddress } from './addressable-row'
 import {
+  deletePreviewText,
   hasUnsavedEdits,
   parsePartitionKeyInput,
   SYSTEM_PROPERTIES,
@@ -17,6 +19,14 @@ export interface DocumentDrawerProps {
   onClose: (key: number) => void
   onDraftChange: (key: number, text: string) => void
   onSave: (key: number) => void
+  /** Delete document in a delete-mode session: sends the delete. */
+  onDelete: (key: number) => void
+  /** Review current version after a Concurrent Change on Delete. */
+  onReview: (key: number) => void
+  /** Edit instead: switch a delete-mode session to editing. */
+  onEditInstead: (key: number) => void
+  /** The finished delete's toast has been shown. */
+  onToastShown: (key: number) => void
   /** New document: empty, or prefilled `from` an edit session ("Different
    * address? New document"). */
   onNewDocument: (from?: number) => void
@@ -35,9 +45,14 @@ export function DocumentDrawer(props: DocumentDrawerProps): React.JSX.Element | 
   const { state } = props
   const session = state.sessions.find((s) => s.key === state.activeKey)
   if (!session) return null
+  const title = session.newDocument
+    ? 'New document'
+    : session.mode === 'delete'
+      ? 'Delete document'
+      : 'Edit document'
 
   return (
-    <aside className="document-drawer" role="dialog" aria-label="Edit document">
+    <aside className="document-drawer" role="dialog" aria-label={title}>
       {state.sessions.length > 1 && (
         <div className="document-drawer__tabs" role="tablist" aria-label="Open documents">
           {state.sessions.map((s) => (
@@ -55,7 +70,7 @@ export function DocumentDrawer(props: DocumentDrawerProps): React.JSX.Element | 
         </div>
       )}
       <header className="document-drawer__head">
-        <strong>{session.newDocument ? 'New document' : 'Edit document'}</strong>
+        <strong>{title}</strong>
         {!session.newDocument && <code className="document-drawer__id">{session.address.id}</code>}
         <span className="document-drawer__spacer" />
         <button
@@ -73,15 +88,16 @@ export function DocumentDrawer(props: DocumentDrawerProps): React.JSX.Element | 
   )
 }
 
-function SessionBody({
-  session,
-  onClose,
-  onDraftChange,
-  onSave,
-  onNewDocument,
-  onNewDocumentFieldsChange,
-  onOpenExisting
-}: DocumentDrawerProps & { session: EditSession }): React.JSX.Element {
+function SessionBody(props: DocumentDrawerProps & { session: EditSession }): React.JSX.Element {
+  const {
+    session,
+    onClose,
+    onDraftChange,
+    onSave,
+    onNewDocument,
+    onNewDocumentFieldsChange,
+    onOpenExisting
+  } = props
   switch (session.phase) {
     case 'reading':
       return (
@@ -114,7 +130,14 @@ function SessionBody({
           {session.notice?.kind === 'error' && <span>{session.notice.message}</span>}
         </div>
       )
+    case 'deleted':
+      return (
+        <div className="document-drawer__state" role="status">
+          Deleted <code>{session.address.id}</code>
+        </div>
+      )
     case 'editing': {
+      if (session.mode === 'delete') return <DeletePreview {...props} />
       const dirty = hasUnsavedEdits(session)
       const { newDocument } = session
       return (
@@ -165,6 +188,86 @@ function SessionBody({
       )
     }
   }
+}
+
+/**
+ * Delete mode (stories 52, 60): a read-only, copyable preview of the version
+ * just read, with an explicit Delete document button as the confirmation.
+ * After a Concurrent Change only Review current version is offered; there is
+ * no delete anyway.
+ */
+function DeletePreview({
+  session,
+  onClose,
+  onDelete,
+  onReview,
+  onEditInstead
+}: DocumentDrawerProps & { session: EditSession }): React.JSX.Element {
+  const text = deletePreviewText(session)
+  const changed = session.notice?.kind === 'concurrent-change-on-delete'
+  const [copied, setCopied] = useState<'copied' | 'failed' | undefined>(undefined)
+  useEffect(() => {
+    if (!copied) return
+    const timer = setTimeout(() => setCopied(undefined), 2000)
+    return () => clearTimeout(timer)
+  }, [copied])
+
+  function copy(): void {
+    navigator.clipboard.writeText(text).then(
+      () => setCopied('copied'),
+      () => setCopied('failed')
+    )
+  }
+
+  return (
+    <div className="document-drawer__body">
+      {session.notice && <Notice notice={session.notice} />}
+      <p className="document-drawer__muted">
+        Deletes this version, read just now. If someone changes it first, the delete stops. There
+        is no undo: copy the document first if you want a backup.
+      </p>
+      <JsonEditor
+        key={`${session.key}:${session.revision}:preview`}
+        initialValue={text}
+        readOnly
+        ariaLabel={`Document ${session.address.id} to delete`}
+      />
+      <div className="document-drawer__copy">
+        <button type="button" className="btn--ghost" onClick={copy}>
+          Copy JSON
+        </button>
+        {copied && (
+          <span className="document-drawer__muted" role="status">
+            {copied === 'copied' ? 'Copied' : 'Copy failed'}
+          </span>
+        )}
+      </div>
+      <SystemProperties document={session.serverCopy} />
+      <div className="document-drawer__actions">
+        <button type="button" disabled={session.saving} onClick={() => onEditInstead(session.key)}>
+          Edit instead
+        </button>
+        <span className="document-drawer__spacer" />
+        <button type="button" onClick={() => onClose(session.key)}>
+          Cancel
+        </button>
+        {changed ? (
+          <button type="button" className="btn--primary" onClick={() => onReview(session.key)}>
+            Review current version
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="btn--danger"
+            disabled={session.saving}
+            onClick={() => onDelete(session.key)}
+          >
+            {session.saving ? 'Deleting…' : 'Delete document'}
+          </button>
+        )}
+      </div>
+    </div>
+  )
 }
 
 function levelLabel(level: PartitionKeyLevelValue): string {
@@ -284,7 +387,7 @@ function Notice({
   onOpenExisting
 }: {
   notice: EditNotice
-  onOpenExisting: (address: DocumentAddress) => void
+  onOpenExisting?: (address: DocumentAddress) => void
 }): React.JSX.Element {
   switch (notice.kind) {
     case 'saved':
@@ -304,9 +407,11 @@ function Notice({
         <p className="document-drawer__notice document-drawer__notice--error" role="alert">
           A document with id <code>{notice.address.id}</code> already exists in partition{' '}
           <code>{partitionKeyLabel(notice.address.partitionKey)}</code>.{' '}
-          <button type="button" onClick={() => onOpenExisting(notice.address)}>
-            Open existing
-          </button>
+          {onOpenExisting && (
+            <button type="button" onClick={() => onOpenExisting(notice.address)}>
+              Open existing
+            </button>
+          )}
         </p>
       )
     case 'invalid-address':
@@ -338,6 +443,21 @@ function Notice({
       return (
         <p className="document-drawer__notice document-drawer__notice--warn" role="alert">
           This document was deleted since you opened it.
+        </p>
+      )
+    case 'concurrent-change-on-delete':
+      return (
+        <p className="document-drawer__notice document-drawer__notice--warn" role="alert">
+          This document changed since you opened it. Nothing was deleted; review the current
+          version before deciding again.
+        </p>
+      )
+    case 'deleted':
+      return (
+        <p className="document-drawer__notice document-drawer__notice--ok" role="status">
+          {notice.alreadyDeleted
+            ? 'This document was already deleted.'
+            : `Deleted · ${notice.requestCharge.toFixed(2)} RU`}
         </p>
       )
     case 'error':

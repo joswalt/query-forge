@@ -263,6 +263,49 @@ describe('queryRunReducer with Addressable Rows', () => {
     expect(next.resultSets[0].rowMarks).toEqual({ 0: 'gone' })
   })
 
+  it('removes the rows of a deleted document from the grid, keeping later row marks on their rows', () => {
+    const run = queryRunReducer(
+      cosmosRun(
+        [
+          { id: 'a1', customerId: 'c1' },
+          { id: 'a2', customerId: 'c1' },
+          { id: 'a3', customerId: 'c1' }
+        ],
+        ['/customerId']
+      ),
+      { type: 'documentGone', target, address: { id: 'a3', partitionKey: 'c1' } }
+    )
+    const next = queryRunReducer(run, {
+      type: 'documentDeleted',
+      target,
+      address: { id: 'a1', partitionKey: 'c1' }
+    })
+    expect(next.resultSets[0].rows).toEqual([
+      { id: 'a2', customerId: 'c1' },
+      { id: 'a3', customerId: 'c1' }
+    ])
+    expect(next.resultSets[0].rowMarks).toEqual({ 1: 'gone' })
+    expect(next.resultSets[0].rowCount).toBe(2)
+    expect(next.rowCount).toBe(2)
+    expect(next.ruTotal).toBe(2.5)
+  })
+
+  it('ignores a delete from another container or of an address no row has', () => {
+    const run = cosmosRun([{ id: 'a1', customerId: 'c1' }], ['/customerId'])
+    const elsewhere = queryRunReducer(run, {
+      type: 'documentDeleted',
+      target: { ...target, container: 'archive' },
+      address: { id: 'a1', partitionKey: 'c1' }
+    })
+    const unknown = queryRunReducer(run, {
+      type: 'documentDeleted',
+      target,
+      address: { id: 'zz', partitionKey: 'c1' }
+    })
+    expect(elsewhere).toBe(run)
+    expect(unknown).toBe(run)
+  })
+
   it('leaves rows from another container alone, even with the same address', () => {
     const run = cosmosRun([{ id: 'a1', customerId: 'c1' }], ['/customerId'])
     const next = queryRunReducer(run, {

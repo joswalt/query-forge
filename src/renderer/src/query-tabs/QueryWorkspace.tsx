@@ -6,7 +6,7 @@ import type {
 } from '@shared/types/database-provider'
 import { getExtractor, type ExtractorId, type ExtractorOptions } from '@shared/extractors/extract'
 import { inferTableName } from '@shared/extractors/infer-table-name'
-import { detectDmlStatement, parseDmlStatement } from '@shared/dml/dml-statement'
+import { detectDmlStatement, parseDmlStatement, type DmlVerb } from '@shared/dml/dml-statement'
 import { FALLBACK_TABLE_NAME } from '@shared/extractors/sql-extractors'
 import { QueryEditor, type QueryEditorHandle } from '../editor/QueryEditor'
 import { initialExportState, type ExportState } from '../results/export-state'
@@ -16,8 +16,10 @@ import {
   editSessionsReducer,
   findEditSession,
   initialEditSessionsState,
+  planDelete,
   planSave,
   type DocumentTarget,
+  type EditSessionMode,
   type EditSessionEvent,
   type EditSessionsAction,
   type EditSessionsState
@@ -320,16 +322,17 @@ export const QueryWorkspace = forwardRef<
     dispatchEdit(tabId, { type: 'session', key, event })
   }
 
-  /** Edit document… (stories 15 to 19): open the drawer at once, then read
-   * the latest version of the document. A row's own data is never edited. */
-  function handleEditDocument(tabId: string, row: unknown): void {
+  /** Edit document… (stories 15 to 19) and Delete document… (story 2):
+   * open the drawer at once, then read the latest version of the document.
+   * A row's own data is never edited or deleted. */
+  function handleEditDocument(tabId: string, row: unknown, mode: EditSessionMode = 'edit'): void {
     const tab = tabs.find((t) => t.id === tabId)
     const target = tab?.run.documentTarget
     const partitionKeyPaths = tab?.run.partitionKeyPaths
     if (!tab || !target || !partitionKeyPaths) return
     const check = addressOf(row, partitionKeyPaths)
     if (!check.addressable) return
-    openDocument(tabId, tab.editSessions, target, partitionKeyPaths, check.address, row)
+    openDocument(tabId, tab.editSessions, target, partitionKeyPaths, check.address, row, mode)
   }
 
   /** Opens (or focuses) the edit session of the document at `address` and
@@ -341,15 +344,27 @@ export const QueryWorkspace = forwardRef<
     target: DocumentTarget,
     partitionKeyPaths: readonly string[],
     address: DocumentAddress,
-    row: unknown
+    row: unknown,
+    mode: EditSessionMode = 'edit'
   ): void {
     const existing = findEditSession(editSessions, target, address)
-    if (existing) {
-      dispatchEdit(tabId, { type: 'selected', key: existing.key })
-      return
-    }
-    const key = nextEditSessionKeyRef.current++
-    dispatchEdit(tabId, { type: 'opened', key, target, partitionKeyPaths, address, row })
+    const key = existing?.key ?? nextEditSessionKeyRef.current++
+    const action: EditSessionsAction = { type: 'opened', key, target, partitionKeyPaths, address, row, mode }
+    // An open session is focused; switching it to Delete reads it again.
+    const next = editSessionsReducer(editSessions, action).sessions.find((s) => s.key === key)
+    dispatchEdit(tabId, action)
+    if (existing && (existing.phase === 'reading' || next?.phase !== 'reading')) return
+    readLatestVersion(tabId, key, target, address)
+  }
+
+  /** Point-reads an edit session's document; a document found deleted
+   * strikes its rows through. */
+  function readLatestVersion(
+    tabId: string,
+    key: number,
+    target: DocumentTarget,
+    address: DocumentAddress
+  ): void {
     window.api.documents
       .read(target.connectionId, { ...address, database: target.database, container: target.container })
       .then((result) => {
@@ -383,6 +398,51 @@ export const QueryWorkspace = forwardRef<
     const session = tab?.editSessions.sessions.find((s) => s.key === key)
     if (!tab || !session) return
     openDocument(tabId, tab.editSessions, session.target, session.partitionKeyPaths, address, undefined)
+  }
+
+  /** Delete document (stories 30, 34, 43, 44, 48): a delete with the
+   * session's etag. Done (or already deleted): the rows leave the grid and a
+   * toast follows. A Concurrent Change aborts it. */
+  function handleDeleteDocument(tabId: string, key: number): void {
+    const session = tabs.find((t) => t.id === tabId)?.editSessions.sessions.find((s) => s.key === key)
+    if (!session || session.saving) return
+    const plan = planDelete(session)
+    if (!plan.ok) {
+      dispatchSession(tabId, key, { type: 'saveRefused', notice: plan.notice })
+      return
+    }
+    const { target, address } = session
+    dispatchSession(tabId, key, { type: 'deleteStarted' })
+    window.api.documents
+      .write(target.connectionId, plan.write)
+      .then((result) => {
+        if (result.outcome === 'success') {
+          dispatchSession(tabId, key, { type: 'deleteSucceeded', requestCharge: result.requestCharge })
+        } else if (result.outcome === 'conflict') {
+          dispatchSession(tabId, key, {
+            type: 'deleteFailed',
+            message: 'The server refused the delete as an id clash.'
+          })
+          return
+        } else {
+          dispatchSession(tabId, key, {
+            type: 'deleteOutcome',
+            outcome: result.outcome,
+            requestCharge: result.requestCharge
+          })
+          if (result.outcome === 'precondition-failed') return
+        }
+        dispatchRun(tabId, { type: 'documentDeleted', target, address })
+      })
+      .catch((err) => dispatchSession(tabId, key, { type: 'deleteFailed', message: remoteErrorMessage(err) }))
+  }
+
+  /** Review current version: read the document again into the drawer. */
+  function handleReviewDocument(tabId: string, key: number): void {
+    const session = tabs.find((t) => t.id === tabId)?.editSessions.sessions.find((s) => s.key === key)
+    if (!session || session.saving) return
+    dispatchSession(tabId, key, { type: 'reviewRequested' })
+    readLatestVersion(tabId, key, session.target, session.address)
   }
 
   /** Save (stories 22, 24, 29, 33 to 36): a replace with the session's
@@ -504,18 +564,16 @@ export const QueryWorkspace = forwardRef<
     const connection = connections.find((c) => c.id === tab.connectionId)
     if (connection?.config.kind === 'cosmos-db' && detectDmlStatement(queryText)) {
       const parsed = parseDmlStatement(queryText)
-      if (parsed.ok && parsed.statement.verb === 'DELETE') {
+      if (parsed.ok) {
         const container = tab.options?.container ?? connection.config.container ?? ''
-        handlePlanDml(tab, tab.connectionId, queryText, container)
+        handlePlanDml(tab, tab.connectionId, queryText, parsed.statement.verb, container)
         return
       }
       const now = Date.now()
       dispatchRun(tabId, { type: 'started', startedAt: now })
       dispatchRun(tabId, {
         type: 'failed',
-        message: parsed.ok
-          ? 'UPDATE statements are not supported yet. Only DELETE can run for now.'
-          : `DML syntax error: ${parsed.error.message}`,
+        message: `DML syntax error: ${parsed.error.message}`,
         finishedAt: now,
         cancelled: false
       })
@@ -591,10 +649,10 @@ export const QueryWorkspace = forwardRef<
     tab: QueryTabState,
     connectionId: string,
     statement: string,
+    verb: DmlVerb,
     container: string
   ): void {
     const tabId = tab.id
-    const verb = 'DELETE'
     dmlTabsRef.current.add(tabId)
     // A DML run leaves nothing for "Export all matching rows" to re-run.
     updateTab(tabId, (t) => ({ ...t, lastExecutedQuery: undefined }))
@@ -1158,6 +1216,12 @@ export const QueryWorkspace = forwardRef<
                     onDraftChange: (key, text) =>
                       dispatchSession(activeTab.id, key, { type: 'draftChanged', text }),
                     onSave: (key) => handleSaveDocument(activeTab.id, key),
+                    onRequestDelete: (row) => handleEditDocument(activeTab.id, row, 'delete'),
+                    onDelete: (key) => handleDeleteDocument(activeTab.id, key),
+                    onReview: (key) => handleReviewDocument(activeTab.id, key),
+                    onEditInstead: (key) =>
+                      dispatchSession(activeTab.id, key, { type: 'editRequested' }),
+                    onToastShown: (key) => dispatchEdit(activeTab.id, { type: 'toastShown', key }),
                     onNewDocument: (from) => handleNewDocument(activeTab.id, from),
                     onNewDocumentFieldsChange: (key, fields) =>
                       dispatchSession(activeTab.id, key, { type: 'newDocumentFieldsChanged', fields }),
