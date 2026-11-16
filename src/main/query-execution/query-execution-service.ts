@@ -136,14 +136,17 @@ export class QueryExecutionService {
         }
 
         case 'planDml': {
+          // A new plan replaces the tab's held one, even one that is
+          // refused (ADR 0004), so drops come before any refusal; main's
+          // mirror drops on the same events. A plan for an ordinary
+          // statement also ends any Retry of the last run.
+          this.dmlPlans.dropTab(request.tabId)
+          this.lastCommittedRuns.dropTab(request.tabId)
           // Read-only covers bulk writes too (story 74): refused before the
-          // Driving Query runs. A new plan replaces the tab's held one.
+          // Driving Query runs.
           if (this.profiles.get(request.profileId)?.readOnly) {
             throw new DocumentWriteRefusedError()
           }
-          this.dmlPlans.dropTab(request.tabId)
-          // A plan for an ordinary statement ends any Retry of the last run.
-          this.lastCommittedRuns.dropTab(request.tabId)
           const writer = this.requireDocumentWriter(request.profileId)
           const plan = await this.trackDmlRun(request.executionId, (run) =>
             buildDmlPlan(
@@ -164,6 +167,9 @@ export class QueryExecutionService {
         }
 
         case 'planRetry': {
+          // Like planDml, a Retry drops the tab's held plan when it starts,
+          // before any refusal (never the last committed run).
+          this.dmlPlans.dropTab(request.tabId)
           const committed = this.lastCommittedRuns.get(request.tabId)
           if (!committed || committed.planId !== request.planId) {
             throw new Error(
@@ -175,7 +181,6 @@ export class QueryExecutionService {
           if (this.profiles.get(committed.profileId)?.readOnly) {
             throw new DocumentWriteRefusedError()
           }
-          this.dmlPlans.dropTab(request.tabId)
           const writer = this.requireDocumentWriter(committed.profileId)
           const { plan, scopeCount } = await this.trackDmlRun(request.executionId, (run) =>
             buildRetryPlan(writer, committed, request.executionId, run, (progress) =>

@@ -871,6 +871,16 @@ describe('QueryExecutionService DML Statements', () => {
       await expectDropped(service, provider, planId)
     })
 
+    it('a new plan refused on a read-only profile still drops the tab’s held DML Plan', async () => {
+      const { provider, service, planId } = await heldPlan()
+      await call(service, { id: 'c', method: 'connect', profile: cosmosProfile(true), secret: undefined })
+
+      expect(errorMessage(await call(service, planRequest()))).toContain('read-only')
+      await call(service, { id: 'c', method: 'connect', profile: cosmosProfile(), secret: undefined })
+
+      await expectDropped(service, provider, planId)
+    })
+
     it('a plan in another tab leaves the held DML Plan alone', async () => {
       const { provider, service, planId } = await heldPlan()
 
@@ -1144,6 +1154,32 @@ describe('QueryExecutionService DML Statements', () => {
       expect(provider.drivingQueries).toEqual([])
     })
 
+    it('a refused Retry still drops the tab’s held DML Plan', async () => {
+      const { provider, service, planId } = await committed(2, { 'doc-1': 'precondition-failed' })
+      provider.respond = scopedTo([match(1)])
+      const held = planSummary(await call(service, retryRequest(planId))).planId!
+
+      expect(errorMessage(await call(service, retryRequest('gone')))).toContain(
+        'can no longer be retried'
+      )
+
+      expect(errorMessage(await call(service, commitRequest(held)))).toContain('no longer held')
+      expect(provider.writes).toEqual([])
+    })
+
+    it('a Retry refused on a read-only profile still drops the tab’s held DML Plan', async () => {
+      const { provider, service, planId } = await committed(2, { 'doc-1': 'precondition-failed' })
+      provider.respond = scopedTo([match(1)])
+      const held = planSummary(await call(service, retryRequest(planId))).planId!
+      await call(service, { id: 'c', method: 'connect', profile: cosmosProfile(true), secret: undefined })
+
+      expect(errorMessage(await call(service, retryRequest(planId)))).toContain('read-only')
+      await call(service, { id: 'c', method: 'connect', profile: cosmosProfile(), secret: undefined })
+
+      expect(errorMessage(await call(service, commitRequest(held)))).toContain('no longer held')
+      expect(provider.writes).toEqual([])
+    })
+
     describe('the last committed run', () => {
       async function retryable(): Promise<{
         provider: FakeCosmosProvider
@@ -1167,6 +1203,17 @@ describe('QueryExecutionService DML Statements', () => {
         const { service, planId } = await retryable()
 
         await call(service, planRequest({ statement: 'DELETE FROM c' }))
+
+        expect(errorMessage(await call(service, retryRequest(planId)))).toContain(
+          'can no longer be retried'
+        )
+      })
+
+      it('is dropped by a plan for an ordinary statement refused on a read-only profile', async () => {
+        const { service, planId } = await retryable()
+        await call(service, { id: 'c', method: 'connect', profile: cosmosProfile(true), secret: undefined })
+        await call(service, planRequest())
+        await call(service, { id: 'c', method: 'connect', profile: cosmosProfile(), secret: undefined })
 
         expect(errorMessage(await call(service, retryRequest(planId)))).toContain(
           'can no longer be retried'
