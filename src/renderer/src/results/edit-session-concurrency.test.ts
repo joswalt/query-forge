@@ -109,6 +109,15 @@ describe('Compare after a Concurrent Change on Save', () => {
   })
 })
 
+describe('Back to editor from the compare view', () => {
+  it('keeps my edits, and Save still carries the etag of the compare read', () => {
+    const back = apply(comparing(), { type: 'compareClosed' })
+    expect(back).toMatchObject({ comparing: false, serverCopy: theirs })
+    expect(JSON.parse(back.draft)).toEqual(mine)
+    expect(planSave(back)).toMatchObject({ ok: true, write: { ifMatch: '"etag-theirs"' } })
+  })
+})
+
 describe('Overwrite with mine', () => {
   it('is reachable only from the compare view', () => {
     const session = concurrentlyChanged()

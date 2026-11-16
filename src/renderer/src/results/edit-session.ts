@@ -153,6 +153,9 @@ export type EditSessionEvent =
   /** Overwrite with mine, in the compare view only: read the current
    * version, then replace it carrying that read's etag. */
   | { type: 'overwriteRequested' }
+  /** Back to editor: leave the compare view, keeping the draft and the
+   * etag of the compare read. */
+  | { type: 'compareClosed' }
   /** Reload: discard the draft and read the current version, as on open. */
   | { type: 'reloadRequested' }
   /** Compare or Overwrite with mine found the document deleted. */
@@ -366,6 +369,8 @@ export function editSessionReducer(session: EditSession, event: EditSessionEvent
     case 'compareRequested':
       if (isBusy(session) || session.newDocument) return session
       return { ...session, comparing: true, pendingRead: 'compare', notice: undefined }
+    case 'compareClosed':
+      return isBusy(session) ? session : { ...session, comparing: false }
     case 'reloadRequested':
       if (isBusy(session) || session.newDocument) return session
       return {

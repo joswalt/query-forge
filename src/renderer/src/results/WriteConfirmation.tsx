@@ -4,7 +4,14 @@ import { requiresWriteConfirmation } from '@shared/write-confirmation'
 import { ENVIRONMENT_LABEL } from '../connection-environment'
 
 /** Which drawer write a Write Confirmation is waiting on. */
-export type DrawerWrite = 'save' | 'delete'
+export type DrawerWrite = 'save' | 'delete' | 'overwrite' | 'save-as-new'
+
+const CONFIRM_PROMPT: Record<DrawerWrite, string> = {
+  save: 'Save to prod?',
+  delete: 'Delete from prod?',
+  overwrite: 'Overwrite on prod?',
+  'save-as-new': 'Create on prod?'
+}
 
 /** The drawer's Write Confirmation step (decision 05, stories 51 to 58). */
 export interface WriteConfirmationStep {
@@ -97,7 +104,7 @@ export function ConfirmWriteButtons({
   return (
     <>
       <span className="document-drawer__confirm-prompt" role="status">
-        {write === 'delete' ? 'Delete from prod?' : 'Save to prod?'}
+        {CONFIRM_PROMPT[write]}
       </span>
       <button type="button" ref={step.cancelRef} onClick={step.cancel}>
         Cancel

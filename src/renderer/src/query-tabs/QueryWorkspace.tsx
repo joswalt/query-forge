@@ -8,17 +8,23 @@ import { getExtractor, type ExtractorId, type ExtractorOptions } from '@shared/e
 import { inferTableName } from '@shared/extractors/infer-table-name'
 import { detectDmlStatement, parseDmlStatement, type DmlVerb } from '@shared/dml/dml-statement'
 import { FALLBACK_TABLE_NAME } from '@shared/extractors/sql-extractors'
+import type { DocumentWrite, StoredDocument } from '@shared/types/document-writer'
 import { QueryEditor, type QueryEditorHandle } from '../editor/QueryEditor'
 import { initialExportState, type ExportState } from '../results/export-state'
 import { useExtractorSettings } from '../results/extractor-settings'
 import { addressOf, type DocumentAddress } from '../results/addressable-row'
 import {
+  editSessionReducer,
   editSessionsReducer,
   findEditSession,
+  hasUnsavedEdits,
   initialEditSessionsState,
+  isBusy,
   planDelete,
   planSave,
+  planSaveAsNew,
   type DocumentTarget,
+  type EditSession,
   type EditSessionMode,
   type EditSessionEvent,
   type EditSessionsAction,
@@ -445,24 +451,108 @@ export const QueryWorkspace = forwardRef<
     readLatestVersion(tabId, key, session.target, session.address)
   }
 
-  /** Save (stories 22, 24, 29, 33 to 36): a replace with the session's
-   * etag; the grid row updates in place on success. Create for a New
-   * document (stories 31, 45): the created document goes to the top of the
-   * grid. */
+  function findSession(tabId: string, key: number): EditSession | undefined {
+    return tabs.find((t) => t.id === tabId)?.editSessions.sessions.find((s) => s.key === key)
+  }
+
+  /** Save (stories 22, 24, 29, 33 to 36, 39): a replace with the session's
+   * etag (from the compare read, in the compare view); the grid row updates
+   * in place on success. Create for a New document (stories 31, 45): the
+   * created document goes to the top of the grid. */
   function handleSaveDocument(tabId: string, key: number): void {
-    const session = tabs.find((t) => t.id === tabId)?.editSessions.sessions.find((s) => s.key === key)
-    if (!session || session.saving || (!session.serverCopy && !session.newDocument)) return
+    const session = findSession(tabId, key)
+    if (!session || isBusy(session) || (!session.serverCopy && !session.newDocument)) return
     const plan = planSave(session)
     if (!plan.ok) {
       dispatchSession(tabId, key, { type: 'saveRefused', notice: plan.notice })
       return
     }
-    const { target, address, serverCopy: previous } = session
-    const write = plan.write
+    sendSave(tabId, session, plan.write)
+  }
+
+  /** Save as new document after a 404 on Save (story 47): a create at the
+   * same address with the edits. The struck-through row is restored. */
+  function handleSaveAsNew(tabId: string, key: number): void {
+    const session = findSession(tabId, key)
+    if (!session || isBusy(session)) return
+    const plan = planSaveAsNew(session)
+    if (!plan.ok) {
+      dispatchSession(tabId, key, { type: 'saveRefused', notice: plan.notice })
+      return
+    }
+    sendSave(tabId, session, plan.write, true)
+  }
+
+  /** Compare after a Concurrent Change (story 38): read the current version
+   * into the compare view, keeping the draft. */
+  function handleCompare(tabId: string, key: number): void {
+    const session = findSession(tabId, key)
+    if (!session || isBusy(session) || !session.serverCopy) return
+    dispatchSession(tabId, key, { type: 'compareRequested' })
+    readCurrentVersion(tabId, key, session.target, session.address)
+  }
+
+  /** Overwrite with mine (story 41), compare view only: a fresh read, then
+   * a replace with that read's etag. Never an unconditional write. The draft
+   * sent is the one on screen when it was pressed (and confirmed, on prod). */
+  function handleOverwrite(tabId: string, key: number): void {
+    const session = findSession(tabId, key)
+    if (!session || !session.comparing || isBusy(session)) return
+    const overwriting = editSessionReducer(session, { type: 'overwriteRequested' })
+    dispatchSession(tabId, key, { type: 'overwriteRequested' })
+    readCurrentVersion(tabId, key, session.target, session.address, (document) => {
+      const read = editSessionReducer(overwriting, { type: 'currentVersionRead', document })
+      const plan = planSave(read)
+      if (!plan.ok) {
+        dispatchSession(tabId, key, { type: 'saveRefused', notice: plan.notice })
+        return
+      }
+      sendSave(tabId, read, plan.write)
+    })
+  }
+
+  /** Reload (story 42): discard the edits and read the current version. */
+  function handleReload(tabId: string, key: number): void {
+    const session = findSession(tabId, key)
+    if (!session || isBusy(session)) return
+    dispatchSession(tabId, key, { type: 'reloadRequested' })
+    readLatestVersion(tabId, key, session.target, session.address)
+  }
+
+  /** Reads the current version for Compare or Overwrite with mine; a
+   * document found deleted strikes its rows through (story 32). */
+  function readCurrentVersion(
+    tabId: string,
+    key: number,
+    target: DocumentTarget,
+    address: DocumentAddress,
+    then?: (document: StoredDocument) => void
+  ): void {
+    window.api.documents
+      .read(target.connectionId, { ...address, database: target.database, container: target.container })
+      .then((result) => {
+        if (result.outcome === 'success') {
+          dispatchSession(tabId, key, { type: 'currentVersionRead', document: result.document })
+          then?.(result.document)
+        } else {
+          dispatchSession(tabId, key, { type: 'currentVersionNotFound' })
+          dispatchRun(tabId, { type: 'documentGone', target, address })
+        }
+      })
+      .catch((err) =>
+        dispatchSession(tabId, key, { type: 'currentVersionReadFailed', message: remoteErrorMessage(err) })
+      )
+  }
+
+  /** Sends a Save, Create, Overwrite or Save as new document and applies the
+   * outcome to the edit session and the grid. */
+  function sendSave(tabId: string, session: EditSession, write: DocumentWrite, asNew = false): void {
+    const { key, target, address, serverCopy: previous } = session
     if (write.kind === 'create') {
       dispatchSession(tabId, key, {
         type: 'saveStarted',
-        address: { id: write.id, partitionKey: write.partitionKey }
+        address: { id: write.id, partitionKey: write.partitionKey },
+        asNew
       })
     } else {
       dispatchSession(tabId, key, { type: 'saveStarted' })
@@ -484,8 +574,9 @@ export const QueryWorkspace = forwardRef<
             document,
             requestCharge: result.requestCharge
           })
-          if (write.kind === 'create') dispatchRun(tabId, { type: 'documentCreated', target, document })
-          else if (previous) {
+          if (write.kind === 'create' && !asNew) {
+            dispatchRun(tabId, { type: 'documentCreated', target, document })
+          } else if (previous) {
             dispatchRun(tabId, { type: 'documentSaved', target, address, document, previous })
           }
           return
@@ -498,6 +589,10 @@ export const QueryWorkspace = forwardRef<
         if (result.outcome === 'not-found' && write.kind !== 'create') {
           dispatchRun(tabId, { type: 'documentGone', target, address })
         }
+        // In the compare view a Concurrent Change refreshes the server side.
+        if (result.outcome === 'precondition-failed' && session.comparing) {
+          readCurrentVersion(tabId, key, target, address)
+        }
       })
       .catch((err) => dispatchSession(tabId, key, { type: 'saveFailed', message: remoteErrorMessage(err) }))
   }
@@ -509,6 +604,14 @@ export const QueryWorkspace = forwardRef<
   }
 
   function handleCloseTab(id: string): void {
+    // Unsaved document edits in the tab's drawer are lost with it (story 27).
+    const closing = tabs.find((tab) => tab.id === id)
+    if (
+      closing?.editSessions.sessions.some(hasUnsavedEdits) &&
+      !window.confirm('Discard your unsaved document edits in this tab?')
+    ) {
+      return
+    }
     // Closing a tab mid-run must not silently abandon a live, RU-consuming
     // query — cancel it first, same as the Cancel button would.
     const execution = executionsRef.current.get(id)
@@ -1217,7 +1320,15 @@ export const QueryWorkspace = forwardRef<
                     ),
                     onEdit: (row) => handleEditDocument(activeTab.id, row),
                     onSelect: (key) => dispatchEdit(activeTab.id, { type: 'selected', key }),
-                    onClose: (key) => dispatchEdit(activeTab.id, { type: 'closed', key }),
+                    onClose: (key) => dispatchEdit(activeTab.id, { type: 'closeRequested', key }),
+                    onDiscard: (key) => dispatchEdit(activeTab.id, { type: 'closed', key }),
+                    onKeepEditing: () => dispatchEdit(activeTab.id, { type: 'closeCancelled' }),
+                    onCompare: (key) => handleCompare(activeTab.id, key),
+                    onBackToEditor: (key) =>
+                      dispatchSession(activeTab.id, key, { type: 'compareClosed' }),
+                    onOverwrite: (key) => handleOverwrite(activeTab.id, key),
+                    onReload: (key) => handleReload(activeTab.id, key),
+                    onSaveAsNew: (key) => handleSaveAsNew(activeTab.id, key),
                     onDraftChange: (key, text) =>
                       dispatchSession(activeTab.id, key, { type: 'draftChanged', text }),
                     onSave: (key) => handleSaveDocument(activeTab.id, key),
