@@ -15,14 +15,26 @@ import type {
  * since nothing was written either way.
  */
 export type DmlRunState =
-  | { phase: 'planning'; verb: DmlVerb; container: string; matched: number; requestCharge: number }
+  | {
+      phase: 'planning'
+      verb: DmlVerb
+      container: string
+      /** The statement text as planned; the editor may change meanwhile. */
+      statement: string
+      matched: number
+      requestCharge: number
+    }
   | {
       phase: 'confirming'
       verb: DmlVerb
       container: string
+      /** What "Preview as query" reads its `WHERE` from. */
+      statement: string
       planId: string
       matchCount: number
       drivingQueryRequestCharge: number
+      /** For the rough write-RU band; absent without query metrics. */
+      averageDocumentSize?: number
       /** Names the address columns of `sample`. */
       partitionKeyPaths: string[]
       /** The first matches, shown under "WILL DELETE / WILL UPDATE". */
@@ -51,7 +63,13 @@ export type DmlRunState =
   | { phase: 'error'; verb: DmlVerb; container: string; stage: 'planning' | 'committing' }
 
 export type DmlRunAction =
-  | { type: 'dmlPlanningStarted'; startedAt: number; verb: DmlVerb; container: string }
+  | {
+      type: 'dmlPlanningStarted'
+      startedAt: number
+      verb: DmlVerb
+      container: string
+      statement: string
+    }
   | { type: 'dmlPlanningProgress'; progress: DmlPlanningProgress }
   | { type: 'dmlPlanned'; summary: DmlPlanSummary; at: number }
   | { type: 'dmlDiscarded'; finishedAt: number }
