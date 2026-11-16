@@ -208,8 +208,12 @@
 }
 
 .results-empty {
+  /* Fill the results pane down to the bottom of the window, like the grid
+   * does once rows arrive, with the message centred in it. */
+  flex: 1 1 auto;
   display: grid;
   justify-items: center;
+  align-content: center;
   gap: 4px;
   padding: 36px 16px 44px;
   border: 1px dashed var(--qf-border-strong);
