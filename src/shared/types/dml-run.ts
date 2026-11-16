@@ -140,42 +140,52 @@ export type DmlOutcomeRow = Record<string, unknown> & {
   message: string
 }
 
-/** A Write Outcome's plain label (spec "Renderer DML run state"), shared
- * by the run report and the Query History stats line. */
-export function writeOutcomeLabel(outcome: WriteOutcome, verb: DmlVerb): string {
-  switch (outcome) {
-    case 'written':
-      return verb === 'DELETE' ? 'Deleted' : 'Updated'
-    case 'unchanged':
-      return 'Unchanged'
-    case 'concurrent-change':
-      return 'Changed by someone else'
-    case 'not-found':
-      return 'Already deleted'
-    case 'expression-undefined':
-      return 'SET was undefined'
-    case 'failed':
-      return 'Failed'
-    case 'not-attempted':
-      return 'Not attempted'
+/** How a Write Outcome is coloured in the run report: green, amber, red
+ * or grey. */
+export type WriteOutcomeTone = 'ok' | 'warn' | 'err' | 'muted'
+
+/**
+ * How each Write Outcome reads (spec "Renderer DML run state"), in one
+ * place: its plain label (the run report and the Query History stats
+ * line), its one-line meaning on a run report tile (absent where the label
+ * says it all) and its tone.
+ */
+const WRITE_OUTCOME_DISPLAY: Record<
+  WriteOutcome,
+  { label: (verb: DmlVerb) => string; meaning?: string; tone: WriteOutcomeTone }
+> = {
+  written: { label: (verb) => (verb === 'DELETE' ? 'Deleted' : 'Updated'), tone: 'ok' },
+  unchanged: {
+    label: () => 'Unchanged',
+    meaning: 'only removed paths that were already absent; nothing sent',
+    tone: 'muted'
+  },
+  'concurrent-change': {
+    label: () => 'Changed by someone else',
+    meaning:
+      'edited after the plan was made, so skipped. Retry checks it again against its current version',
+    tone: 'warn'
+  },
+  'not-found': { label: () => 'Already deleted', tone: 'muted' },
+  'expression-undefined': { label: () => 'SET was undefined', tone: 'warn' },
+  failed: { label: () => 'Failed', meaning: 'see message', tone: 'err' },
+  'not-attempted': {
+    label: () => 'Not attempted',
+    meaning: 'the run was cancelled before this write was sent',
+    tone: 'muted'
   }
 }
 
-/** A Write Outcome's one-line meaning on its run report tile (spec
- * "Renderer DML run state"); undefined where the label says it all. */
+export function writeOutcomeLabel(outcome: WriteOutcome, verb: DmlVerb): string {
+  return WRITE_OUTCOME_DISPLAY[outcome].label(verb)
+}
+
 export function writeOutcomeMeaning(outcome: WriteOutcome): string | undefined {
-  switch (outcome) {
-    case 'unchanged':
-      return 'only removed paths that were already absent; nothing sent'
-    case 'concurrent-change':
-      return 'edited after the plan was made, so skipped. Retry checks it again against its current version'
-    case 'failed':
-      return 'see message'
-    case 'not-attempted':
-      return 'the run was cancelled before this write was sent'
-    default:
-      return undefined
-  }
+  return WRITE_OUTCOME_DISPLAY[outcome].meaning
+}
+
+export function writeOutcomeTone(outcome: WriteOutcome): WriteOutcomeTone {
+  return WRITE_OUTCOME_DISPLAY[outcome].tone
 }
 
 export function emptyOutcomeCounts(): Record<WriteOutcome, number> {

@@ -5,6 +5,7 @@ import {
   WRITE_OUTCOMES,
   writeOutcomeLabel,
   writeOutcomeMeaning,
+  writeOutcomeTone,
   type DmlSampleDocument,
   type DmlSampleValue,
   type WriteOutcome
@@ -13,7 +14,7 @@ import { isNoneValue } from '@shared/types/document-writer'
 import { matchesTypedDmlConfirmation, typedDmlConfirmation } from '@shared/write-confirmation'
 import { retryScope, type DmlRunState } from './dml-run-state'
 import { projectedRequestCharge, writeRequestChargeBand } from './dml-ru-estimate'
-import { outcomeBarSegments, writeOutcomeTone } from './dml-run-report'
+import { outcomeBarSegments } from './dml-run-report'
 import './dml-run.css'
 
 const count = (n: number): string => n.toLocaleString()
