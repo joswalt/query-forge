@@ -72,7 +72,16 @@ export interface EditSession {
    * the `id` and partition key fields as typed. `address` is then the
    * prefill or the last create attempt, not a stored document. */
   newDocument?: NewDocumentFields
+  /** The compare view is open (story 38): the server copy, as read by
+   * Compare, side by side with the draft. The drawer widens. */
+  comparing?: boolean
+  /** A point-read of the current version is in flight for Compare,
+   * Overwrite with mine or Reload. */
+  pendingRead?: CurrentVersionRead
 }
+
+/** Why the current version is being read while the session is open. */
+export type CurrentVersionRead = 'compare' | 'overwrite'
 
 /** New document's editable address fields: the `id`, and one partition key
  * field per level (see `parsePartitionKeyInput`). */
@@ -134,6 +143,11 @@ export type EditSessionEvent =
   /** Edit instead (or Edit document… on an open Delete): edit the version
    * already read. */
   | { type: 'editRequested' }
+  /** Compare, after a Concurrent Change: read the current version and open
+   * the compare view, keeping the draft. */
+  | { type: 'compareRequested' }
+  /** The current version read for Compare or Overwrite with mine. */
+  | { type: 'currentVersionRead'; document: StoredDocument }
 
 export function openEditSession(input: {
   key: number
@@ -237,6 +251,7 @@ export function editSessionReducer(session: EditSession, event: EditSessionEvent
       return {
         ...session,
         newDocument: undefined,
+        comparing: false,
         saving: false,
         serverCopy: event.document,
         etag: etagOf(event.document),
@@ -248,6 +263,10 @@ export function editSessionReducer(session: EditSession, event: EditSessionEvent
         }
       }
     case 'saveOutcome':
+      // In the compare view a Concurrent Change refreshes the server side.
+      if (session.comparing && event.outcome === 'precondition-failed') {
+        return { ...session, saving: false, pendingRead: 'compare', notice: { kind: 'concurrent-change' } }
+      }
       return { ...session, saving: false, notice: noticeForOutcome(event.outcome, session.address) }
     case 'saveFailed':
       return { ...session, saving: false, notice: { kind: 'error', message: event.message } }
@@ -294,6 +313,16 @@ export function editSessionReducer(session: EditSession, event: EditSessionEvent
     case 'editRequested':
       if (session.mode === 'edit' || session.saving) return session
       return { ...session, mode: 'edit', notice: undefined }
+    case 'compareRequested':
+      return { ...session, comparing: true, pendingRead: 'compare', notice: undefined }
+    case 'currentVersionRead':
+      // The draft (my side) is kept; Save from here carries this etag.
+      return {
+        ...session,
+        pendingRead: undefined,
+        serverCopy: event.document,
+        etag: etagOf(event.document)
+      }
   }
 }
 
