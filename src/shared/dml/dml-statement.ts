@@ -10,6 +10,8 @@
  * pass through verbatim, so Cosmos DB evaluates them.
  */
 
+import type { PartitionKeyValue } from '../types/document-writer'
+
 export type DmlVerb = 'DELETE' | 'UPDATE'
 
 /**
@@ -512,6 +514,20 @@ export function translateDmlStatement(
   text: string,
   partitionKeyPaths: readonly string[]
 ): DmlTranslationResult {
+  const translated = translate(text, partitionKeyPaths)
+  if (!translated.ok) return translated
+  const { statement, translation } = translated
+  return { ok: true, statement, translation }
+}
+
+/** The translation plus its `SELECT … FROM <alias>` without `WHERE`, which
+ * a Retry scopes. */
+function translate(
+  text: string,
+  partitionKeyPaths: readonly string[]
+):
+  | { ok: true; statement: DmlStatement; translation: DmlTranslation; select: string }
+  | { ok: false; error: DmlSyntaxError } {
   const parsed = parseDmlStatement(text, partitionKeyPaths)
   if (!parsed.ok) return parsed
   const { statement } = parsed
@@ -547,18 +563,144 @@ export function translateDmlStatement(
     })
   }
 
+  const select = `SELECT ${projections.join(', ')} FROM ${alias}`
   return {
     ok: true,
     statement,
+    select,
     translation: {
-      drivingQuery: {
-        query: `SELECT ${projections.join(', ')} FROM ${alias} WHERE ${statement.condition}`,
-        parameters: []
-      },
+      drivingQuery: { query: `${select} WHERE ${statement.condition}`, parameters: [] },
       partitionKey,
       operations
     }
   }
+}
+
+/** One document's address, as a Retry scopes its Driving Query to it. */
+export interface RetryAddress {
+  id: string
+  partitionKey: PartitionKeyValue
+}
+
+/** One chunk of a Retry's scoped Driving Query and the addresses it was
+ * scoped to: only rows with exactly one of these addresses belong to it. */
+export interface ScopedDrivingQuery {
+  drivingQuery: DrivingQuery
+  addresses: RetryAddress[]
+}
+
+export type RetryTranslationResult =
+  | {
+      ok: true
+      statement: DmlStatement
+      translation: DmlTranslation
+      chunks: ScopedDrivingQuery[]
+    }
+  | { ok: false; error: DmlSyntaxError }
+
+/**
+ * A Retry's Driving Query (GLOSSARY.md: "Retry"): the original statement's
+ * Driving Query restricted to `addresses`, so `WHERE` and `SET` are
+ * re-evaluated against current versions:
+ * `… WHERE (<cond>) AND c.id IN (…) AND <each pk path> IN (…)`, one
+ * generated parameter per distinct value. `IN` lists match the cross
+ * product of ids and keys, so the caller keeps only rows whose exact
+ * address is in their chunk.
+ */
+export function translateRetry(
+  text: string,
+  partitionKeyPaths: readonly string[],
+  addresses: readonly RetryAddress[]
+): RetryTranslationResult {
+  const translated = translate(text, partitionKeyPaths)
+  if (!translated.ok) return translated
+  const { statement, translation, select } = translated
+  const chunks = chunkAddresses(addresses).map((chunk) => ({
+    drivingQuery: scopedQuery(select, statement, translation.partitionKey, chunk),
+    addresses: chunk
+  }))
+  return { ok: true, statement, translation, chunks }
+}
+
+/** Most addresses one scoped Driving Query restricts to. */
+export const MAX_RETRY_CHUNK_ADDRESSES = 1_000
+/** Most address bytes (UTF-8 `id` plus JSON partition key) in one chunk,
+ * keeping the query text well under Cosmos DB's 512 KB. */
+export const MAX_RETRY_CHUNK_BYTES = 256 * 1024
+
+/** Splits addresses in order into chunks within both limits. */
+function chunkAddresses(addresses: readonly RetryAddress[]): RetryAddress[][] {
+  const encoder = new TextEncoder()
+  const chunks: RetryAddress[][] = []
+  let current: RetryAddress[] = []
+  let bytes = 0
+  for (const address of addresses) {
+    const size =
+      encoder.encode(address.id).length + encoder.encode(JSON.stringify(address.partitionKey)).length
+    if (
+      current.length > 0 &&
+      (current.length === MAX_RETRY_CHUNK_ADDRESSES || bytes + size > MAX_RETRY_CHUNK_BYTES)
+    ) {
+      chunks.push(current)
+      current = []
+      bytes = 0
+    }
+    current.push(address)
+    bytes += size
+  }
+  if (current.length > 0) chunks.push(current)
+  return chunks
+}
+
+function scopedQuery(
+  select: string,
+  statement: DmlStatement,
+  partitionKey: PartitionKeyColumns[],
+  addresses: readonly RetryAddress[]
+): DrivingQuery {
+  const { alias } = statement
+  const parameters: DrivingQuery['parameters'] = []
+  const inList = (values: unknown[], name: (n: number) => string): string =>
+    values
+      .map((value, i) => {
+        parameters.push({ name: name(i + 1), value })
+        return name(i + 1)
+      })
+      .join(', ')
+
+  const ids = distinct(addresses.map((address) => address.id))
+  const conditions = [`(${statement.condition})`, `${alias}.id IN (${inList(ids, (n) => `@id${n}`)})`]
+  partitionKey.forEach((key, level) => {
+    const access = propertyAccess(alias, partitionKeyPathSegments(key.path))
+    const levels = addresses.map((address) =>
+      partitionKey.length === 1 ? address.partitionKey : (address.partitionKey as unknown[])[level]
+    )
+    // `{}` is the None value: the document has no such property, which
+    // `IN` can never match.
+    const isNone = (value: unknown): boolean => value !== null && typeof value === 'object'
+    const values = distinct(levels.filter((value) => !isNone(value)))
+    const matchesValue =
+      values.length > 0 ? `${access} IN (${inList(values, (n) => `@pk${level + 1}_${n}`)})` : undefined
+    const matchesNone = levels.some(isNone) ? `NOT IS_DEFINED(${access})` : undefined
+    conditions.push(
+      matchesValue && matchesNone
+        ? `(${matchesNone} OR ${matchesValue})`
+        : (matchesValue ?? matchesNone ?? 'false')
+    )
+  })
+  return { query: `${select} WHERE ${conditions.join(' AND ')}`, parameters }
+}
+
+/** First occurrence of each value, compared as JSON (so `{}`, `null`, `1`
+ * and `"1"` stay apart). */
+function distinct<T>(values: T[]): T[] {
+  const seen = new Set<string>()
+  return values.filter((value) => {
+    const key = JSON.stringify(value)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }
 
 /** `c` + `['address', 'odd key']` → `c.address["odd key"]`. */
