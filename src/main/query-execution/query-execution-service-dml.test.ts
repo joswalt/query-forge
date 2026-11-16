@@ -445,7 +445,7 @@ describe('QueryExecutionService DML Statements', () => {
       expect(provider.writes).toEqual([])
     })
 
-    it('reports a DELETE Write Outcome per document: 404 is written, 412 a Concurrent Change, anything else failed with a scrubbed message', async () => {
+    it('reports a DELETE Write Outcome per document: 404 is written, a failed etag check a Concurrent Change, anything else failed with a scrubbed message', async () => {
       const provider = new FakeCosmosProvider()
       provider.pages = [{ rows: matches(1, 4), requestCharge: 2 }]
       provider.onWrite = async (write) => {
@@ -715,7 +715,7 @@ describe('QueryExecutionService DML Statements', () => {
       expect(row.message).toContain('c.status')
       expect(summaryOf(responses)?.counts['expression-undefined']).toBe(1)
     })
-    it('reports an UPDATE Write Outcome per document: 404 is not-found, 412 a Concurrent Change, a patch 400 failed with a scrubbed message', async () => {
+    it('reports an UPDATE Write Outcome per document: 404 is not-found, a failed etag check a Concurrent Change, a patch 400 failed with a scrubbed message', async () => {
       const provider = new FakeCosmosProvider()
       provider.pages = [{ rows: [1, 2, 3].map((n) => updateMatch(n)), requestCharge: 2 }]
       provider.onWrite = async (write) => {
