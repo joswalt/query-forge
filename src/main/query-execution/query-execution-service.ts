@@ -2,7 +2,7 @@ import type { ConnectionConfig, ConnectionProfile } from '@shared/types/connecti
 import { randomUUID } from 'node:crypto'
 import type { DatabaseProvider, DecryptedSecret } from '@shared/types/database-provider'
 import { isDocumentWriter } from '@shared/types/document-writer'
-import type { DocumentWriter } from '@shared/types/document-writer'
+import type { DocumentWrite, DocumentWriter } from '@shared/types/document-writer'
 import type { DmlPlanSummary, DmlRetrySummary } from '@shared/types/dml-run'
 import { assertReadOnlyQuery, DocumentWriteRefusedError } from './read-only-guard'
 import { toExecutionErrorMessage } from './scrub-error-message'
@@ -135,6 +135,7 @@ export class QueryExecutionService {
           if (this.profiles.get(request.profileId)?.readOnly) {
             throw new DocumentWriteRefusedError()
           }
+          assertAddressedDocumentWrite(request.write)
           const result = await this.requireDocumentWriter(request.profileId).writeDocument(
             request.write
           )
@@ -350,5 +351,25 @@ export class QueryExecutionService {
       throw new Error(`No active connection for profile "${profileId}"`)
     }
     return provider
+  }
+}
+
+/**
+ * The renderer is not trusted to send a well-formed Document Write: the
+ * types promise an explicit partition key on every write and an `ifMatch`
+ * etag on every change to an existing document, but the IPC boundary only
+ * carries JSON. Refused before the provider is touched, because
+ * `@azure/cosmos` silently targets the None key when the partition key is
+ * left out, and a missing etag would overwrite a Concurrent Change. `null`
+ * and `{}` (the None value) are valid partition key values; `undefined` is not.
+ */
+function assertAddressedDocumentWrite(write: DocumentWrite): void {
+  if (write.partitionKey === undefined) {
+    throw new Error('A Document Write needs an explicit partition key value.')
+  }
+  if (write.kind !== 'create' && typeof write.ifMatch !== 'string') {
+    throw new Error(
+      `A ${write.kind} Document Write needs an ifMatch etag, so it cannot overwrite a Concurrent Change.`
+    )
   }
 }
