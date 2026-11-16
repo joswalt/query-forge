@@ -16,15 +16,22 @@ import type {
   ReadDocumentRequest,
   ReadDocumentResult
 } from '@shared/types/document-writer'
-import type { DmlPlanningProgress, DmlPlanSummary } from '@shared/types/dml-run'
+import type { DmlPlanningProgress, DmlPlanSummary, DmlRetrySummary } from '@shared/types/dml-run'
 import type { QueryExecutionRequest, QueryExecutionResponse } from './protocol'
 import { AsyncQueue } from './async-queue'
 
 interface PendingResult {
   resolve: (value: unknown) => void
   reject: (err: Error) => void
-  /** `planDml` only: Driving Query progress before the result. */
+  /** `planDml` and `planRetry`: Driving Query progress before the result. */
   onProgress?: (progress: DmlPlanningProgress) => void
+}
+
+export interface PlanRetryRequest {
+  /** The tab's last committed run's `planId`. */
+  planId: string
+  tabId: string
+  executionId: ExecutionId
 }
 
 export interface PlanDmlRequest {
@@ -135,6 +142,19 @@ export class QueryExecutionClient {
   ): Promise<DmlPlanSummary> {
     return this.sendForResult<DmlPlanSummary>(
       { id: randomUUID(), method: 'planDml', ...request },
+      onProgress
+    )
+  }
+
+  /** Plans a Retry of the tab's last committed run (ADR 0004 amendment):
+   * resolves with the plan's numbers plus `scopeCount`. Cancellable by
+   * Execution ID. */
+  planRetry(
+    request: PlanRetryRequest,
+    onProgress: (progress: DmlPlanningProgress) => void
+  ): Promise<DmlRetrySummary> {
+    return this.sendForResult<DmlRetrySummary>(
+      { id: randomUUID(), method: 'planRetry', ...request },
       onProgress
     )
   }

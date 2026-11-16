@@ -11,6 +11,7 @@ import { sameTarget, type DocumentTarget } from '../results/edit-session'
 import {
   dmlAfterDone,
   dmlAfterFailure,
+  retryScope,
   withCommitChunkMeta,
   type DmlRunAction,
   type DmlRunState
@@ -85,6 +86,9 @@ export interface QueryRunState {
   /** Set while (and after) the run is a Cosmos DB DML Statement: its phase
    * from planning to done (see dml-run-state.ts). Undefined for a query. */
   dml?: DmlRunState
+  /** While a Retry is planned or confirmed: the finished run it retries,
+   * shown again if the Retry is cancelled, discarded or fails to plan. */
+  retryOf?: QueryRunState
 }
 
 export const initialQueryRunState: QueryRunState = {
@@ -219,6 +223,16 @@ export function queryRunReducer(state: QueryRunState, action: QueryRunAction): Q
     }
 
     case 'failed':
+      if (state.retryOf && state.dml?.phase === 'planning') {
+        // Backing out of a Retry costs nothing: the run report comes back,
+        // with the reason when planning failed rather than was cancelled.
+        const original = state.retryOf
+        const report = original.dml
+        if (action.cancelled || (report?.phase !== 'done' && report?.phase !== 'stopped')) {
+          return original
+        }
+        return { ...original, dml: { ...report, retryError: action.message } }
+      }
       return {
         ...state,
         status: action.cancelled ? 'cancelled' : 'error',
@@ -242,6 +256,38 @@ export function queryRunReducer(state: QueryRunState, action: QueryRunAction): Q
         }
       }
 
+    case 'dmlRetryPlanningStarted': {
+      const scopeCount = retryScope(state.dml)
+      if (scopeCount === undefined || (state.dml?.phase !== 'done' && state.dml?.phase !== 'stopped')) {
+        return state
+      }
+      const { verb, container, statement } = state.dml
+      const { retryError: _shownBefore, ...report } = state.dml
+      return {
+        ...state,
+        status: 'running',
+        startedAt: action.startedAt,
+        finishedAt: undefined,
+        errorMessage: undefined,
+        retryOf: { ...state, dml: report },
+        dml: {
+          phase: 'planning',
+          verb,
+          container,
+          statement,
+          matched: 0,
+          requestCharge: 0,
+          retry: { scopeCount }
+        }
+      }
+    }
+
+    case 'dmlLastRunDropped': {
+      if (state.dml?.phase !== 'done' && state.dml?.phase !== 'stopped') return state
+      const { planId: _dropped, ...report } = state.dml
+      return { ...state, dml: report }
+    }
+
     case 'dmlPlanningProgress':
       if (state.dml?.phase !== 'planning') return state
       return {
@@ -255,7 +301,7 @@ export function queryRunReducer(state: QueryRunState, action: QueryRunAction): Q
 
     case 'dmlPlanned': {
       if (state.dml?.phase !== 'planning') return state
-      const { verb, container, statement } = state.dml
+      const { verb, container, statement, retry } = state.dml
       const {
         planId,
         matchCount,
@@ -269,12 +315,20 @@ export function queryRunReducer(state: QueryRunState, action: QueryRunAction): Q
           ...state,
           status: 'success',
           finishedAt: action.at,
-          dml: { phase: 'zero-matches', verb, container, drivingQueryRequestCharge }
+          retryOf: undefined,
+          dml: {
+            phase: 'zero-matches',
+            verb,
+            container,
+            drivingQueryRequestCharge,
+            ...(retry ? { retry } : {})
+          }
         }
       }
       return {
         ...state,
         dml: {
+          ...(retry ? { retry } : {}),
           phase: 'confirming',
           verb,
           container,
@@ -291,6 +345,8 @@ export function queryRunReducer(state: QueryRunState, action: QueryRunAction): Q
 
     case 'dmlDiscarded':
       if (state.dml?.phase !== 'confirming') return state
+      // Discarding a Retry returns to the run it retries (story 123).
+      if (state.retryOf) return state.retryOf
       return {
         ...state,
         status: 'cancelled',
@@ -300,13 +356,29 @@ export function queryRunReducer(state: QueryRunState, action: QueryRunAction): Q
 
     case 'dmlCommitStarted': {
       if (state.dml?.phase !== 'confirming') return state
-      const { verb, container, matchCount, drivingQueryRequestCharge } = state.dml
+      const { verb, container, statement, planId, matchCount, drivingQueryRequestCharge, retry } =
+        state.dml
+      // A Retry's outcome rows replace the original run's (story 124).
+      const rows = retry
+        ? {
+            resultSets: [],
+            rowCount: 0,
+            ruTotal: undefined,
+            stoppedAtRowLimit: false,
+            partitionKeyPaths: undefined
+          }
+        : {}
       return {
         ...state,
+        ...rows,
+        retryOf: undefined,
         dml: {
+          ...(retry ? { retry: true as const } : {}),
           phase: 'committing',
           verb,
           container,
+          statement,
+          planId,
           matchCount,
           drivingQueryRequestCharge,
           progress: { completed: 0, total: matchCount, requestCharge: 0, counts: emptyOutcomeCounts() },

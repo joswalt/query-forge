@@ -202,6 +202,14 @@ export function HistoryPanel(): React.JSX.Element {
                 {entry.dml && (
                   <span className="chip history-entry__dml">{dmlChipText(entry.dml)}</span>
                 )}
+                {entry.dml?.retry && (
+                  <span
+                    className="chip history-entry__retry"
+                    title="A Retry of an earlier run: only the documents that run left not written"
+                  >
+                    retry
+                  </span>
+                )}
                 <span className="status-pill" data-status={entry.status}>
                   {entry.status}
                 </span>

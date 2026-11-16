@@ -229,6 +229,31 @@ const dmlApi = {
       cancel: () => ipcRenderer.send('query:cancel', { profileId, executionId })
     }
   },
+  /** Plans a Retry of the tab's last committed run (`planId`, its plan).
+   * The Query Execution Service re-runs that run's own statement, never
+   * the editor's. `onPlanned` receives a `DmlRetrySummary`. */
+  planRetry: async (
+    profileId: string,
+    tabId: string,
+    planId: string,
+    handlers: DmlPlanHandlers
+  ): Promise<QueryExecutionHandle> => {
+    const { executionId }: { executionId: ExecutionId } = await ipcRenderer.invoke('query:start')
+    listenOnce(
+      executionId,
+      {
+        'dml:progress': (progress) => handlers.onProgress(progress as DmlPlanningProgress),
+        'dml:planned': (summary) => handlers.onPlanned(summary as DmlPlanSummary),
+        'query:error': (message) => handlers.onError(message as string)
+      },
+      ['dml:planned', 'query:error']
+    )
+    ipcRenderer.send('dml:planRetry', { planId, tabId, executionId })
+    return {
+      executionId,
+      cancel: () => ipcRenderer.send('query:cancel', { profileId, executionId })
+    }
+  },
   commit: async (
     profileId: string,
     planId: string,

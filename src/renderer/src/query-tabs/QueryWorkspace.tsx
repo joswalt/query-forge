@@ -42,6 +42,7 @@ import { ENVIRONMENT_LABEL, groupByEnvironment } from '../connection-environment
 import { QueryResultsView, type ExportLoadedRequest } from './QueryResultsView'
 import { EditorResizer, useEditorHeight } from './EditorResizer'
 import { DmlConfirmStrip, DmlRunReport } from './DmlRunPanels'
+import { retryScope } from './dml-run-state'
 import {
   initialQueryRunState,
   MAX_DISPLAY_ROWS,
@@ -804,6 +805,37 @@ export const QueryWorkspace = forwardRef<
       .catch((err) => failSetup(tabId, err))
   }
 
+  /** "Retry N not written" (stories 115 to 122): the Query Execution
+   * Service re-plans the tab's last committed run's own statement, scoped
+   * to the documents it left not written, so the editor's text never
+   * matters (story 118). The run report stays until the Retry commits. */
+  function handleRetryDml(tabId: string): void {
+    const tab = tabs.find((t) => t.id === tabId)
+    const dml = tab?.run.dml
+    if (!tab?.connectionId || (dml?.phase !== 'done' && dml?.phase !== 'stopped')) return
+    const { planId } = dml
+    if (planId === undefined || retryScope(dml) === undefined) return
+    dispatchRun(tabId, { type: 'dmlRetryPlanningStarted', startedAt: Date.now() })
+
+    const handle: ExecutionHandle = { cancel: () => {}, cancelRequested: false }
+    executionsRef.current.set(tabId, handle)
+    window.api.dml
+      .planRetry(tab.connectionId, tabId, planId, {
+        onProgress: (progress) => dispatchRun(tabId, { type: 'dmlPlanningProgress', progress }),
+        onPlanned: (summary) => {
+          executionsRef.current.delete(tabId)
+          dispatchRun(tabId, { type: 'dmlPlanned', summary, at: Date.now() })
+        },
+        onError: (message) => {
+          const cancelled = executionsRef.current.get(tabId)?.cancelRequested ?? false
+          executionsRef.current.delete(tabId)
+          dispatchRun(tabId, { type: 'failed', message, finishedAt: Date.now(), cancelled })
+        }
+      })
+      .then((resolved) => attachCancel(tabId, handle, resolved.cancel))
+      .catch((err) => failSetup(tabId, err))
+  }
+
   /** "Preview as query ↗" (stories 88, 89): a new "DML preview" tab on
    * the same connection and container runs `SELECT *` over the planned
    * statement's `WHERE` under the normal Row Limit. The DML tab stays
@@ -1073,6 +1105,19 @@ export const QueryWorkspace = forwardRef<
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeConnectionId, needsContainerPicker, hasContainerList, activeIsConnected, activeListUnavailable])
+
+  // Disconnect drops each tab's last committed run in the Query Execution
+  // Service, so its "Retry N not written" goes too (story 126).
+  useEffect(() => {
+    if (!connectedIds) return
+    setTabs((prev) =>
+      prev.map((t) =>
+        t.connectionId && !connectedIds.includes(t.connectionId) && retryScope(t.run.dml) !== undefined
+          ? { ...t, run: queryRunReducer(t.run, { type: 'dmlLastRunDropped' }) }
+          : t
+      )
+    )
+  }, [connectedIds])
 
   async function handleSaveToFile(): Promise<void> {
     if (!activeTab) return
@@ -1347,6 +1392,7 @@ export const QueryWorkspace = forwardRef<
             dml={activeTab.run.dml}
             onCancel={() => handleCancel(activeTab.id)}
             onPreviewQuery={() => handlePreviewDml(activeTab.id)}
+            onRetry={() => handleRetryDml(activeTab.id)}
           />
 
           <QueryResultsView

@@ -4,6 +4,7 @@ import {
   dmlPreviewQuery,
   parseDmlStatement,
   translateDmlStatement,
+  translateRetry,
   type DmlAssignment
 } from './dml-statement'
 
@@ -366,5 +367,118 @@ describe('previewing a DML Statement as a query', () => {
 
   it('has no preview for a malformed DML Statement', () => {
     expect(dmlPreviewQuery('DELETE FROM c')).toBeUndefined()
+  })
+})
+
+describe('scoping a Retry Driving Query to the documents not written', () => {
+  it('re-checks the WHERE only for the given addresses, one generated parameter per value', () => {
+    const result = translateRetry('DELETE FROM c WHERE c.status = "stale" OR c.old', ['/customerId'], [
+      { id: 'a', partitionKey: 'x' },
+      { id: 'b', partitionKey: 'y' },
+      { id: 'a', partitionKey: 'y' }
+    ])
+
+    expect(result.ok && result.chunks).toEqual([
+      {
+        drivingQuery: {
+          query:
+            'SELECT c.id, c._etag, c._rid, c.customerId AS __pkv1, IS_DEFINED(c.customerId) AS __pk1 ' +
+            'FROM c WHERE (c.status = "stale" OR c.old) AND c.id IN (@id1, @id2) ' +
+            'AND c.customerId IN (@pk1_1, @pk1_2)',
+          parameters: [
+            { name: '@id1', value: 'a' },
+            { name: '@id2', value: 'b' },
+            { name: '@pk1_1', value: 'x' },
+            { name: '@pk1_2', value: 'y' }
+          ]
+        },
+        addresses: [
+          { id: 'a', partitionKey: 'x' },
+          { id: 'b', partitionKey: 'y' },
+          { id: 'a', partitionKey: 'y' }
+        ]
+      }
+    ])
+  })
+
+  it('matches the None value of a hierarchical partition key level with NOT IS_DEFINED', () => {
+    const result = translateRetry(
+      'UPDATE c SET c.n = c.n + 1 WHERE c.n < 5',
+      ['/tenant', '/address/region'],
+      [
+        { id: 'a', partitionKey: ['t1', {}] },
+        { id: 'b', partitionKey: ['t1', null] },
+        { id: 'c', partitionKey: [{}, {}] }
+      ]
+    )
+
+    const [chunk] = result.ok ? result.chunks : []
+    expect(chunk.drivingQuery.query).toContain(
+      'WHERE (c.n < 5) AND c.id IN (@id1, @id2, @id3) ' +
+        'AND (NOT IS_DEFINED(c.tenant) OR c.tenant IN (@pk1_1)) ' +
+        'AND (NOT IS_DEFINED(c.address.region) OR c.address.region IN (@pk2_1))'
+    )
+    expect(chunk.drivingQuery.query).toContain('(c.n + 1) AS __set1')
+    expect(chunk.drivingQuery.parameters).toEqual([
+      { name: '@id1', value: 'a' },
+      { name: '@id2', value: 'b' },
+      { name: '@id3', value: 'c' },
+      { name: '@pk1_1', value: 't1' },
+      { name: '@pk2_1', value: null }
+    ])
+  })
+
+  it('needs no IN list for a partition key level that is None for every address', () => {
+    const result = translateRetry('DELETE FROM c WHERE true', ['/pk'], [{ id: 'a', partitionKey: {} }])
+
+    const [chunk] = result.ok ? result.chunks : []
+    expect(chunk.drivingQuery.query).toMatch(/WHERE \(true\) AND c\.id IN \(@id1\) AND NOT IS_DEFINED\(c\.pk\)$/)
+    expect(chunk.drivingQuery.parameters).toEqual([{ name: '@id1', value: 'a' }])
+  })
+
+  const addresses = (count: number, idLength = 4): Array<{ id: string; partitionKey: string }> =>
+    Array.from({ length: count }, (_, i) => ({
+      id: String(i).padStart(idLength, '0'),
+      partitionKey: `p${i % 7}`
+    }))
+
+  it('splits into chunks of at most 1,000 addresses, in order', () => {
+    const all = addresses(2_345)
+
+    const result = translateRetry('DELETE FROM c WHERE true', ['/pk'], all)
+
+    const chunks = result.ok ? result.chunks : []
+    expect(chunks.map((chunk) => chunk.addresses.length)).toEqual([1_000, 1_000, 345])
+    expect(chunks.flatMap((chunk) => chunk.addresses)).toEqual(all)
+    expect(chunks[1].drivingQuery.parameters[0]).toEqual({ name: '@id1', value: '1000' })
+    expect(chunks[1].drivingQuery.parameters.filter((p) => p.name.startsWith('@id'))).toHaveLength(1_000)
+  })
+
+  it('splits further so no chunk holds more than 256 KB of addresses', () => {
+    // About 1 KB per address, so 256 KB is reached well before 1,000.
+    const all = addresses(600, 1_000)
+
+    const result = translateRetry('DELETE FROM c WHERE true', ['/pk'], all)
+
+    const chunks = result.ok ? result.chunks : []
+    expect(chunks.length).toBe(3)
+    for (const chunk of chunks) {
+      const bytes = chunk.addresses.reduce((sum, a) => sum + a.id.length + String(a.partitionKey).length, 0)
+      expect(bytes).toBeLessThanOrEqual(256 * 1024)
+    }
+    // Full chunks until the last: 256 KB holds about 260 such addresses.
+    expect(chunks[0].addresses.length).toBeGreaterThan(250)
+    expect(chunks[1].addresses.length).toBeGreaterThan(250)
+    expect(chunks.flatMap((chunk) => chunk.addresses)).toEqual(all)
+  })
+
+  it('has no chunks when there is nothing to retry', () => {
+    const result = translateRetry('DELETE FROM c WHERE true', ['/pk'], [])
+    expect(result.ok && result.chunks).toEqual([])
+  })
+
+  it('refuses a statement that no longer parses with its named error', () => {
+    const result = translateRetry('DELETE FROM c', ['/pk'], addresses(1))
+    expect(result.ok ? undefined : result.error.message).toContain('WHERE is required')
   })
 })

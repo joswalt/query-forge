@@ -314,4 +314,29 @@ describe('planningEndedHistoryInput', () => {
         .queryText
     ).toBe("UPDATE c SET c.flag = true WHERE c.kind = 'x'")
   })
+
+  it('records a Retry whose planning failed with the Retry marker and the original statement', () => {
+    const input = planningEndedHistoryInput(
+      { ...run, retry: true },
+      { kind: 'failed', wasCancelled: false, message: 'Request rate is large' },
+      planningTimes,
+      { ...context, persistQueryText: true }
+    )
+
+    expect(input.status).toBe('error')
+    expect(input.queryText).toBe("UPDATE c SET c.flag = true WHERE c.kind = 'x'")
+    expect(input.dml?.retry).toBe(true)
+  })
+
+  it('keeps the Retry marker with the statement text withheld', () => {
+    const input = planningEndedHistoryInput(
+      { ...run, retry: true },
+      { kind: 'no-matches', verb: 'UPDATE', drivingQueryRequestCharge: 2.5 },
+      planningTimes,
+      context
+    )
+
+    expect(input.queryText).toBe(undefined)
+    expect(input.dml?.retry).toBe(true)
+  })
 })
