@@ -493,6 +493,51 @@ describe('planSave for a New document', () => {
       notice: { kind: 'invalid-body' }
     })
   })
+
+  function refused(session: EditSession): EditSession {
+    const plan = planSave(session)
+    if (plan.ok) throw new Error('expected Create to be refused')
+    return editSessionReducer(session, { type: 'saveRefused', notice: plan.notice })
+  }
+
+  it('clears a Create refusal once the New document fields are edited', () => {
+    const session = refused(newDocumentDraft('', ['']))
+    expect(session.notice).toEqual({
+      kind: 'invalid-address',
+      message: 'Enter id and customerId for the new document.'
+    })
+    const edited = editSessionReducer(session, {
+      type: 'newDocumentFieldsChanged',
+      fields: { id: '', partitionKey: ['TEST_CODE'] }
+    })
+    expect(edited.notice).toBeUndefined()
+    expect(refused(edited).notice).toEqual({
+      kind: 'invalid-address',
+      message: 'Enter id for the new document.'
+    })
+  })
+
+  it('clears a Create refusal once the body is edited', () => {
+    const session = refused(newDocumentDraft('n1', ['c9'], { id: 'n2' }))
+    expect(session.notice?.kind).toBe('invalid-address')
+    expect(editSessionReducer(session, { type: 'draftChanged', text: '{}' }).notice).toBeUndefined()
+  })
+
+  it('keeps an id clash notice when the fields are edited, so Open existing stays available', () => {
+    let session = newDocumentDraft('n1', ['c9'])
+    session = editSessionReducer(session, {
+      type: 'saveStarted',
+      address: { id: 'n1', partitionKey: 'c9' }
+    })
+    session = editSessionReducer(session, { type: 'saveOutcome', outcome: 'conflict', requestCharge: 1 })
+    const clash = session.notice
+    expect(clash?.kind).toBe('id-clash')
+    const edited = editSessionReducer(session, {
+      type: 'newDocumentFieldsChanged',
+      fields: { id: 'n2', partitionKey: ['c9'] }
+    })
+    expect(edited.notice).toEqual(clash)
+  })
 })
 
 describe('creating a New document', () => {

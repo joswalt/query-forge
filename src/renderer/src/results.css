@@ -912,7 +912,7 @@
 
 .document-drawer__fields label {
   display: grid;
-  grid-template-columns: minmax(96px, auto) 1fr 52px;
+  grid-template-columns: minmax(96px, auto) 1fr 72px;
   align-items: center;
   gap: 8px;
   font-size: 12px;
@@ -932,6 +932,11 @@
 }
 
 .document-drawer__kind {
+  font-size: 11px;
+}
+
+.document-drawer__generate {
+  padding: 2px 6px;
   font-size: 11px;
 }
 
