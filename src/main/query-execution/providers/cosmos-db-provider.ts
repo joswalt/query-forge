@@ -447,6 +447,10 @@ export class CosmosDbProvider implements DatabaseProvider, DocumentWriter {
           // `items.create` takes its partition key from the body, so the
           // body must agree with the address; and it invents a random `id`
           // when the body has none, so the `id` is always sent explicitly.
+          // An explicit partition key can't be passed instead (story 145):
+          // in @azure/cosmos 4.10.1 `create(body, options)` always derives
+          // it with `extractPartitionKeys(body, definition)` and ignores
+          // any `partitionKey` in the request options.
           assertBodyMatchesAddress(write, await this.partitionKeyPathsOf(write))
           return stored(await container.items.create({ ...write.body, id: write.id }, priority))
         }
