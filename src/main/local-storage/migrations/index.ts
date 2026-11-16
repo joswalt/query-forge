@@ -4,6 +4,7 @@ import migration0003 from './0003_create_saved_queries.sql?raw'
 import migration0004 from './0004_create_msal_token_cache.sql?raw'
 import migration0005 from './0005_add_profile_group_and_last_connected.sql?raw'
 import migration0006 from './0006_add_profile_environment.sql?raw'
+import migration0007 from './0007_add_dml_runs_to_query_history.sql?raw'
 
 export interface Migration {
   version: number
@@ -26,5 +27,6 @@ export const migrations: Migration[] = [
   { version: 3, name: 'create_saved_queries', sql: migration0003 },
   { version: 4, name: 'create_msal_token_cache', sql: migration0004 },
   { version: 5, name: 'add_profile_group_and_last_connected', sql: migration0005 },
-  { version: 6, name: 'add_profile_environment', sql: migration0006 }
+  { version: 6, name: 'add_profile_environment', sql: migration0006 },
+  { version: 7, name: 'add_dml_runs_to_query_history', sql: migration0007 }
 ].sort((a, b) => a.version - b.version)
