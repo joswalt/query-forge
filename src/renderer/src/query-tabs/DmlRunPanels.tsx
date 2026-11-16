@@ -223,12 +223,12 @@ function ShortcutHint({ blocked }: { blocked: number }): React.JSX.Element {
 export function DmlRunReport({
   dml,
   onCancel,
-  onPreviewQuery,
+  onOpenMatchesQuery,
   onRetry
 }: {
   dml: DmlRunState | undefined
   onCancel: () => void
-  onPreviewQuery: () => void
+  onOpenMatchesQuery: () => void
   onRetry: () => void
 }): React.JSX.Element | null {
   if (!dml) return null
@@ -257,7 +257,7 @@ export function DmlRunReport({
         </div>
       )
     case 'confirming':
-      return <DmlSample dml={dml} onPreviewQuery={onPreviewQuery} />
+      return <DmlSample dml={dml} onOpenMatchesQuery={onOpenMatchesQuery} />
     case 'zero-matches':
       return (
         <div className="dml-notice" role="status">
@@ -454,10 +454,10 @@ function partitionKeyLevel(level: unknown): string {
  */
 function DmlSample({
   dml,
-  onPreviewQuery
+  onOpenMatchesQuery
 }: {
   dml: Extract<DmlRunState, { phase: 'confirming' }>
-  onPreviewQuery: () => void
+  onOpenMatchesQuery: () => void
 }): React.JSX.Element | null {
   const { sample, partitionKeyPaths } = dml
   if (sample.length === 0) return null
@@ -479,7 +479,7 @@ function DmlSample({
             type="button"
             className="btn--ghost dml-link"
             title="Opens a new tab with SELECT * over the same WHERE (normal Row Limit applies). This plan stays held here."
-            onClick={onPreviewQuery}
+            onClick={onOpenMatchesQuery}
           >
             Preview as query ↗
           </button>

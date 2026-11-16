@@ -214,7 +214,7 @@ export function parseDmlStatement(
  * statement's own `WHERE`, under its own alias so the condition reads the
  * same. Undefined for a statement that doesn't parse.
  */
-export function dmlPreviewQuery(text: string): string | undefined {
+export function dmlMatchesQuery(text: string): string | undefined {
   const parsed = parseDmlStatement(text)
   if (!parsed.ok) return undefined
   const { alias, condition } = parsed.statement

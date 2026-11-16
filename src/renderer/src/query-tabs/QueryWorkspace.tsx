@@ -8,7 +8,7 @@ import { getExtractor, type ExtractorId, type ExtractorOptions } from '@shared/e
 import { inferTableName } from '@shared/extractors/infer-table-name'
 import {
   detectDmlStatement,
-  dmlPreviewQuery,
+  dmlMatchesQuery,
   parseDmlStatement,
   type DmlVerb
 } from '@shared/dml/dml-statement'
@@ -272,8 +272,8 @@ export const QueryWorkspace = forwardRef<
   const dmlTabsRef = useRef(new Set<string>())
   /** Bumped each time Cmd/Ctrl+Enter is swallowed at a DML confirmation. */
   const [blockedShortcut, setBlockedShortcut] = useState(0)
-  /** A "DML preview" tab just opened, to run once it is in `tabs`. */
-  const [pendingPreviewRun, setPendingPreviewRun] = useState<string | null>(null)
+  /** A "DML matches" tab just opened, to run once it is in `tabs`. */
+  const [pendingMatchesRun, setPendingMatchesRun] = useState<string | null>(null)
   const [extractorSettings, updateExtractorSettings] = useExtractorSettings()
   const editorRef = useRef<QueryEditorHandle>(null)
   const editorHeight = useEditorHeight()
@@ -281,14 +281,14 @@ export const QueryWorkspace = forwardRef<
   const activeTab = tabs.find((tab) => tab.id === activeTabId)
 
   useEffect(() => {
-    if (!pendingPreviewRun) return
-    const tab = tabs.find((t) => t.id === pendingPreviewRun)
+    if (!pendingMatchesRun) return
+    const tab = tabs.find((t) => t.id === pendingMatchesRun)
     if (!tab) return
-    setPendingPreviewRun(null)
+    setPendingMatchesRun(null)
     handleExecute(tab.id, tab.queryText)
-    // handleExecute reads the latest tabs; only a new preview should run.
+    // handleExecute reads the latest tabs; only a newly opened matches tab should run.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingPreviewRun, tabs])
+  }, [pendingMatchesRun, tabs])
 
   // The name field belongs to the tab it was opened on.
   useEffect(() => setSaveName(null), [activeTabId])
@@ -840,25 +840,25 @@ export const QueryWorkspace = forwardRef<
       .catch((err) => failSetup(tabId, err))
   }
 
-  /** "Preview as query ↗" (stories 88, 89): a new "DML preview" tab on
+  /** "Preview as query ↗" (stories 88, 89): a new "DML matches" tab on
    * the same connection and container runs `SELECT *` over the planned
    * statement's `WHERE` under the normal Row Limit. The DML tab stays
    * busy with its plan held, to confirm or cancel on return. */
-  function handlePreviewDml(tabId: string): void {
+  function handleOpenDmlMatches(tabId: string): void {
     const tab = tabs.find((t) => t.id === tabId)
     const dml = tab?.run.dml
     if (!tab || dml?.phase !== 'confirming') return
-    const queryText = dmlPreviewQuery(dml.statement)
+    const queryText = dmlMatchesQuery(dml.statement)
     if (!queryText) return
-    const preview = createTab(nextIndexRef.current++, {
-      title: 'DML preview',
+    const matchesTab = createTab(nextIndexRef.current++, {
+      title: 'DML matches',
       queryText,
       connectionId: tab.connectionId,
       options: tab.options
     })
-    setTabs((prev) => [...prev, preview])
-    setActiveTabId(preview.id)
-    setPendingPreviewRun(preview.id)
+    setTabs((prev) => [...prev, matchesTab])
+    setActiveTabId(matchesTab.id)
+    setPendingMatchesRun(matchesTab.id)
   }
 
   /** Confirm at the strip: writes exactly the held DML Plan (story 95). */
@@ -1395,7 +1395,7 @@ export const QueryWorkspace = forwardRef<
           <DmlRunReport
             dml={activeTab.run.dml}
             onCancel={() => handleCancel(activeTab.id)}
-            onPreviewQuery={() => handlePreviewDml(activeTab.id)}
+            onOpenMatchesQuery={() => handleOpenDmlMatches(activeTab.id)}
             onRetry={() => handleRetryDml(activeTab.id)}
           />
 
