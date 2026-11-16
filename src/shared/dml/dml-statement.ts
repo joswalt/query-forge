@@ -10,7 +10,7 @@
  * pass through verbatim, so Cosmos DB evaluates them.
  */
 
-import type { PartitionKeyValue } from '../types/document-writer'
+import { isNoneValue, type PartitionKeyValue } from '../types/document-writer'
 import { partitionKeyPathSegments } from '../partition-key-path'
 
 export type DmlVerb = 'DELETE' | 'UPDATE'
@@ -670,11 +670,10 @@ function scopedQuery(
     )
     // `{}` is the None value: the document has no such property, which
     // `IN` can never match.
-    const isNone = (value: unknown): boolean => value !== null && typeof value === 'object'
-    const values = distinct(levels.filter((value) => !isNone(value)))
+    const values = distinct(levels.filter((value) => !isNoneValue(value)))
     const matchesValue =
       values.length > 0 ? `${access} IN (${inList(values, (n) => `@pk${level + 1}_${n}`)})` : undefined
-    const matchesNone = levels.some(isNone) ? `NOT IS_DEFINED(${access})` : undefined
+    const matchesNone = levels.some(isNoneValue) ? `NOT IS_DEFINED(${access})` : undefined
     conditions.push(
       matchesValue && matchesNone
         ? `(${matchesNone} OR ${matchesValue})`

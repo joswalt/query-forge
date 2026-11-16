@@ -9,6 +9,7 @@ import {
   type DmlSampleValue,
   type WriteOutcome
 } from '@shared/types/dml-run'
+import { isNoneValue } from '@shared/types/document-writer'
 import { matchesTypedDmlConfirmation, typedDmlConfirmation } from '@shared/write-confirmation'
 import { retryScope, type DmlRunState } from './dml-run-state'
 import { projectedRequestCharge, writeRequestChargeBand } from './dml-ru-estimate'
@@ -443,7 +444,7 @@ function sampleValue(value: DmlSampleValue): string {
 
 /** One partition key level of a sampled address; `{}` is the None value. */
 function partitionKeyLevel(level: unknown): string {
-  return level !== null && typeof level === 'object' ? '(none)' : JSON.stringify(level)
+  return isNoneValue(level) ? '(none)' : JSON.stringify(level)
 }
 
 /**

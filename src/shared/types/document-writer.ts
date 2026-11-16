@@ -8,6 +8,12 @@ import type { ExecutionId } from './database-provider'
  */
 export type PartitionKeyLevelValue = string | number | boolean | null | Record<string, never>
 
+/** Whether a partition key level is the None value `{}` (the document has
+ * no such property), as opposed to a scalar or JSON `null`. */
+export function isNoneValue(level: unknown): level is Record<string, never> {
+  return typeof level === 'object' && level !== null && !Array.isArray(level)
+}
+
 /**
  * The partition key value that, with `id`, addresses one document: a single
  * level, or an array of levels for a hierarchical key (up to 3, `{}` for a

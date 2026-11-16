@@ -11,7 +11,7 @@ import type {
   SecretRefresher,
   TestResult
 } from '@shared/types/database-provider'
-import { MAX_PATCH_OPERATIONS } from '@shared/types/document-writer'
+import { isNoneValue, MAX_PATCH_OPERATIONS } from '@shared/types/document-writer'
 import { readPartitionKeyPath } from '@shared/partition-key-path'
 import type { DrivingQuery } from '@shared/dml/dml-statement'
 import type {
@@ -642,10 +642,7 @@ function assertBodyMatchesAddress(
   partitionKeyPaths.forEach((path, index) => {
     const expected = levels[index]
     const actual = readPartitionKeyPath(body, path)
-    const matches =
-      expected !== null && typeof expected === 'object'
-        ? !actual.found
-        : actual.found && actual.value === expected
+    const matches = isNoneValue(expected) ? !actual.found : actual.found && actual.value === expected
     if (!matches) {
       throw new Error(`The document's ${path} doesn't match the partition key value it is addressed by.`)
     }

@@ -32,6 +32,7 @@ import {
   type DmlSampleValue,
   type WriteOutcome
 } from '@shared/types/dml-run'
+import { isNoneValue } from '@shared/types/document-writer'
 import { toExecutionErrorMessage } from './scrub-error-message'
 
 /** One matched document of a DML Plan: its address, the version (`_etag`)
@@ -592,7 +593,7 @@ function outcomeRow(
     const level = levels[i]
     // The None value (`{}`) leaves the column empty: the document has no
     // such property.
-    if (!(level !== null && typeof level === 'object')) row[column] = level
+    if (!isNoneValue(level)) row[column] = level
   })
   return { ...row, id: document.id, outcome, requestCharge, message }
 }
