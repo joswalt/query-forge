@@ -19,6 +19,19 @@ import type { QueryExecutionRequest, QueryExecutionResponse } from './protocol'
 
 export type ProviderFactory = (config: ConnectionConfig) => DatabaseProvider
 
+/** A planning or commit run in progress, and whether its tab was released
+ * (closed) while it ran. */
+interface TrackedDmlRun {
+  run: DmlRun
+  tabId: string
+  tabReleased: boolean
+}
+
+interface TrackedResult<T> {
+  result: T
+  tabReleased: boolean
+}
+
 /**
  * Query Execution Service (GLOSSARY.md) — the request router that lives
  * inside the shared Electron `utilityProcess`. This class is the
@@ -45,8 +58,10 @@ export class QueryExecutionService {
   /** Each tab's last committed run, which a Retry re-plans from. */
   private readonly lastCommittedRuns = new LastCommittedRunStore()
   /** Planning and commit runs in progress, by Execution ID, so `cancel`
-   * can stop a commit the service itself is dispatching. */
-  private readonly dmlRuns = new Map<string, DmlRun>()
+   * can stop a commit the service itself is dispatching, and so
+   * `releaseTab` can mark the runs of a closed tab: they run to their end,
+   * but nothing is held for the tab afterwards. */
+  private readonly dmlRuns = new Map<string, TrackedDmlRun>()
 
   constructor(private readonly providerFactory: ProviderFactory) {}
 
@@ -107,8 +122,8 @@ export class QueryExecutionService {
         }
 
         case 'cancel': {
-          const dmlRun = this.dmlRuns.get(request.executionId)
-          if (dmlRun) dmlRun.cancelled = true
+          const tracked = this.dmlRuns.get(request.executionId)
+          if (tracked) tracked.run.cancelled = true
           this.requireProvider(request.profileId).cancel(request.executionId)
           send({ id: request.id, kind: 'result', value: undefined, done: true })
           return
@@ -148,7 +163,7 @@ export class QueryExecutionService {
             throw new DocumentWriteRefusedError()
           }
           const writer = this.requireDocumentWriter(request.profileId)
-          const plan = await this.trackDmlRun(request.executionId, (run) =>
+          const planned = await this.trackDmlRun(request.executionId, request.tabId, (run) =>
             buildDmlPlan(
               writer,
               {
@@ -162,7 +177,7 @@ export class QueryExecutionService {
               (progress) => send({ id: request.id, kind: 'progress', value: progress, done: false })
             )
           )
-          send({ id: request.id, kind: 'result', value: this.holdPlan(plan), done: true })
+          send({ id: request.id, kind: 'result', value: this.holdPlan(planned), done: true })
           return
         }
 
@@ -182,12 +197,15 @@ export class QueryExecutionService {
             throw new DocumentWriteRefusedError()
           }
           const writer = this.requireDocumentWriter(committed.profileId)
-          const { plan, scopeCount } = await this.trackDmlRun(request.executionId, (run) =>
+          const retry = await this.trackDmlRun(request.executionId, request.tabId, (run) =>
             buildRetryPlan(writer, committed, request.executionId, run, (progress) =>
               send({ id: request.id, kind: 'progress', value: progress, done: false })
             )
           )
-          const summary: DmlRetrySummary = { ...this.holdPlan(plan), scopeCount }
+          const summary: DmlRetrySummary = {
+            ...this.holdPlan({ result: retry.result.plan, tabReleased: retry.tabReleased }),
+            scopeCount: retry.result.scopeCount
+          }
           send({ id: request.id, kind: 'result', value: summary, done: true })
           return
         }
@@ -204,20 +222,24 @@ export class QueryExecutionService {
           const writer = this.requireDocumentWriter(plan.profileId)
           // A plan is written once: committing drops it.
           this.dmlPlans.drop(plan.planId)
-          const documents = await this.trackDmlRun(request.executionId, (run) =>
+          const commit = await this.trackDmlRun(request.executionId, plan.tabId, (run) =>
             commitDmlPlan(writer, plan, run, (chunk) =>
               send({ id: request.id, kind: 'chunk', value: chunk, done: false })
             )
           )
-          // Replaces the tab's last committed run, a Retry's included.
-          this.lastCommittedRuns.keep({
-            planId: plan.planId,
-            profileId: plan.profileId,
-            tabId: plan.tabId,
-            statement: plan.statement,
-            target: plan.target,
-            documents
-          })
+          // Replaces the tab's last committed run, a Retry's included. A
+          // tab closed mid-commit let the commit run to its end, but keeps
+          // nothing for the tab.
+          if (!commit.tabReleased) {
+            this.lastCommittedRuns.keep({
+              planId: plan.planId,
+              profileId: plan.profileId,
+              tabId: plan.tabId,
+              statement: plan.statement,
+              target: plan.target,
+              documents: commit.result
+            })
+          }
           send({ id: request.id, kind: 'result', value: undefined, done: true })
           return
         }
@@ -231,6 +253,11 @@ export class QueryExecutionService {
         case 'releaseTab': {
           this.dmlPlans.dropTab(request.tabId)
           this.lastCommittedRuns.dropTab(request.tabId)
+          // Runs still in progress for the tab end normally (a commit is
+          // never cancelled by closing its tab) but hold nothing.
+          for (const tracked of this.dmlRuns.values()) {
+            if (tracked.tabId === request.tabId) tracked.tabReleased = true
+          }
           send({ id: request.id, kind: 'result', value: undefined, done: true })
           return
         }
@@ -261,13 +288,15 @@ export class QueryExecutionService {
     }
   }
 
-  /** Holds a plan with matches (zero matches: nothing to confirm, so
-   * nothing is held) and returns its summary. */
-  private holdPlan(plan: DmlPlan): DmlPlanSummary {
+  /** Holds a plan with matches and returns its summary. Zero matches
+   * (nothing to confirm) or a tab released while planning holds nothing,
+   * and the summary then omits `planId`. */
+  private holdPlan({ result: plan, tabReleased }: TrackedResult<DmlPlan>): DmlPlanSummary {
     const matchCount = plan.documents.length
-    if (matchCount > 0) this.dmlPlans.hold(plan)
+    const held = matchCount > 0 && !tabReleased
+    if (held) this.dmlPlans.hold(plan)
     return {
-      ...(matchCount > 0 ? { planId: plan.planId } : {}),
+      ...(held ? { planId: plan.planId } : {}),
       verb: plan.verb,
       matchCount,
       drivingQueryRequestCharge: plan.drivingQueryRequestCharge,
@@ -279,11 +308,16 @@ export class QueryExecutionService {
     }
   }
 
-  private async trackDmlRun<T>(executionId: string, work: (run: DmlRun) => Promise<T>): Promise<T> {
-    const run: DmlRun = { cancelled: false }
-    this.dmlRuns.set(executionId, run)
+  private async trackDmlRun<T>(
+    executionId: string,
+    tabId: string,
+    work: (run: DmlRun) => Promise<T>
+  ): Promise<TrackedResult<T>> {
+    const tracked: TrackedDmlRun = { run: { cancelled: false }, tabId, tabReleased: false }
+    this.dmlRuns.set(executionId, tracked)
     try {
-      return await work(run)
+      const result = await work(tracked.run)
+      return { result, tabReleased: tracked.tabReleased }
     } finally {
       this.dmlRuns.delete(executionId)
     }

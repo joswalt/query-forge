@@ -632,15 +632,19 @@ export const QueryWorkspace = forwardRef<
       return
     }
     // Closing a tab mid-run must not silently abandon a live, RU-consuming
-    // query — cancel it first, same as the Cancel button would.
+    // query — cancel it first, same as the Cancel button would. A DML
+    // commit is the exception (story 141): it runs to its end so its Query
+    // History Entry records what was really written.
     const execution = executionsRef.current.get(id)
-    if (execution) {
+    if (execution && closing?.run.dml?.phase !== 'committing') {
       execution.cancelRequested = true
       execution.cancel()
     }
     executionsRef.current.delete(id)
     // Drops anything the Query Execution Service holds for this tab (a
-    // DML Plan at the confirmation). Only tabs that ran DML hold anything.
+    // DML Plan at the confirmation, the last committed run) and keeps a
+    // run still going from holding anything once it ends. Only tabs that
+    // ran DML hold anything.
     if (dmlTabsRef.current.delete(id)) window.api.dml.releaseTab(id).catch(() => {})
 
     // Computed from the current render's `tabs`/`activeTabId` directly
