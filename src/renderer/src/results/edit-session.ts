@@ -403,6 +403,9 @@ export interface EditSessionsState {
   /** A delete just finished: shown once as a toast, then cleared with
    * `toastShown`. `key` is the deleted edit session's. */
   toast?: { key: number; message: string }
+  /** Closing this session would discard unsaved edits (story 27): the
+   * drawer asks first. Cleared by Keep editing or a switch of session tab. */
+  confirmingClose?: number
 }
 
 export const initialEditSessionsState: EditSessionsState = { sessions: [], activeKey: undefined }
@@ -428,7 +431,12 @@ export type EditSessionsAction =
       from?: number
     }
   | { type: 'selected'; key: number }
+  /** Discards the session at once (also: Discard edits, after asking). */
   | { type: 'closed'; key: number }
+  /** Close or a session tab's close: asks first when edits would be lost. */
+  | { type: 'closeRequested'; key: number }
+  /** Keep editing: the session stays open with its edits. */
+  | { type: 'closeCancelled' }
   | { type: 'session'; key: number; event: EditSessionEvent }
   | { type: 'toastShown'; key: number }
 
@@ -457,7 +465,17 @@ export function editSessionsReducer(
       }
     }
     case 'selected':
-      return state.sessions.some((s) => s.key === action.key) ? { ...state, activeKey: action.key } : state
+      return state.sessions.some((s) => s.key === action.key)
+        ? { ...state, activeKey: action.key, confirmingClose: undefined }
+        : state
+    case 'closeRequested': {
+      const session = state.sessions.find((s) => s.key === action.key)
+      if (!session) return state
+      if (!hasUnsavedEdits(session)) return withoutSession(state, action.key)
+      return { ...state, activeKey: action.key, confirmingClose: action.key }
+    }
+    case 'closeCancelled':
+      return { ...state, confirmingClose: undefined }
     case 'closed':
       return withoutSession(state, action.key)
     case 'session': {
@@ -477,7 +495,8 @@ export function editSessionsReducer(
 function withoutSession(state: EditSessionsState, key: number): EditSessionsState {
   const sessions = state.sessions.filter((s) => s.key !== key)
   const activeKey = state.activeKey === key ? sessions[sessions.length - 1]?.key : state.activeKey
-  return { ...state, sessions, activeKey }
+  const confirmingClose = state.confirmingClose === key ? undefined : state.confirmingClose
+  return { ...state, sessions, activeKey, confirmingClose }
 }
 
 /** Story 30 ("Deleted `<id>` · RU") and story 48 (a 404 is done). */

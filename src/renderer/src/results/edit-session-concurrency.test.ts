@@ -1,12 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import {
   editSessionReducer,
+  editSessionsReducer,
   hasUnsavedEdits,
+  initialEditSessionsState,
   openEditSession,
   planSave,
   planSaveAsNew,
   type EditSession,
-  type EditSessionEvent
+  type EditSessionEvent,
+  type EditSessionsAction,
+  type EditSessionsState
 } from './edit-session'
 
 const target = { connectionId: 'profile-1', database: 'orders-db', container: 'orders' }
@@ -245,3 +249,79 @@ function comparing(): EditSession {
     { type: 'currentVersionRead', document: theirs }
   )
 }
+
+describe('closing an edit session with unsaved edits', () => {
+  const open = (key: number, id: string): EditSessionsAction => ({
+    type: 'opened',
+    key,
+    target,
+    partitionKeyPaths: ['/customerId'],
+    address: { id, partitionKey: 'c9' },
+    row: { id, customerId: 'c9' }
+  })
+  const read = (key: number, id: string): EditSessionsAction => ({
+    type: 'session',
+    key,
+    event: { type: 'readSucceeded', document: { ...stored, id } }
+  })
+  const edit = (key: number): EditSessionsAction => ({
+    type: 'session',
+    key,
+    event: { type: 'draftChanged', text: JSON.stringify(mine) }
+  })
+  const run = (...actions: EditSessionsAction[]): EditSessionsState =>
+    actions.reduce(editSessionsReducer, initialEditSessionsState)
+
+  it('closes at once when there is nothing to lose', () => {
+    const state = run(open(1, 'a1'), read(1, 'a1'), { type: 'closeRequested', key: 1 })
+    expect(state.sessions).toEqual([])
+  })
+
+  it('asks before discarding, keeping the session and its edits until the discard is confirmed', () => {
+    const asking = run(open(1, 'a1'), read(1, 'a1'), edit(1), { type: 'closeRequested', key: 1 })
+    expect(asking).toMatchObject({ activeKey: 1, confirmingClose: 1 })
+    expect(JSON.parse(asking.sessions[0].draft)).toEqual(mine)
+
+    expect(editSessionsReducer(asking, { type: 'closed', key: 1 }).sessions).toEqual([])
+  })
+
+  it('Keep editing leaves the session open with its edits', () => {
+    const asking = run(open(1, 'a1'), read(1, 'a1'), edit(1), { type: 'closeRequested', key: 1 })
+    const kept = editSessionsReducer(asking, { type: 'closeCancelled' })
+    expect(kept).toMatchObject({ activeKey: 1, confirmingClose: undefined })
+    expect(JSON.parse(kept.sessions[0].draft)).toEqual(mine)
+  })
+
+  it('closing another session tab with unsaved edits focuses it and asks', () => {
+    const asking = run(
+      open(1, 'a1'),
+      read(1, 'a1'),
+      edit(1),
+      open(2, 'a2'),
+      { type: 'closeRequested', key: 1 }
+    )
+    expect(asking).toMatchObject({ activeKey: 1, confirmingClose: 1 })
+    expect(asking.sessions).toHaveLength(2)
+  })
+
+  it('switching session tabs drops the question', () => {
+    const asking = run(
+      open(1, 'a1'),
+      read(1, 'a1'),
+      edit(1),
+      open(2, 'a2'),
+      { type: 'closeRequested', key: 1 },
+      { type: 'selected', key: 2 }
+    )
+    expect(asking).toMatchObject({ activeKey: 2, confirmingClose: undefined })
+  })
+
+  it('a New document with anything typed counts as unsaved edits', () => {
+    const asking = run(
+      { type: 'newDocumentOpened', key: 1, target, partitionKeyPaths: ['/customerId'] },
+      { type: 'session', key: 1, event: { type: 'draftChanged', text: '{"name":"Ada"}' } },
+      { type: 'closeRequested', key: 1 }
+    )
+    expect(asking).toMatchObject({ confirmingClose: 1 })
+  })
+})
