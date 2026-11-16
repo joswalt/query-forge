@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import type { DmlCommitSummary, WriteOutcome } from '@shared/types/dml-run'
-import { commitEndedHistoryInput, type PlannedDmlRun } from './dml-history'
+import {
+  commitEndedHistoryInput,
+  planningEndedHistoryInput,
+  type DmlRunTarget,
+  type PlannedDmlRun
+} from './dml-history'
 
 const noOutcomes: Record<WriteOutcome, number> = {
   written: 0,
@@ -25,7 +30,10 @@ const plannedRun: PlannedDmlRun = {
 
 const context = { profileName: 'Shop (prod)', persistQueryText: false }
 
-function summary(counts: Partial<Record<WriteOutcome, number>>, cancelled = false): DmlCommitSummary {
+function summary(
+  counts: Partial<Record<WriteOutcome, number>>,
+  cancelled = false
+): DmlCommitSummary {
   return {
     verb: 'DELETE',
     counts: { ...noOutcomes, ...counts },
@@ -225,5 +233,85 @@ describe('commitEndedHistoryInput', () => {
     )
 
     expect(input.profileName).toBe('(deleted connection)')
+  })
+})
+
+describe('planningEndedHistoryInput', () => {
+  const run: DmlRunTarget = {
+    profileId: 'profile-1',
+    statement: "UPDATE c SET c.flag = true WHERE c.kind = 'x'",
+    databaseName: 'shop',
+    containerName: 'orders'
+  }
+  const planningTimes = { startedAt: 5_000, finishedAt: 5_300 }
+
+  it('records error with its message when planning failed, keeping the verb from the statement', () => {
+    const input = planningEndedHistoryInput(
+      run,
+      {
+        kind: 'failed',
+        wasCancelled: false,
+        message: 'More than 50,000 documents match.',
+        progress: { matched: 50_001, requestCharge: 830 }
+      },
+      planningTimes,
+      context
+    )
+
+    expect(input).toEqual({
+      profileId: 'profile-1',
+      profileName: 'Shop (prod)',
+      queryText: undefined,
+      status: 'error',
+      durationMs: 300,
+      rowCount: undefined,
+      errorMessage: 'More than 50,000 documents match.',
+      executedAt: new Date(5_000).toISOString(),
+      dml: {
+        verb: 'UPDATE',
+        databaseName: 'shop',
+        containerName: 'orders',
+        counts: noOutcomes,
+        totalRequestCharge: 830,
+        retry: false
+      }
+    })
+  })
+
+  it('records cancelled without a message when planning was cancelled', () => {
+    const input = planningEndedHistoryInput(
+      run,
+      { kind: 'failed', wasCancelled: true, message: 'Aborted' },
+      planningTimes,
+      context
+    )
+
+    expect(input.status).toBe('cancelled')
+    expect(input.errorMessage).toBeUndefined()
+    expect(input.dml?.totalRequestCharge).toBe(0)
+  })
+
+  it('records success with no documents matched when the Driving Query found nothing', () => {
+    const input = planningEndedHistoryInput(
+      run,
+      { kind: 'no-matches', verb: 'UPDATE', drivingQueryRequestCharge: 2.8 },
+      planningTimes,
+      context
+    )
+
+    expect(input.status).toBe('success')
+    expect(input.rowCount).toBe(0)
+    expect(input.dml?.counts).toEqual(noOutcomes)
+    expect(input.dml?.totalRequestCharge).toBe(2.8)
+  })
+
+  it('withholds the statement text unless Preferences opted in', () => {
+    const ending = { kind: 'failed' as const, wasCancelled: false, message: 'Missing WHERE' }
+
+    expect(planningEndedHistoryInput(run, ending, planningTimes, context).queryText).toBe(undefined)
+    expect(
+      planningEndedHistoryInput(run, ending, planningTimes, { ...context, persistQueryText: true })
+        .queryText
+    ).toBe("UPDATE c SET c.flag = true WHERE c.kind = 'x'")
   })
 })
