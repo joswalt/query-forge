@@ -445,7 +445,7 @@ describe('QueryExecutionService DML Statements', () => {
       expect(provider.writes).toEqual([])
     })
 
-    it('reports a DELETE Write Outcome per document: 404 is written, 412 a Concurrent Change, anything else failed with a scrubbed message', async () => {
+    it('reports a DELETE Write Outcome per document: 404 is written, a failed etag check a Concurrent Change, anything else failed with a scrubbed message', async () => {
       const provider = new FakeCosmosProvider()
       provider.pages = [{ rows: matches(1, 4), requestCharge: 2 }]
       provider.onWrite = async (write) => {
@@ -715,7 +715,7 @@ describe('QueryExecutionService DML Statements', () => {
       expect(row.message).toContain('c.status')
       expect(summaryOf(responses)?.counts['expression-undefined']).toBe(1)
     })
-    it('reports an UPDATE Write Outcome per document: 404 is not-found, 412 a Concurrent Change, a patch 400 failed with a scrubbed message', async () => {
+    it('reports an UPDATE Write Outcome per document: 404 is not-found, a failed etag check a Concurrent Change, a patch 400 failed with a scrubbed message', async () => {
       const provider = new FakeCosmosProvider()
       provider.pages = [{ rows: [1, 2, 3].map((n) => updateMatch(n)), requestCharge: 2 }]
       provider.onWrite = async (write) => {
@@ -871,6 +871,16 @@ describe('QueryExecutionService DML Statements', () => {
       await expectDropped(service, provider, planId)
     })
 
+    it('a new plan refused on a read-only profile still drops the tab’s held DML Plan', async () => {
+      const { provider, service, planId } = await heldPlan()
+      await call(service, { id: 'c', method: 'connect', profile: cosmosProfile(true), secret: undefined })
+
+      expect(errorMessage(await call(service, planRequest()))).toContain('read-only')
+      await call(service, { id: 'c', method: 'connect', profile: cosmosProfile(), secret: undefined })
+
+      await expectDropped(service, provider, planId)
+    })
+
     it('a plan in another tab leaves the held DML Plan alone', async () => {
       const { provider, service, planId } = await heldPlan()
 
@@ -886,6 +896,23 @@ describe('QueryExecutionService DML Statements', () => {
       await call(service, { id: 'r', method: 'releaseTab', tabId: 'tab-1' })
 
       await expectDropped(service, provider, planId)
+    })
+
+    it('planning that ends after releaseTab holds no DML Plan', async () => {
+      const provider = new FakeCosmosProvider()
+      provider.pages = [
+        { rows: matches(1, 2), requestCharge: 1 },
+        { rows: matches(3, 4), requestCharge: 1 }
+      ]
+      const service = await connected(provider)
+      provider.afterPage = (index) => {
+        if (index === 0) void service.handle({ id: 'r', method: 'releaseTab', tabId: 'tab-1' }, () => {})
+      }
+
+      const summary = planSummary(await call(service, planRequest()))
+
+      expect(summary.matchCount).toBe(4)
+      expect(summary.planId).toBeUndefined()
     })
 
     it('disconnect drops the profile’s held DML Plans', async () => {
@@ -1144,6 +1171,32 @@ describe('QueryExecutionService DML Statements', () => {
       expect(provider.drivingQueries).toEqual([])
     })
 
+    it('a refused Retry still drops the tab’s held DML Plan', async () => {
+      const { provider, service, planId } = await committed(2, { 'doc-1': 'precondition-failed' })
+      provider.respond = scopedTo([match(1)])
+      const held = planSummary(await call(service, retryRequest(planId))).planId!
+
+      expect(errorMessage(await call(service, retryRequest('gone')))).toContain(
+        'can no longer be retried'
+      )
+
+      expect(errorMessage(await call(service, commitRequest(held)))).toContain('no longer held')
+      expect(provider.writes).toEqual([])
+    })
+
+    it('a Retry refused on a read-only profile still drops the tab’s held DML Plan', async () => {
+      const { provider, service, planId } = await committed(2, { 'doc-1': 'precondition-failed' })
+      provider.respond = scopedTo([match(1)])
+      const held = planSummary(await call(service, retryRequest(planId))).planId!
+      await call(service, { id: 'c', method: 'connect', profile: cosmosProfile(true), secret: undefined })
+
+      expect(errorMessage(await call(service, retryRequest(planId)))).toContain('read-only')
+      await call(service, { id: 'c', method: 'connect', profile: cosmosProfile(), secret: undefined })
+
+      expect(errorMessage(await call(service, commitRequest(held)))).toContain('no longer held')
+      expect(provider.writes).toEqual([])
+    })
+
     describe('the last committed run', () => {
       async function retryable(): Promise<{
         provider: FakeCosmosProvider
@@ -1167,6 +1220,17 @@ describe('QueryExecutionService DML Statements', () => {
         const { service, planId } = await retryable()
 
         await call(service, planRequest({ statement: 'DELETE FROM c' }))
+
+        expect(errorMessage(await call(service, retryRequest(planId)))).toContain(
+          'can no longer be retried'
+        )
+      })
+
+      it('is dropped by a plan for an ordinary statement refused on a read-only profile', async () => {
+        const { service, planId } = await retryable()
+        await call(service, { id: 'c', method: 'connect', profile: cosmosProfile(true), secret: undefined })
+        await call(service, planRequest())
+        await call(service, { id: 'c', method: 'connect', profile: cosmosProfile(), secret: undefined })
 
         expect(errorMessage(await call(service, retryRequest(planId)))).toContain(
           'can no longer be retried'
@@ -1197,6 +1261,50 @@ describe('QueryExecutionService DML Statements', () => {
         expect(errorMessage(await call(service, retryRequest(planId)))).toContain(
           'can no longer be retried'
         )
+      })
+
+      it('is not kept for a commit that ends after releaseTab, which runs to its end', async () => {
+        const provider = new FakeCosmosProvider()
+        provider.pages = [{ rows: matches(1, 3), requestCharge: 1 }]
+        const pending: Array<Deferred<DocumentWriteResult>> = []
+        provider.onWrite = () => {
+          const d = deferred<DocumentWriteResult>()
+          pending.push(d)
+          return d.promise
+        }
+        const service = await connected(provider)
+        const planId = await plan(service)
+
+        const committing = call(service, commitRequest(planId))
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        await call(service, { id: 'r', method: 'releaseTab', tabId: 'tab-1' })
+        pending.forEach((d, i) =>
+          d.resolve(
+            i === 0
+              ? { outcome: 'precondition-failed', requestCharge: 1 }
+              : { outcome: 'success', requestCharge: 5 }
+          )
+        )
+        const responses = await committing
+
+        expect(summaryOf(responses)).toMatchObject({
+          counts: { ...noOutcomes, written: 2, 'concurrent-change': 1 },
+          cancelled: false
+        })
+        expect(errorMessage(await call(service, retryRequest(planId)))).toContain(
+          'can no longer be retried'
+        )
+      })
+
+      it('a Retry whose planning ends after releaseTab holds no DML Plan', async () => {
+        const { provider, service, planId } = await retryable()
+        provider.afterPage = () =>
+          void service.handle({ id: 'r', method: 'releaseTab', tabId: 'tab-1' }, () => {})
+
+        const summary = planSummary(await call(service, retryRequest(planId)))
+
+        expect(summary.matchCount).toBe(1)
+        expect(summary.planId).toBeUndefined()
       })
 
       it('is dropped by disconnect', async () => {

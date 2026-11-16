@@ -88,6 +88,10 @@ export function registerQueryExecutionIpcHandlers(
   // Execution Service's: dropped by a plan for an ordinary statement in the
   // tab, releaseTab and disconnect.
   const committedRuns = new Map<string, { planId: string; target: DmlRunTarget }>()
+  // Planning runs in progress, so releaseTab can mark those of a closed
+  // tab: like the Query Execution Service's, they end normally but hold
+  // nothing (and record nothing: a plan dropped without a commit).
+  const planningRuns = new Set<{ tabId: string; tabReleased: boolean }>()
   const historyDeps: StreamQueryDeps = {
     manager,
     historyRepository,
@@ -196,6 +200,8 @@ export function registerQueryExecutionIpcHandlers(
     let progress: DmlPlanningProgress | undefined
     // A new plan in the tab replaces the held one, even if it is refused.
     dropPlannedRuns((held) => held.tabId === tabId)
+    const planning = { tabId, tabReleased: false }
+    planningRuns.add(planning)
     start((latest) => {
       progress = latest
       if (!sender.isDestroyed()) sender.send(`dml:progress:${executionId}`, latest)
@@ -203,7 +209,9 @@ export function registerQueryExecutionIpcHandlers(
       .then(
         (summary) => {
           const finishedAt = Date.now()
-          if (target && summary.planId) {
+          if (planning.tabReleased) {
+            // The tab closed while planning: nothing is held or recorded.
+          } else if (target && summary.planId) {
             plannedRuns.set(summary.planId, {
               tabId,
               run: {
@@ -246,7 +254,10 @@ export function registerQueryExecutionIpcHandlers(
           )
         }
       )
-      .finally(() => cancelledExecutionIds.delete(executionId))
+      .finally(() => {
+        planningRuns.delete(planning)
+        cancelledExecutionIds.delete(executionId)
+      })
   }
 
   ipcMain.on('dml:plan', (event, request: PlanDmlRequest) => {
@@ -275,7 +286,9 @@ export function registerQueryExecutionIpcHandlers(
 
   ipcMain.on('dml:commit', (event, request: { planId: string; executionId: ExecutionId }) => {
     const { sender } = event
-    // Taken out at commit start, so a tab closed mid-commit still records.
+    // Taken out at commit start, so a tab closed mid-commit still records
+    // its entry when the commit ends; the committed run set here is the
+    // one releaseTab removes, so nothing is left for a closed tab.
     const planned = plannedRuns.get(request.planId)
     plannedRuns.delete(request.planId)
     if (planned) {
@@ -308,6 +321,7 @@ export function registerQueryExecutionIpcHandlers(
   ipcMain.handle('dml:releaseTab', async (_event, tabId: string): Promise<void> => {
     dropPlannedRuns((held) => held.tabId === tabId)
     committedRuns.delete(tabId)
+    for (const planning of planningRuns) if (planning.tabId === tabId) planning.tabReleased = true
     return client.releaseTab(tabId)
   })
 }

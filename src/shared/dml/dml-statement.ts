@@ -10,7 +10,8 @@
  * pass through verbatim, so Cosmos DB evaluates them.
  */
 
-import type { PartitionKeyValue } from '../types/document-writer'
+import { isNoneValue, type PartitionKeyValue } from '../types/document-writer'
+import { partitionKeyPathSegments } from '../partition-key-path'
 
 export type DmlVerb = 'DELETE' | 'UPDATE'
 
@@ -214,7 +215,7 @@ export function parseDmlStatement(
  * statement's own `WHERE`, under its own alias so the condition reads the
  * same. Undefined for a statement that doesn't parse.
  */
-export function dmlPreviewQuery(text: string): string | undefined {
+export function dmlMatchesQuery(text: string): string | undefined {
   const parsed = parseDmlStatement(text)
   if (!parsed.ok) return undefined
   const { alias, condition } = parsed.statement
@@ -420,14 +421,6 @@ function refuseProtectedTarget(
       fail(`SET ${target} is not allowed: it would change the partition key path ${keyPath}.`)
     }
   }
-}
-
-/** `/a/b` → `['a', 'b']`; a quoted segment (`/"odd key"`) is unquoted. */
-function partitionKeyPathSegments(path: string): string[] {
-  return path
-    .split('/')
-    .filter((segment) => segment !== '')
-    .map((segment) => (/^".*"$/.test(segment) ? segment.slice(1, -1) : segment))
 }
 
 /** RFC 6901: `~` → `~0`, `/` → `~1`. */
@@ -677,11 +670,10 @@ function scopedQuery(
     )
     // `{}` is the None value: the document has no such property, which
     // `IN` can never match.
-    const isNone = (value: unknown): boolean => value !== null && typeof value === 'object'
-    const values = distinct(levels.filter((value) => !isNone(value)))
+    const values = distinct(levels.filter((value) => !isNoneValue(value)))
     const matchesValue =
       values.length > 0 ? `${access} IN (${inList(values, (n) => `@pk${level + 1}_${n}`)})` : undefined
-    const matchesNone = levels.some(isNone) ? `NOT IS_DEFINED(${access})` : undefined
+    const matchesNone = levels.some(isNoneValue) ? `NOT IS_DEFINED(${access})` : undefined
     conditions.push(
       matchesValue && matchesNone
         ? `(${matchesNone} OR ${matchesValue})`

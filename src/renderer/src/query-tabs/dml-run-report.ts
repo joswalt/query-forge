@@ -1,23 +1,13 @@
-import { WRITE_OUTCOMES, type WriteOutcome } from '@shared/types/dml-run'
+import {
+  WRITE_OUTCOMES,
+  writeOutcomeTone,
+  type WriteOutcome,
+  type WriteOutcomeTone
+} from '@shared/types/dml-run'
 
-/** How a Write Outcome is coloured in the run report (spec "Renderer DML
- * run state"): green, amber, red, or grey; `pending` is the grey part of
+/** A bar segment's tone: a Write Outcome's, or `pending`, the grey part of
  * the bar still to come. */
-export type OutcomeTone = 'ok' | 'warn' | 'err' | 'muted' | 'pending'
-
-export function writeOutcomeTone(outcome: WriteOutcome): Exclude<OutcomeTone, 'pending'> {
-  switch (outcome) {
-    case 'written':
-      return 'ok'
-    case 'concurrent-change':
-    case 'expression-undefined':
-      return 'warn'
-    case 'failed':
-      return 'err'
-    default:
-      return 'muted'
-  }
-}
+export type OutcomeTone = WriteOutcomeTone | 'pending'
 
 export interface OutcomeBarSegment {
   key: WriteOutcome | 'pending'
@@ -42,13 +32,4 @@ export function outcomeBarSegments(
   const reported = segments.reduce((sum, s) => sum + s.count, 0)
   if (total > reported) segments.push({ key: 'pending', tone: 'pending', count: total - reported })
   return segments
-}
-
-/** Documents a run left without being written or left unchanged: what the
- * re-run hint is about. */
-export function notWrittenCount(counts: Record<WriteOutcome, number>): number {
-  return WRITE_OUTCOMES.filter((o) => o !== 'written' && o !== 'unchanged').reduce(
-    (sum, o) => sum + counts[o],
-    0
-  )
 }

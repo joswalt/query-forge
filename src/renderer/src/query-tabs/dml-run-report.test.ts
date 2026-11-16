@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { emptyOutcomeCounts, type WriteOutcome } from '@shared/types/dml-run'
-import { notWrittenCount, outcomeBarSegments } from './dml-run-report'
+import { emptyOutcomeCounts, notWrittenCount, type WriteOutcome } from '@shared/types/dml-run'
+import { outcomeBarSegments } from './dml-run-report'
 
 const counts = (values: Partial<Record<WriteOutcome, number>>): Record<WriteOutcome, number> => ({
   ...emptyOutcomeCounts(),

@@ -11,7 +11,8 @@ import type {
   SecretRefresher,
   TestResult
 } from '@shared/types/database-provider'
-import { MAX_PATCH_OPERATIONS } from '@shared/types/document-writer'
+import { isNoneValue, MAX_PATCH_OPERATIONS } from '@shared/types/document-writer'
+import { readPartitionKeyPath } from '@shared/partition-key-path'
 import type { DrivingQuery } from '@shared/dml/dml-statement'
 import type {
   ContainerTarget,
@@ -447,6 +448,10 @@ export class CosmosDbProvider implements DatabaseProvider, DocumentWriter {
           // `items.create` takes its partition key from the body, so the
           // body must agree with the address; and it invents a random `id`
           // when the body has none, so the `id` is always sent explicitly.
+          // An explicit partition key can't be passed instead (story 145):
+          // in @azure/cosmos 4.10.1 `create(body, options)` always derives
+          // it with `extractPartitionKeys(body, definition)` and ignores
+          // any `partitionKey` in the request options.
           assertBodyMatchesAddress(write, await this.partitionKeyPathsOf(write))
           return stored(await container.items.create({ ...write.body, id: write.id }, priority))
         }
@@ -636,24 +641,12 @@ function assertBodyMatchesAddress(
   const levels = Array.isArray(write.partitionKey) ? write.partitionKey : [write.partitionKey]
   partitionKeyPaths.forEach((path, index) => {
     const expected = levels[index]
-    const actual = valueAtPath(body, path)
-    const matches =
-      expected !== null && typeof expected === 'object'
-        ? actual === undefined
-        : actual === expected
+    const actual = readPartitionKeyPath(body, path)
+    const matches = isNoneValue(expected) ? !actual.found : actual.found && actual.value === expected
     if (!matches) {
       throw new Error(`The document's ${path} doesn't match the partition key value it is addressed by.`)
     }
   })
-}
-
-function valueAtPath(document: Record<string, unknown>, path: string): unknown {
-  let current: unknown = document
-  for (const segment of path.split('/').filter(Boolean)) {
-    if (current === null || typeof current !== 'object' || Array.isArray(current)) return undefined
-    current = (current as Record<string, unknown>)[segment]
-  }
-  return current
 }
 
 /** Copies only the fields the SDK patch operation needs, so nothing else

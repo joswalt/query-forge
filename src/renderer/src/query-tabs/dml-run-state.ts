@@ -7,7 +7,7 @@ import type {
   DmlRetrySummary,
   DmlSampleDocument
 } from '@shared/types/dml-run'
-import { notWrittenCount } from './dml-run-report'
+import { notWrittenCount } from '@shared/types/dml-run'
 
 /**
  * The DML phases of one tab's run (spec "Renderer DML run state"),

@@ -24,6 +24,7 @@ import {
   DML_SAMPLE_SIZE,
   DML_WRITE_POOL_SIZE,
   emptyOutcomeCounts,
+  isNotWritten,
   MAX_DML_PLAN_DOCUMENTS,
   type DmlOutcomeRow,
   type DmlPlanningProgress,
@@ -31,6 +32,7 @@ import {
   type DmlSampleValue,
   type WriteOutcome
 } from '@shared/types/dml-run'
+import { isNoneValue } from '@shared/types/document-writer'
 import { toExecutionErrorMessage } from './scrub-error-message'
 
 /** One matched document of a DML Plan: its address, the version (`_etag`)
@@ -232,9 +234,7 @@ export async function buildRetryPlan(
   run: DmlRun,
   onProgress: (progress: DmlPlanningProgress) => void
 ): Promise<{ plan: DmlPlan; scopeCount: number }> {
-  const scope = committed.documents.filter(
-    (document) => document.outcome !== 'written' && document.outcome !== 'unchanged'
-  )
+  const scope = committed.documents.filter((document) => isNotWritten(document.outcome))
   const partitionKeyPaths = await writer.readPartitionKeyPaths(committed.target)
   const translated = translateRetry(committed.statement, partitionKeyPaths, scope)
   if (!translated.ok) throw new Error(`DML syntax error: ${translated.error.message}`)
@@ -593,7 +593,7 @@ function outcomeRow(
     const level = levels[i]
     // The None value (`{}`) leaves the column empty: the document has no
     // such property.
-    if (!(level !== null && typeof level === 'object')) row[column] = level
+    if (!isNoneValue(level)) row[column] = level
   })
   return { ...row, id: document.id, outcome, requestCharge, message }
 }

@@ -1,15 +1,15 @@
 import { isRecord } from '@shared/is-record'
-import type {
-  DocumentWrite,
-  PartitionKeyLevelValue,
-  PartitionKeyValue,
-  StoredDocument
+import {
+  isNoneValue,
+  type DocumentWrite,
+  type PartitionKeyLevelValue,
+  type PartitionKeyValue,
+  type StoredDocument
 } from '@shared/types/document-writer'
+import { partitionKeyPathSegments, readPath } from '@shared/partition-key-path'
 import {
   isOutOfDate,
   partitionKeyFieldName,
-  partitionKeyPathSegments,
-  readPath,
   sameAddress,
   type DocumentAddress
 } from './addressable-row'
@@ -730,11 +730,6 @@ export function parsePartitionKeyInput(text: string): Exclude<PartitionKeyLevelV
 
 function partitionKeyLevels(value: PartitionKeyValue, pathCount: number): PartitionKeyLevelValue[] {
   return pathCount > 1 && Array.isArray(value) ? value : [value as PartitionKeyLevelValue]
-}
-
-/** `{}`: the document has no such partition key property. */
-function isNoneValue(level: PartitionKeyLevelValue): boolean {
-  return isRecord(level)
 }
 
 /** Writes a nested property, creating missing parents; false when a parent

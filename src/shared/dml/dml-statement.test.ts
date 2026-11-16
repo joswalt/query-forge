@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   detectDmlStatement,
-  dmlPreviewQuery,
+  dmlMatchesQuery,
   parseDmlStatement,
   translateDmlStatement,
   translateRetry,
@@ -349,7 +349,7 @@ describe('translating a DML Statement into its Driving Query', () => {
   })
 })
 
-describe('previewing a DML Statement as a query', () => {
+describe('opening the matches of a DML Statement as a query', () => {
   it.each([
     ['DELETE FROM c WHERE c.status = "stale"', 'SELECT * FROM c WHERE c.status = "stale"'],
     [
@@ -362,11 +362,11 @@ describe('previewing a DML Statement as a query', () => {
       'SELECT * FROM c WHERE EXISTS(SELECT VALUE t FROM t IN c.tags WHERE t = "x")'
     ]
   ])('selects every document %j would write', (statement, query) => {
-    expect(dmlPreviewQuery(statement)).toBe(query)
+    expect(dmlMatchesQuery(statement)).toBe(query)
   })
 
-  it('has no preview for a malformed DML Statement', () => {
-    expect(dmlPreviewQuery('DELETE FROM c')).toBeUndefined()
+  it('has no matches query for a malformed DML Statement', () => {
+    expect(dmlMatchesQuery('DELETE FROM c')).toBeUndefined()
   })
 })
 

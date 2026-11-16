@@ -371,6 +371,60 @@ describe('QueryExecutionService', () => {
       expect(provider.writes).toEqual([])
     })
 
+    it('writeDocument: refuses a replace, patch or delete without an ifMatch etag before touching the provider', async () => {
+      const provider = new FakeDocumentWriterProvider()
+      const service = await connected(provider)
+      const writes = [
+        { ...replace, ifMatch: undefined },
+        { kind: 'patch', id: 'doc-1', partitionKey: 'cust-1', operations: [{ op: 'remove', path: '/x' }] },
+        { kind: 'delete', id: 'doc-1', partitionKey: 'cust-1', ifMatch: 7 }
+      ] as unknown as DocumentWrite[]
+
+      for (const write of writes) {
+        const { send, responses } = collectResponses()
+        await service.handle({ id: 'w', method: 'writeDocument', profileId: 'profile-1', write }, send)
+        expect(responses).toHaveLength(1)
+        expect(responses[0]).toMatchObject({ kind: 'error', done: true })
+        expect((responses[0] as { message: string }).message).toContain('ifMatch')
+      }
+      expect(provider.writes).toEqual([])
+    })
+
+    it('writeDocument: refuses a Document Write without a partition key value before touching the provider', async () => {
+      const provider = new FakeDocumentWriterProvider()
+      const service = await connected(provider)
+      const writes = [
+        { kind: 'create', id: 'n', body: { id: 'n' } },
+        { ...replace, partitionKey: undefined },
+        { kind: 'delete', id: 'doc-1', ifMatch: '"1"' }
+      ] as unknown as DocumentWrite[]
+
+      for (const write of writes) {
+        const { send, responses } = collectResponses()
+        await service.handle({ id: 'w', method: 'writeDocument', profileId: 'profile-1', write }, send)
+        expect(responses).toHaveLength(1)
+        expect(responses[0]).toMatchObject({ kind: 'error', done: true })
+        expect((responses[0] as { message: string }).message).toContain('partition key')
+      }
+      expect(provider.writes).toEqual([])
+    })
+
+    it('writeDocument: accepts null and the None value as partition key values', async () => {
+      const provider = new FakeDocumentWriterProvider()
+      const service = await connected(provider)
+      const writes: DocumentWrite[] = [
+        { kind: 'create', id: 'n', partitionKey: null, body: { id: 'n', customerId: null } },
+        { ...replace, partitionKey: {} },
+        { kind: 'delete', id: 'doc-1', partitionKey: ['a', {}], ifMatch: '"1"' }
+      ]
+
+      for (const write of writes) {
+        await service.handle({ id: 'w', method: 'writeDocument', profileId: 'profile-1', write }, () => {})
+      }
+
+      expect(provider.writes).toEqual(writes)
+    })
+
     it('writeDocument: dispatches the Document Write to the provider and replies with the stored document', async () => {
       const provider = new FakeDocumentWriterProvider()
       const service = await connected(provider)
