@@ -165,7 +165,14 @@ function toMaxRows(limit: RowLimit): number | undefined {
 type ContainerList =
   | { status: 'loading' }
   | { status: 'ready'; items: { database: string; container: string }[] }
-  | { status: 'unavailable'; message: string }
+  | {
+      status: 'unavailable'
+      message: string
+      /** Retry automatically once the connection is (re)connected. False after
+       * a failure while connected: retrying that would just fail again, and
+       * looped forever before (each failure re-triggered the load). */
+      retryOnConnect: boolean
+    }
 
 const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
 
@@ -1072,8 +1079,8 @@ export const QueryWorkspace = forwardRef<
     execution.cancel()
   }
 
-  /** Save the active tab's text to a local file (user story 23). */
   function loadContainers(connectionId: string): void {
+    const connected = connectedIds?.includes(connectionId) ?? false
     setContainerLists((prev) => ({ ...prev, [connectionId]: { status: 'loading' } }))
     window.api.queryExecution
       .getMetadata(connectionId)
@@ -1083,13 +1090,20 @@ export const QueryWorkspace = forwardRef<
           [connectionId]: { status: 'ready', items: collectContainers(metadata.objects) }
         }))
       )
-      .catch(() =>
+      .catch((err) =>
         setContainerLists((prev) => ({
           ...prev,
-          [connectionId]: {
-            status: 'unavailable',
-            message: 'Connect to this connection to list its containers.'
-          }
+          [connectionId]: connected
+            ? {
+                status: 'unavailable',
+                message: `Couldn't list containers: ${remoteErrorMessage(err)}`,
+                retryOnConnect: false
+              }
+            : {
+                status: 'unavailable',
+                message: 'Connect to this connection to list its containers.',
+                retryOnConnect: true
+              }
         }))
       )
   }
@@ -1102,17 +1116,36 @@ export const QueryWorkspace = forwardRef<
   const hasContainerList = activeConnectionId ? activeConnectionId in containerLists : true
 
   const activeIsConnected = activeConnectionId ? (connectedIds?.includes(activeConnectionId) ?? false) : false
-  const activeListUnavailable = activeConnectionId
-    ? containerLists[activeConnectionId]?.status === 'unavailable'
-    : false
+  const activeList = activeConnectionId ? containerLists[activeConnectionId] : undefined
+  const activeListAwaitsConnect = activeList?.status === 'unavailable' && activeList.retryOnConnect
 
   useEffect(() => {
     if (!activeConnectionId || !needsContainerPicker) return
-    if (!hasContainerList || (activeIsConnected && activeListUnavailable)) {
+    if (!hasContainerList || (activeIsConnected && activeListAwaitsConnect)) {
       loadContainers(activeConnectionId)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeConnectionId, needsContainerPicker, hasContainerList, activeIsConnected, activeListUnavailable])
+  }, [activeConnectionId, needsContainerPicker, hasContainerList, activeIsConnected, activeListAwaitsConnect])
+
+  // A reconnect is a fresh chance for a list that failed while connected.
+  useEffect(() => {
+    if (!connectedIds) return
+    setContainerLists((prev) => {
+      const stale = Object.entries(prev).filter(
+        ([id, list]) => list.status === 'unavailable' && !list.retryOnConnect && !connectedIds.includes(id)
+      )
+      if (stale.length === 0) return prev
+      const next = { ...prev }
+      for (const [id] of stale) {
+        next[id] = {
+          status: 'unavailable',
+          message: 'Connect to this connection to list its containers.',
+          retryOnConnect: true
+        }
+      }
+      return next
+    })
+  }, [connectedIds])
 
   // Disconnect drops each tab's last committed run in the Query Execution
   // Service, so its "Retry N not written" goes too (story 126).
@@ -1127,6 +1160,7 @@ export const QueryWorkspace = forwardRef<
     )
   }, [connectedIds])
 
+  /** Save the active tab's text to a local file (user story 23). */
   async function handleSaveToFile(): Promise<void> {
     if (!activeTab) return
     try {
@@ -1509,6 +1543,8 @@ function ContainerPicker({
       Container
       <select
         value={selected}
+        // The picker is narrow; a long error message is readable on hover.
+        title={list?.status === 'unavailable' ? list.message : undefined}
         // A failed load (usually "not connected yet") is retried on demand.
         onFocus={() => list?.status === 'unavailable' && onRetry()}
         onChange={(e) => {

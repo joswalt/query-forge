@@ -111,6 +111,57 @@ test.describe('renderer UI (no database required)', () => {
     await expect.poll(drafts).toBeNull()
   })
 
+  test('a container list that fails while connected is fetched once, not in a loop', async () => {
+    // Fake main's side: one account-scoped Cosmos profile whose container
+    // listing always fails (e.g. an Entra ID role scoped to one database).
+    await electronApp.evaluate(({ ipcMain }) => {
+      const now = new Date().toISOString()
+      const calls = { getMetadata: 0 }
+      ;(globalThis as { e2eCalls?: typeof calls }).e2eCalls = calls
+      ipcMain.removeHandler('connection:list')
+      ipcMain.handle('connection:list', () => [
+        {
+          id: 'e2e-cosmos',
+          name: 'E2E Cosmos',
+          readOnly: true,
+          hasSecret: true,
+          config: {
+            kind: 'cosmos-db',
+            endpoint: 'https://e2e.documents.azure.com:443/',
+            authMode: 'account-key'
+          },
+          createdAt: now,
+          updatedAt: now
+        }
+      ])
+      ipcMain.removeHandler('connection:connect')
+      ipcMain.handle('connection:connect', () => undefined)
+      ipcMain.removeHandler('connection:getMetadata')
+      ipcMain.handle('connection:getMetadata', () => {
+        calls.getMetadata++
+        throw new Error('Forbidden: the role does not cover this account')
+      })
+    })
+    await page.reload()
+    await editor().waitFor()
+    const getMetadataCalls = (): Promise<number> =>
+      electronApp.evaluate(() => (globalThis as { e2eCalls?: { getMetadata: number } }).e2eCalls!.getMetadata)
+    const pickerMessage = page.locator('.query-workspace__container option').first()
+
+    // Not connected yet: one attempt, and the picker says to connect.
+    await page.locator('.query-workspace__connection select').selectOption('e2e-cosmos')
+    await expect(pickerMessage).toHaveText('Connect to this connection to list its containers.')
+    expect(await getMetadataCalls()).toBe(1)
+
+    // Connecting retries once; that failure shows the real reason and stays put.
+    await page.getByRole('button', { name: 'Connect', exact: true }).click()
+    await expect(pickerMessage).toHaveText(
+      "Couldn't list containers: Forbidden: the role does not cover this account"
+    )
+    await page.waitForTimeout(1000)
+    expect(await getMetadataCalls()).toBe(2)
+  })
+
   test('toggles the theme and persists it across relaunch (story 54)', async () => {
     const html = page.locator('html')
     const before = await html.getAttribute('data-theme')
