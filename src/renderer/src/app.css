@@ -734,11 +734,11 @@
 }
 
 /* A long container list scrolls on its own, so other connections stay
-   reachable without scrolling past the whole tree. */
+   reachable without scrolling past the whole tree. Scrolling past its end
+   carries on into the sidebar, so the pointer never gets stuck over it. */
 .tree-panel > .tree {
   max-height: min(46vh, 440px);
   overflow-y: auto;
-  overscroll-behavior: contain;
 }
 
 .tree {
