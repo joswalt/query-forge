@@ -117,3 +117,16 @@ export const ClockIcon = (p: IconProps): React.JSX.Element => (
     <path d="M8 4.8V8l2.2 1.4" />
   </Svg>
 )
+
+export const CheckIcon = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <path d="m3.5 8.4 3 3 6-6.8" />
+  </Svg>
+)
+
+/** "Open in a new tab": a box with an arrow leaving it. */
+export const OpenIcon = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <path d="M9.5 2.5h4v4M13.5 2.5 7.5 8.5M12 9.5v3a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3" />
+  </Svg>
+)

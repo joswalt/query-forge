@@ -350,4 +350,60 @@ describe('QueryHistoryRepository', () => {
       expect(repository.list()[0].dml).toBeUndefined()
     })
   })
+
+  describe('query targets', () => {
+    it('round-trips a Cosmos query target without making the entry a DML entry', () => {
+      repository.record({
+        profileId: 'profile-1',
+        profileName: 'Ecom',
+        queryText: undefined,
+        status: 'success',
+        durationMs: 1,
+        target: { database: 'ecom', container: 'carts' }
+      })
+
+      const [entry] = repository.list()
+      expect(entry.target).toEqual({ database: 'ecom', container: 'carts' })
+      expect(entry.dml).toBeUndefined()
+    })
+
+    it('gives a query run against the profile defaults no target', () => {
+      repository.record({
+        profileId: 'profile-1',
+        profileName: 'Orders',
+        queryText: 'SELECT 1',
+        status: 'success',
+        durationMs: 1
+      })
+
+      expect(repository.list()[0]).not.toHaveProperty('target')
+    })
+
+    it('finds a query entry by its container name', () => {
+      repository.record({
+        profileId: 'profile-1',
+        profileName: 'Ecom',
+        queryText: undefined,
+        status: 'success',
+        durationMs: 1,
+        target: { database: undefined, container: 'carts' }
+      })
+
+      expect(repository.search('cart')).toHaveLength(1)
+    })
+  })
+
+  it('gets one entry by id, or undefined when it is gone', () => {
+    const entry = repository.record({
+      profileId: 'profile-1',
+      profileName: 'Orders',
+      queryText: undefined,
+      status: 'success',
+      durationMs: 1
+    })
+
+    expect(repository.get(entry.id)).toEqual(entry)
+    repository.clear()
+    expect(repository.get(entry.id)).toBeUndefined()
+  })
 })

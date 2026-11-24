@@ -46,4 +46,17 @@ export interface QueryHistoryEntry {
   executedAt: string
   /** Present only on a DML Statement run's entry. */
   dml?: DmlHistoryDetail
+  /** Cosmos DB only: the database and/or container a query ran against when
+   * the tab overrode the Connection Profile's, so reopening the entry targets
+   * the same place. Kept regardless of the query-text opt-in, like a DML
+   * entry's container. */
+  target?: QueryHistoryTarget
+  /** `queryText` is Session Query Text: held in main's memory only, because
+   * Preferences did not opt into persisting it, and gone after quit. */
+  queryTextSessionOnly?: boolean
+}
+
+export interface QueryHistoryTarget {
+  database: string | undefined
+  container: string | undefined
 }

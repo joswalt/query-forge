@@ -384,100 +384,6 @@
   outline: none;
 }
 
-/* ---------- history ---------- */
-
-.history-panel__search {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.history-panel__search input {
-  flex: 1;
-  min-width: 0;
-}
-
-.history-list,
-.saved-list {
-  display: grid;
-  gap: 8px;
-}
-
-.history-entry,
-.saved-card {
-  display: grid;
-  gap: 6px;
-  padding: 10px;
-  border: 1px solid var(--qf-border);
-  border-radius: var(--qf-r-panel);
-  background: var(--qf-panel);
-}
-
-.history-entry__head,
-.saved-card__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-width: 0;
-}
-
-.history-entry__name,
-.saved-card__name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 620;
-}
-
-/* Verb + container chip of a DML entry, between the name and the pill. */
-.history-entry__dml {
-  flex-shrink: 0;
-  margin-left: auto;
-  font-family: var(--qf-font-mono);
-  white-space: nowrap;
-}
-
-/* A Retry's entry: beside the verb + container chip. */
-.history-entry__retry {
-  flex-shrink: 0;
-  white-space: nowrap;
-}
-
-.history-entry__stats {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px 12px;
-  color: var(--qf-muted);
-  font-size: 11.5px;
-  font-variant-numeric: tabular-nums;
-}
-
-.history-entry__copy {
-  justify-self: start;
-  font-size: 12px;
-  margin-left: -8px;
-}
-
-.code-snippet {
-  max-height: 96px;
-  overflow: auto;
-  padding: 8px 10px;
-  border-radius: var(--qf-r-control);
-  background: var(--qf-bg);
-  border: 1px solid var(--qf-border);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  color: var(--qf-fg);
-}
-
-/* ---------- saved queries ---------- */
-
-.saved-list {
-  grid-template-columns: minmax(0, 1fr);
-}
-
 /* Name field opened by "Save query…", full-width above the editor. */
 .query-workspace__savebar {
   display: flex;
@@ -490,7 +396,211 @@
   min-width: 0;
 }
 
-.saved-card__actions {
+/* ---------- library rows (saved queries, history) ---------- */
+
+.library-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: 10px;
+}
+
+.library-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.library-toolbar input {
+  flex: 1;
+  min-width: 0;
+}
+
+.lib-day {
+  display: grid;
+  gap: 2px;
+}
+
+.lib-day__label {
+  margin: 2px 0 2px 10px;
+  color: var(--qf-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.lib-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+}
+
+/* A row is a list item, not a card: hover shows what's clickable, and the
+   Environment edge marks prod as it does on connection cards. */
+.lib-row {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  border-radius: var(--qf-r-control);
+}
+
+/* A straight bar, not an inset shadow, which would bend round the corners. */
+.lib-row[data-env]::before {
+  content: '';
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 0;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--env-color);
+}
+
+.lib-row__body,
+button.lib-row__body:hover:not(:disabled) {
+  display: grid;
+  flex: 1;
+  gap: 3px;
+  min-width: 0;
+  padding: 7px 6px 7px 10px;
+  border: 0;
+  border-radius: var(--qf-r-control);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+button.lib-row__body:hover:not(:disabled) {
+  background: var(--qf-hover);
+}
+
+.lib-row > .overflow-menu {
+  flex: none;
+  margin-top: 3px;
+}
+
+.lib-row__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.lib-row__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 620;
+}
+
+.lib-row__head > .conn-tag {
+  flex: 1;
+  color: var(--qf-fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.lib-row__time {
+  flex: none;
+  margin-left: auto;
+  color: var(--qf-muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.lib-row__stats .status-pill {
+  flex: none;
+  padding: 0 7px;
+  font-size: 11px;
+}
+
+.lib-row__query {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--qf-fg);
+  font-family: var(--qf-font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.lib-row__withheld {
+  color: var(--qf-muted);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.lib-row__stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  color: var(--qf-muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.lib-row__dml,
+.lib-row__target {
+  font-family: var(--qf-font-mono);
+  white-space: nowrap;
+}
+
+.lib-row__error {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--qf-err);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* Which connection a row belongs to. */
+.conn-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--qf-muted);
+  font-size: 12px;
+}
+
+.conn-tag > svg {
+  flex: none;
+  color: var(--qf-accent);
+}
+
+.conn-tag__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conn-tag > .chip {
+  flex: none;
+}
+
+/* The one-time "keep query text after quitting" question. */
+.history-opt-in {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--qf-accent) 35%, var(--qf-border));
+  border-radius: var(--qf-r-panel);
+  background: color-mix(in srgb, var(--qf-accent) 7%, transparent);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.history-opt-in__actions {
   display: flex;
   gap: 6px;
 }

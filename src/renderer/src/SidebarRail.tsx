@@ -2,14 +2,15 @@ import type { ConnectionProfile } from '@shared/types/connection-profile'
 import type { ConnectionStatus } from './connection-status'
 import { ENVIRONMENT_SHORT } from './connection-environment'
 import { BookmarkIcon, ClockIcon, CosmosIcon, DatabaseIcon, PlusIcon } from './icons'
+import type { LibraryTab } from './library/LibraryPane'
 
 interface Props {
   connections: ConnectionProfile[]
   statuses: Record<string, ConnectionStatus>
   /** Expand the sidebar and bring this connection's card into view. */
   onRevealConnection: (id: string) => void
-  /** Expand the sidebar and open this section. */
-  onOpenSection: (sectionId: 'saved-queries' | 'history') => void
+  /** Expand the sidebar and show this library tab. */
+  onOpenLibrary: (tab: LibraryTab) => void
   onNewConnection: () => void
 }
 
@@ -23,7 +24,7 @@ export function SidebarRail({
   connections,
   statuses,
   onRevealConnection,
-  onOpenSection,
+  onOpenLibrary,
   onNewConnection
 }: Props): React.JSX.Element {
   return (
@@ -72,7 +73,7 @@ export function SidebarRail({
         className="rail__btn"
         aria-label="Saved queries"
         title="Saved queries"
-        onClick={() => onOpenSection('saved-queries')}
+        onClick={() => onOpenLibrary('saved-queries')}
       >
         <BookmarkIcon />
       </button>
@@ -81,7 +82,7 @@ export function SidebarRail({
         className="rail__btn"
         aria-label="Query history"
         title="Query history"
-        onClick={() => onOpenSection('history')}
+        onClick={() => onOpenLibrary('history')}
       >
         <ClockIcon />
       </button>

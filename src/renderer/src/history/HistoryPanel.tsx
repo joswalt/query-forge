@@ -1,9 +1,31 @@
 import { useEffect, useRef, useState } from 'react'
+import type { ConnectionProfile } from '@shared/types/connection-profile'
 import type { DmlHistoryDetail, QueryHistoryEntry } from '@shared/types/query-history'
 import { WRITE_OUTCOMES, writeOutcomeLabel } from '@shared/types/dml-run'
-import { Collapsible } from '../Collapsible'
+import { OverflowMenu, type OverflowMenuItem } from '../OverflowMenu'
+import { ConnectionTag } from '../library/ConnectionTag'
+import { useCopiedFlag } from '../library/use-copied-flag'
+import {
+  formatDuration,
+  formatRowCount,
+  groupHistoryByDay,
+  historyTimeLabel
+} from './history-format'
 
-/** A DML entry's chip: `DELETE · orders`. */
+/** Remembers that the "keep query text" question was answered, either way,
+ * so it is asked once. The setting itself lives in Preferences. */
+const OPT_IN_ANSWERED_KEY = 'queryforge.ui.historyOptInAnswered'
+const SEARCH_DELAY_MS = 200
+
+function readAnswered(): boolean {
+  try {
+    return localStorage.getItem(OPT_IN_ANSWERED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+/** A DML entry's chip: `DELETE · carts`. */
 function dmlChipText(dml: DmlHistoryDetail): string {
   return [dml.verb, dml.containerName].filter(Boolean).join(' · ')
 }
@@ -14,64 +36,76 @@ function inlineLabel(label: string): string {
   return /^[A-Z][a-z]/.test(label) ? label[0].toLowerCase() + label.slice(1) : label
 }
 
-/** A DML entry's stats line: documents matched, each non-zero Write
- * Outcome by its run report label, duration and total RU, e.g. `1,840
- * matched · 1,837 deleted · 3 changed by someone else · 2.4 s · 412 RU`. */
-function dmlStats(
-  dml: DmlHistoryDetail,
-  rowCount: number | undefined,
-  durationMs: number
-): string[] {
+/** An entry's stats: rows and duration for a query; for a DML entry,
+ * documents matched, each non-zero Write Outcome by its run report label,
+ * duration and total RU, e.g. `1,840 matched`, `1,837 deleted`,
+ * `3 changed by someone else`, `2.4 s`, `412 RU`. */
+function entryStats(entry: QueryHistoryEntry): string[] {
+  const { dml, rowCount, durationMs } = entry
+  if (!dml) {
+    return [...(rowCount !== undefined ? [formatRowCount(rowCount)] : []), formatDuration(durationMs)]
+  }
   const verb = dml.verb ?? 'DELETE'
   return [
-    ...(rowCount !== undefined ? [`${rowCount.toLocaleString()} matched`] : []),
+    ...(rowCount !== undefined ? [`${rowCount.toLocaleString('en-US')} matched`] : []),
     ...WRITE_OUTCOMES.filter((o) => dml.counts[o] > 0).map(
-      (o) => `${dml.counts[o].toLocaleString()} ${inlineLabel(writeOutcomeLabel(o, verb))}`
+      (o) => `${dml.counts[o].toLocaleString('en-US')} ${inlineLabel(writeOutcomeLabel(o, verb))}`
     ),
-    `${(durationMs / 1000).toFixed(1)} s`,
-    `${dml.totalRequestCharge.toLocaleString(undefined, { maximumFractionDigits: 2 })} RU`
+    formatDuration(durationMs),
+    `${dml.totalRequestCharge.toLocaleString('en-US', { maximumFractionDigits: 2 })} RU`
   ]
 }
 
+const STATUS_LABEL: Record<QueryHistoryEntry['status'], string> = {
+  success: 'succeeded',
+  partial: 'partial',
+  error: 'error',
+  cancelled: 'cancelled'
+}
+
+/** A query entry with text can be reopened; a DML Statement entry can only
+ * be copied, so reopening it is never one click away from a second run. */
+export function canReopen(entry: QueryHistoryEntry): boolean {
+  return entry.queryText !== undefined && !entry.dml
+}
+
+interface Props {
+  connections: ConnectionProfile[]
+  onOpen: (entry: QueryHistoryEntry) => void
+}
+
 /**
- * Query History (user stories 50, 52, 53) — a read-only list fed by
- * `window.api.history`, refreshed automatically whenever a query run
- * settles (`history:updated`, sent by `query-execution-ipc.ts`'s
- * `streamQuery`) rather than only on a manual action. The "persist query
- * text" checkbox is the UI for user story 53's explicit opt-in — off by
- * default, matching `defaultPreferences` (preferences.ts). "Clear history"
- * is its companion retention control — opting in and later opting back out
- * doesn't by itself delete text already persisted; this button does.
+ * Query History (user stories 50, 52, 53): every run, refreshed whenever one
+ * settles (`history:updated`). Query text shows for this session even with
+ * the opt-in off, as Session Query Text held in main's memory; the opt-in
+ * ("Keep query text after quitting", asked once, then in the ⋯ menu) is
+ * what writes it to disk. "Clear history" removes both.
  *
- * A DML Statement run's entry adds a verb + container chip and a stats
- * line of its Write Outcome counts, readable with the text withheld. Copy
- * query works the same; there is no re-run.
+ * Clicking a query entry opens it in a new tab on the same connection and
+ * container. A DML Statement entry shows its verb, container and Write
+ * Outcome counts, readable with the text withheld, and can be copied but
+ * not reopened.
  */
-export function HistoryPanel(): React.JSX.Element {
+export function HistoryPanel({ connections, onOpen }: Props): React.JSX.Element {
   const [entries, setEntries] = useState<QueryHistoryEntry[]>([])
   const [searchTerm, setSearchTerm] = useState('')
-  const [hasSearched, setHasSearched] = useState(false)
-  const [persistQueryText, setPersistQueryText] = useState(false)
+  const [persistQueryText, setPersistQueryText] = useState<boolean | null>(null)
+  const [optInAnswered, setOptInAnswered] = useState(readAnswered)
   const [error, setError] = useState<string | null>(null)
-  const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [copiedId, markCopied] = useCopiedFlag()
 
-  // Read by the `history:updated` subscription below, which must always act
-  // on the *current* search filter without re-subscribing its IPC listener
-  // on every keystroke (a plain closure over `searchTerm` captured only the
-  // value from first render — see the bug this replaced).
+  // Read by the `history:updated` subscription, which must act on the
+  // *current* search without re-subscribing on every keystroke.
   const searchTermRef = useRef(searchTerm)
   searchTermRef.current = searchTerm
-  const copiedTimeoutRef = useRef<ReturnType<typeof setTimeout>>()
-
-  useEffect(() => {
-    return () => clearTimeout(copiedTimeoutRef.current)
-  }, [])
 
   async function refresh(term: string): Promise<void> {
     try {
-      const results = term.trim() ? await window.api.history.search(term) : await window.api.history.list()
-      setEntries(results)
-      setHasSearched(term.trim().length > 0)
+      const results = term.trim()
+        ? await window.api.history.search(term.trim())
+        : await window.api.history.list()
+      // A slower, older search must not overwrite a newer one's results.
+      if (term === searchTermRef.current) setEntries(results)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -79,24 +113,44 @@ export function HistoryPanel(): React.JSX.Element {
   }
 
   useEffect(() => {
-    void refresh('')
     window.api.preferences
       .get()
       .then((prefs) => setPersistQueryText(prefs.queryHistory.persistQueryText))
-      .catch(() => {})
-    return window.api.history.onUpdated(() => void refresh(searchTermRef.current))
+      .catch(() => setPersistQueryText(false))
+    const stopPrefs = window.api.preferences.onUpdated((prefs) =>
+      setPersistQueryText(prefs.queryHistory.persistQueryText)
+    )
+    const stopHistory = window.api.history.onUpdated(() => void refresh(searchTermRef.current))
+    return () => {
+      stopPrefs()
+      stopHistory()
+    }
   }, [])
 
-  async function handleTogglePersistQueryText(checked: boolean): Promise<void> {
+  // Live search: the list follows what's typed, after a short pause.
+  useEffect(() => {
+    const handle = setTimeout(() => void refresh(searchTerm), searchTerm ? SEARCH_DELAY_MS : 0)
+    return () => clearTimeout(handle)
+  }, [searchTerm])
+
+  function answerOptIn(): void {
+    setOptInAnswered(true)
+    try {
+      localStorage.setItem(OPT_IN_ANSWERED_KEY, '1')
+    } catch {
+      // Best-effort: worst case the question is asked again next launch.
+    }
+  }
+
+  async function setKeepQueryText(checked: boolean): Promise<void> {
+    answerOptIn()
     const previous = persistQueryText
     setPersistQueryText(checked)
     try {
       await window.api.preferences.update({ queryHistory: { persistQueryText: checked } })
     } catch (err) {
-      // Revert the optimistic UI update — otherwise the checkbox could show
-      // "opted in" while the stored preference silently stayed off (or vice
-      // versa), which is exactly the kind of mismatch user story 53 cares
-      // about getting right.
+      // Revert, so the menu never shows "kept" while the stored preference
+      // silently stayed off (or the reverse), user story 53's concern.
       setPersistQueryText(previous)
       setError(err instanceof Error ? err.message : String(err))
     }
@@ -112,140 +166,174 @@ export function HistoryPanel(): React.JSX.Element {
     }
   }
 
-  /**
-   * Same `navigator.clipboard.writeText` mechanism `ResultsGrid.tsx` uses
-   * for its own copy actions (data grid decision, ticket 05) — not a second
-   * clipboard mechanism. Wrapped in try/catch here (unlike `ResultsGrid`'s
-   * fire-and-forget calls) because this component already surfaces an
-   * `error` banner a failed copy can usefully report into.
-   */
-  async function handleCopyQuery(entry: QueryHistoryEntry): Promise<void> {
+  async function handleCopy(entry: QueryHistoryEntry): Promise<void> {
     if (!entry.queryText) return
     try {
       await navigator.clipboard.writeText(entry.queryText)
-      setCopiedId(entry.id)
-      clearTimeout(copiedTimeoutRef.current)
-      copiedTimeoutRef.current = setTimeout(
-        () => setCopiedId((current) => (current === entry.id ? null : current)),
-        1500
-      )
+      markCopied(entry.id)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
   }
 
-  return (
-    <Collapsible
-      id="history"
-      title="Query history"
-      actions={
-        <button
-          type="button"
-          className="btn--ghost btn--danger section-head__action"
-          onClick={() => void handleClearHistory()}
-        >
-          Clear history
-        </button>
-      }
-    >
-      {error && <p role="alert">{error}</p>}
+  const term = searchTerm.trim()
+  const showOptIn = persistQueryText === false && !optInAnswered && entries.length > 0 && !term
 
-      <label>
-        <input
-          type="checkbox"
-          checked={persistQueryText}
-          onChange={(e) => void handleTogglePersistQueryText(e.target.checked)}
-        />
-        Persist query text in history
-      </label>
-
-      <form
-        className="history-panel__search"
-        onSubmit={(e) => {
-          e.preventDefault()
-          void refresh(searchTerm)
-        }}
+  function renderEntry(entry: QueryHistoryEntry): React.JSX.Element {
+    const connection = connections.find((c) => c.id === entry.profileId)
+    const reopenable = canReopen(entry)
+    const actions: OverflowMenuItem[] = [
+      ...(reopenable ? [{ label: 'Open in new tab', onSelect: () => onOpen(entry) }] : []),
+      ...(entry.queryText ? [{ label: 'Copy query', onSelect: () => void handleCopy(entry) }] : [])
+    ]
+    const content = (
+      <>
+        <span className="lib-row__head">
+          <ConnectionTag
+            connection={connection}
+            fallbackName={entry.profileName}
+            kind={entry.dml ? 'cosmos-db' : undefined}
+          />
+          <time
+            className="lib-row__time"
+            dateTime={entry.executedAt}
+            title={new Date(entry.executedAt).toLocaleString()}
+          >
+            {copiedId === entry.id ? 'Copied' : historyTimeLabel(entry.executedAt)}
+          </time>
+        </span>
+        {entry.queryText !== undefined ? (
+          <code
+            className="lib-row__query"
+            title={entry.queryTextSessionOnly ? 'Kept until you quit QueryForge' : undefined}
+          >
+            {entry.queryText}
+          </code>
+        ) : (
+          <span
+            className="lib-row__withheld"
+            title={
+              persistQueryText
+                ? 'Run before query text was kept after quitting'
+                : 'Turn on “Keep query text after quitting” in the history options (⋯) to keep it for future runs'
+            }
+          >
+            Query text not saved
+          </span>
+        )}
+        <span className="lib-row__stats">
+          {/* Success is the quiet default; anything else is named. */}
+          {entry.status !== 'success' && (
+            <span className="status-pill" data-status={entry.status}>
+              {STATUS_LABEL[entry.status]}
+            </span>
+          )}
+          {entry.dml && <span className="chip lib-row__dml">{dmlChipText(entry.dml)}</span>}
+          {entry.dml?.retry && (
+            <span
+              className="chip"
+              title="A Retry of an earlier run: only the documents that run left not written"
+            >
+              retry
+            </span>
+          )}
+          {entry.target?.container && !entry.dml && (
+            <span className="lib-row__target">{entry.target.container}</span>
+          )}
+          {entryStats(entry).map((part) => (
+            <span key={part}>{part}</span>
+          ))}
+        </span>
+        {entry.errorMessage && <span className="lib-row__error">{entry.errorMessage}</span>}
+      </>
+    )
+    return (
+      <li
+        key={entry.id}
+        className="lib-row"
+        data-env={connection?.environment}
+        data-status={entry.status}
       >
+        {reopenable ? (
+          <button
+            type="button"
+            className="lib-row__body lib-row__open"
+            title="Open in new tab"
+            onClick={() => onOpen(entry)}
+          >
+            {content}
+          </button>
+        ) : (
+          <div className="lib-row__body">{content}</div>
+        )}
+        {actions.length > 0 && (
+          <OverflowMenu label={`More actions for this ${entry.profileName} run`} items={actions} />
+        )}
+      </li>
+    )
+  }
+
+  return (
+    <div className="library-panel">
+      <div className="library-toolbar">
         <input
           type="search"
-          placeholder="Search history…"
+          placeholder="Search history"
+          aria-label="Search history by connection, query text or container"
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
         />
-        <button type="submit">Search</button>
-        {hasSearched && (
-          <button
-            type="button"
-            className="btn--ghost"
-            onClick={() => {
-              setSearchTerm('')
-              void refresh('')
-            }}
-          >
-            Reset search
-          </button>
-        )}
-      </form>
+        <OverflowMenu
+          label="History options"
+          items={[
+            {
+              label: 'Keep query text after quitting',
+              checked: persistQueryText === true,
+              disabled: persistQueryText === null,
+              onSelect: () => void setKeepQueryText(!persistQueryText)
+            },
+            { label: 'Clear history', danger: true, onSelect: () => void handleClearHistory() }
+          ]}
+        />
+      </div>
+
+      {error && <p role="alert">{error}</p>}
+      <p className="visually-hidden" role="status">
+        {copiedId ? 'Query copied' : ''}
+      </p>
+
+      {showOptIn && (
+        <div className="history-opt-in">
+          <p>
+            Query text is kept only until you quit. Keep it after quitting so you can search and
+            reopen past queries later? Unsaved tabs are then restored after a crash, too. It all
+            stays on this computer.
+          </p>
+          <div className="history-opt-in__actions">
+            <button type="button" className="btn--primary" onClick={() => void setKeepQueryText(true)}>
+              Keep query text
+            </button>
+            <button type="button" className="btn--ghost" onClick={answerOptIn}>
+              Not now
+            </button>
+          </div>
+        </div>
+      )}
 
       {entries.length === 0 ? (
         <p className="empty">
-          {hasSearched
-            ? 'No history entries match your search.'
-            : 'Queries you run will show up here.'}
+          {term
+            ? `Nothing in history matches “${term}”.`
+            : 'Queries you run appear here. Click one to open it in a new tab.'}
         </p>
       ) : (
-        <ul className="history-list">
-          {entries.map((entry) => (
-            <li key={entry.id} className="history-entry" data-status={entry.status}>
-              <div className="history-entry__head">
-                <strong className="history-entry__name">{entry.profileName}</strong>
-                {entry.dml && (
-                  <span className="chip history-entry__dml">{dmlChipText(entry.dml)}</span>
-                )}
-                {entry.dml?.retry && (
-                  <span
-                    className="chip history-entry__retry"
-                    title="A Retry of an earlier run: only the documents that run left not written"
-                  >
-                    retry
-                  </span>
-                )}
-                <span className="status-pill" data-status={entry.status}>
-                  {entry.status}
-                </span>
-              </div>
-              <div className="history-entry__stats">
-                {entry.dml ? (
-                  dmlStats(entry.dml, entry.rowCount, entry.durationMs).map((part) => (
-                    <span key={part}>{part}</span>
-                  ))
-                ) : (
-                  <>
-                    <span>{entry.durationMs} ms</span>
-                    {entry.rowCount !== undefined && <span>{entry.rowCount} rows</span>}
-                  </>
-                )}
-                <time dateTime={entry.executedAt}>
-                  {new Date(entry.executedAt).toLocaleString()}
-                </time>
-              </div>
-              {entry.errorMessage && <p role="alert">{entry.errorMessage}</p>}
-              {entry.queryText && (
-                <>
-                  <pre className="code-snippet">{entry.queryText}</pre>
-                  <button
-                    type="button"
-                    className="btn--ghost history-entry__copy"
-                    onClick={() => void handleCopyQuery(entry)}
-                  >
-                    {copiedId === entry.id ? 'Copied' : 'Copy query'}
-                  </button>
-                </>
-              )}
-            </li>
-          ))}
-        </ul>
+        groupHistoryByDay(entries).map((day) => (
+          <section key={day.label} className="lib-day" aria-label={day.label}>
+            <h3 className="lib-day__label">{day.label}</h3>
+            <ul className="lib-list">{day.entries.map(renderEntry)}</ul>
+          </section>
+        ))
       )}
-    </Collapsible>
+    </div>
   )
 }

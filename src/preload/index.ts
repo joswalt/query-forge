@@ -407,7 +407,15 @@ export type HistoryApi = typeof historyApi
 const preferencesApi = {
   get: (): Promise<Preferences> => ipcRenderer.invoke('preferences:get'),
   update: (patch: Partial<Preferences>): Promise<Preferences> =>
-    ipcRenderer.invoke('preferences:update', patch)
+    ipcRenderer.invoke('preferences:update', patch),
+  /** Fires after any update, from any part of the UI, with the new
+   * Preferences. Returns an unsubscribe function. */
+  onUpdated: (callback: (preferences: Preferences) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, preferences: Preferences): void =>
+      callback(preferences)
+    ipcRenderer.on('preferences:updated', listener)
+    return () => ipcRenderer.removeListener('preferences:updated', listener)
+  }
 }
 
 export type PreferencesApi = typeof preferencesApi

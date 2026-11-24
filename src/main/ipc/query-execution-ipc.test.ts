@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { classifyFailureStatus, toRecordQueryHistoryInput } from './query-execution-ipc'
+import {
+  classifyFailureStatus,
+  toQueryHistoryTarget,
+  toRecordQueryHistoryInput
+} from './query-execution-ipc'
 
 describe('classifyFailureStatus', () => {
   it('reports cancelled when the execution was already known-cancelled', () => {
@@ -55,5 +59,19 @@ describe('toRecordQueryHistoryInput', () => {
     expect(result.status).toBe('error')
     expect(result.rowCount).toBe(7)
     expect(result.errorMessage).toBe('Invalid column name')
+  })
+})
+
+describe('toQueryHistoryTarget', () => {
+  it('has no target when the tab kept the profile defaults', () => {
+    expect(toQueryHistoryTarget(undefined)).toBeUndefined()
+    expect(toQueryHistoryTarget({ maxRows: 100 })).toBeUndefined()
+  })
+
+  it('keeps the database and container a tab overrode, but not the row limit', () => {
+    expect(toQueryHistoryTarget({ database: 'ecom', container: 'carts', maxRows: 100 })).toEqual({
+      database: 'ecom',
+      container: 'carts'
+    })
   })
 })
