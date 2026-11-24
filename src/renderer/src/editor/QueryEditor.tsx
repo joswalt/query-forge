@@ -62,8 +62,12 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
   // listener closures below, which are only built once at mount time.
   const onChangeRef = useRef(onChange)
   const onExecuteRef = useRef(onExecute)
+  // The dialect follows the tab's connection, which can change without a
+  // remount, so the mount-time Format keybinding reads it through a ref too.
+  const dialectRef = useRef(dialect)
   onChangeRef.current = onChange
   onExecuteRef.current = onExecute
+  dialectRef.current = dialect
 
   useImperativeHandle(
     ref,
@@ -72,22 +76,11 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
       format: () => {
         const view = viewRef.current
         if (!view) return
-        const { from, to } = view.state.selection.main
-        const hasSelection = to > from
-        const start = hasSelection ? from : 0
-        const end = hasSelection ? to : view.state.doc.length
-        const original = view.state.sliceDoc(start, end)
-        const formatted = formatQuery(original, dialect).trimEnd()
-        if (formatted === original) return
-        view.dispatch({
-          changes: { from: start, to: end, insert: formatted },
-          selection: { anchor: start + formatted.length },
-          userEvent: 'input.format'
-        })
+        formatView(view, dialectRef.current)
         view.focus()
       }
     }),
-    [initialValue, dialect]
+    [initialValue]
   )
 
   useEffect(() => {
@@ -124,6 +117,18 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
           ...searchKeymap,
           indentWithTab
         ]),
+        // Shift+Alt+F (VS Code's Format Document; also the Format button on
+        // the editor frame). Matched on the physical key, not via `keymap`:
+        // CodeMirror treats macOS Option chords as typed characters (⌥⇧F
+        // types "Ï") and never falls back to the base key for them.
+        EditorView.domEventHandlers({
+          keydown: (event, view) => {
+            if (!isFormatChord(event)) return false
+            event.preventDefault()
+            formatView(view, dialectRef.current)
+            return true
+          }
+        }),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) onChangeRef.current(update.state.doc.toString())
         })
@@ -149,6 +154,27 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
 
   return <div ref={containerRef} className="query-editor" />
 })
+
+/** Formats the selection if non-empty, else the whole document, as one
+ * undoable edit. No-op if formatting changes nothing. */
+function isFormatChord(event: KeyboardEvent): boolean {
+  return event.code === 'KeyF' && event.altKey && event.shiftKey && !event.metaKey && !event.ctrlKey
+}
+
+function formatView(view: EditorView, dialect: ConnectionConfig['kind'] | undefined): void {
+  const { from, to } = view.state.selection.main
+  const hasSelection = to > from
+  const start = hasSelection ? from : 0
+  const end = hasSelection ? to : view.state.doc.length
+  const original = view.state.sliceDoc(start, end)
+  const formatted = formatQuery(original, dialect).trimEnd()
+  if (formatted === original) return
+  view.dispatch({
+    changes: { from: start, to: end, insert: formatted },
+    selection: { anchor: start + formatted.length },
+    userEvent: 'input.format'
+  })
+}
 
 function executionText(view: EditorView): string {
   const { from, to } = view.state.selection.main

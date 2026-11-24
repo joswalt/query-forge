@@ -37,7 +37,7 @@ import {
   type EditSessionsState
 } from '../results/edit-session'
 import { remoteErrorMessage } from '../results/remote-error'
-import { CloseIcon, PlayIcon, PlusIcon } from '../icons'
+import { CloseIcon, PlayIcon, PlusIcon, StopIcon } from '../icons'
 import { ENVIRONMENT_LABEL, groupByEnvironment } from '../connection-environment'
 import { QueryResultsView, type ExportLoadedRequest } from './QueryResultsView'
 import { EditorResizer, useEditorHeight } from './EditorResizer'
@@ -194,7 +194,10 @@ function collectContainers(
 
 const PICKER_SEPARATOR = '\u0001'
 
-const RUN_SHORTCUT = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ Enter' : 'Ctrl Enter'
+const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform)
+const RUN_SHORTCUT = IS_MAC ? '⌘ Enter' : 'Ctrl Enter'
+/** Matches QueryEditor's `Shift-Alt-f` binding. */
+const FORMAT_SHORTCUT = IS_MAC ? '⇧⌥F' : 'Shift+Alt+F'
 
 const DRAFTS_KEY = 'queryforge.drafts.v1'
 const DRAFT_SAVE_DEBOUNCE_MS = 500
@@ -1250,6 +1253,24 @@ export const QueryWorkspace = forwardRef<
         <button type="button" className="btn--ghost" onClick={() => void handleOpenFile()}>
           Open file…
         </button>
+        {/* Document actions live with the tabs; the toolbar below is only
+            about where and how the query runs. */}
+        {activeTab && (
+          <>
+            <button type="button" className="btn--ghost" onClick={() => void handleSaveToFile()}>
+              Save to file…
+            </button>
+            <button
+              type="button"
+              className="btn--ghost"
+              aria-expanded={saveName !== null}
+              disabled={!activeTab.queryText.trim()}
+              onClick={() => setSaveName((current) => (current === null ? activeTab.title : null))}
+            >
+              Save query…
+            </button>
+          </>
+        )}
       </div>
       {fileMessage && <p className="query-workspace__message">{fileMessage}</p>}
 
@@ -1307,9 +1328,7 @@ export const QueryWorkspace = forwardRef<
                   onChange={(options) => updateTab(activeTab.id, (t) => ({ ...t, options }))}
                 />
               )}
-            </div>
 
-            <div className="query-workspace__actions">
               {activeCosmos && (
                 <label
                   className="query-workspace__row-limit"
@@ -1333,37 +1352,25 @@ export const QueryWorkspace = forwardRef<
                   </select>
                 </label>
               )}
+            </div>
+
+            {/* Run and Stop share one slot: while a query runs, the button
+                you just pressed becomes the way to stop it. Cmd/Ctrl+Enter
+                never stops a run (handleExecute swallows it), so Stop is
+                click-only. */}
+            {activeTab.run.status === 'running' ? (
               <button
                 type="button"
-                className="btn--ghost"
-                aria-expanded={saveName !== null}
-                disabled={!activeTab.queryText.trim()}
-                onClick={() => setSaveName((current) => (current === null ? activeTab.title : null))}
-              >
-                Save query…
-              </button>
-              <button type="button" className="btn--ghost" onClick={() => void handleSaveToFile()}>
-                Save to file…
-              </button>
-              <button
-                type="button"
-                className="btn--ghost"
-                disabled={!activeTab.queryText.trim()}
-                onClick={() => editorRef.current?.format()}
-              >
-                Format
-              </button>
-              <button
-                type="button"
-                disabled={activeTab.run.status !== 'running'}
+                className="query-workspace__run btn--stop"
                 onClick={() => handleCancel(activeTab.id)}
               >
-                Cancel
+                <StopIcon size={12} />
+                Stop
               </button>
+            ) : (
               <button
                 type="button"
-                className="btn--run"
-                disabled={activeTab.run.status === 'running'}
+                className="query-workspace__run btn--run"
                 onClick={() =>
                   handleExecute(
                     activeTab.id,
@@ -1375,7 +1382,7 @@ export const QueryWorkspace = forwardRef<
                 Run
                 <kbd>{RUN_SHORTCUT}</kbd>
               </button>
-            </div>
+            )}
           </div>
 
           {saveName !== null && (
@@ -1419,14 +1426,26 @@ export const QueryWorkspace = forwardRef<
             onCancel={() => handleCancel(activeTab.id)}
           />
 
-          <QueryEditor
-            key={activeTab.id}
-            ref={editorRef}
-            initialValue={activeTab.queryText}
-            dialect={connections.find((c) => c.id === activeTab.connectionId)?.config.kind}
-            onChange={(text) => updateTab(activeTab.id, (t) => ({ ...t, queryText: text }))}
-            onExecute={(text) => handleExecute(activeTab.id, text)}
-          />
+          {/* Format acts on the editor's text, so it sits on the editor. */}
+          <div className="query-editor-frame">
+            <QueryEditor
+              key={activeTab.id}
+              ref={editorRef}
+              initialValue={activeTab.queryText}
+              dialect={connections.find((c) => c.id === activeTab.connectionId)?.config.kind}
+              onChange={(text) => updateTab(activeTab.id, (t) => ({ ...t, queryText: text }))}
+              onExecute={(text) => handleExecute(activeTab.id, text)}
+            />
+            <button
+              type="button"
+              className="query-editor-frame__format"
+              title={`Format the selection, or the whole query (${FORMAT_SHORTCUT})`}
+              disabled={!activeTab.queryText.trim()}
+              onClick={() => editorRef.current?.format()}
+            >
+              Format
+            </button>
+          </div>
 
           <EditorResizer {...editorHeight} />
 

@@ -266,24 +266,31 @@
   flex: 1 1 auto;
 }
 
+/* The run bar: where the query runs and how much it reads, then Run.
+   Document actions (open, save, format) live elsewhere so this row stays
+   short enough not to wrap beside a wide sidebar. */
 .query-workspace__toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: end;
-  justify-content: space-between;
   gap: 12px;
 }
 
-/* Where the query runs: connection, then (Cosmos) container. */
+/* Connection, (Cosmos) container, (Cosmos) row limit. Fields start from a
+   small basis and grow to their preferred width, so the row narrows before
+   it wraps. */
 .query-workspace__targets {
   display: flex;
+  flex: 1 1 auto;
   flex-wrap: wrap;
   align-items: end;
   gap: 12px;
+  min-width: 0;
 }
 
 .query-workspace__connection {
-  width: 260px;
+  flex: 1 1 180px;
+  max-width: 260px;
 }
 
 .query-workspace__connection-label {
@@ -307,29 +314,60 @@
 }
 
 .query-workspace__container {
-  width: 300px;
-}
-
-.query-workspace__connection,
-.query-workspace__container {
-  min-width: 0;
-  flex: 0 1 auto;
-}
-
-.query-workspace__actions {
-  display: flex;
-  margin-left: auto;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 6px;
+  flex: 1 1 200px;
+  max-width: 300px;
 }
 
 .query-workspace__row-limit {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-right: 6px;
+  flex: 0 1 128px;
   white-space: nowrap;
+}
+
+.query-workspace__connection,
+.query-workspace__container,
+.query-workspace__row-limit {
+  min-width: 0;
+}
+
+/* Run and Stop swap in one slot; a shared minimum width keeps the swap
+   from nudging anything. */
+.query-workspace__run {
+  flex: none;
+  margin-left: auto;
+  min-width: 132px;
+  justify-content: center;
+}
+
+/* Positions the Format button over the editor's top-right corner. */
+.query-editor-frame {
+  position: relative;
+}
+
+.query-editor-frame__format {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  z-index: 3;
+  padding: 3px 9px;
+  border-color: var(--qf-border);
+  background: var(--qf-panel);
+  color: var(--qf-muted);
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.query-editor-frame:hover .query-editor-frame__format,
+.query-editor-frame:focus-within .query-editor-frame__format,
+.query-editor-frame__format:focus-visible {
+  opacity: 1;
+}
+
+.query-editor-frame__format:hover:not(:disabled) {
+  color: var(--qf-fg);
+}
+
+.query-editor-frame__format:disabled {
+  opacity: 0.35;
 }
 
 .query-editor {
