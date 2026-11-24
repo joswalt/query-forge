@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { openDatabase } from './local-storage/open-database'
 import { ConnectionProfileRepository } from './local-storage/connection-profile-repository'
 import { QueryHistoryRepository } from './local-storage/query-history-repository'
+import { SessionQueryText } from './query-history/session-query-text'
 import { SavedQueryRepository } from './local-storage/saved-query-repository'
 import { MsalTokenCacheRepository } from './local-storage/msal-token-cache-repository'
 import { PreferencesStore } from './local-storage/preferences-store'
@@ -105,6 +106,7 @@ app.whenReady().then(() => {
   const { connectionManager, historyRepository, savedQueryRepository, preferencesStore } =
     createLocalStorage()
   queryExecutionClient = createQueryExecutionClient()
+  const sessionQueryText = new SessionQueryText()
   // Story 63: the fresh child forked on the next call has no live providers,
   // so tell every window its "connected" statuses are stale.
   queryExecutionClient.onUnexpectedExit(() => {
@@ -124,10 +126,11 @@ app.whenReady().then(() => {
     connectionManager,
     queryExecutionClient,
     historyRepository,
-    preferencesStore
+    preferencesStore,
+    sessionQueryText
   )
   registerExportIpcHandlers(new ExportService(queryExecutionClient), queryExecutionClient)
-  registerHistoryIpcHandlers(historyRepository)
+  registerHistoryIpcHandlers(historyRepository, sessionQueryText)
   registerPreferencesIpcHandlers(preferencesStore)
   registerSavedQueryIpcHandlers(savedQueryRepository)
   registerFileIpcHandlers()

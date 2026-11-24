@@ -4,10 +4,11 @@ import type { DmlVerb } from '@shared/dml/dml-statement'
 import type {
   DmlHistoryDetail,
   QueryHistoryEntry,
-  QueryHistoryStatus
+  QueryHistoryStatus,
+  QueryHistoryTarget
 } from '@shared/types/query-history'
 
-export type { DmlHistoryDetail, QueryHistoryEntry, QueryHistoryStatus }
+export type { DmlHistoryDetail, QueryHistoryEntry, QueryHistoryStatus, QueryHistoryTarget }
 
 export interface RecordQueryHistoryInput {
   profileId: string
@@ -25,6 +26,9 @@ export interface RecordQueryHistoryInput {
   executedAt?: string
   /** Only for a DML Statement run. */
   dml?: DmlHistoryDetail
+  /** Only for a query; a DML Statement run's target is in `dml`. Shares the
+   * `database_name`/`container_name` columns with it. */
+  target?: QueryHistoryTarget
 }
 
 interface QueryHistoryRow {
@@ -93,8 +97,8 @@ export class QueryHistoryRepository {
         executedAt,
         entryKind: dml ? 'dml' : 'query',
         verb: dml?.verb ?? null,
-        databaseName: dml?.databaseName ?? null,
-        containerName: dml?.containerName ?? null,
+        databaseName: (dml ? dml.databaseName : input.target?.database) ?? null,
+        containerName: (dml ? dml.containerName : input.target?.container) ?? null,
         written: dml?.counts.written ?? null,
         unchanged: dml?.counts.unchanged ?? null,
         concurrentChange: dml?.counts['concurrent-change'] ?? null,
@@ -152,6 +156,11 @@ export class QueryHistoryRepository {
     this.db.exec('DELETE FROM query_history')
   }
 
+  get(id: string): QueryHistoryEntry | undefined {
+    const row = this.getRowById(id)
+    return row ? toQueryHistoryEntry(row) : undefined
+  }
+
   private getRowById(id: string): QueryHistoryRow | undefined {
     return this.db.prepare('SELECT * FROM query_history WHERE id = ?').get(id) as
       QueryHistoryRow | undefined
@@ -178,7 +187,16 @@ function toQueryHistoryEntry(row: QueryHistoryRow): QueryHistoryEntry {
     rowCount: row.row_count ?? undefined,
     errorMessage: row.error_message ?? undefined,
     executedAt: row.executed_at,
-    ...(row.entry_kind === 'dml' ? { dml: toDmlHistoryDetail(row) } : {})
+    ...(row.entry_kind === 'dml'
+      ? { dml: toDmlHistoryDetail(row) }
+      : row.database_name !== null || row.container_name !== null
+        ? {
+            target: {
+              database: row.database_name ?? undefined,
+              container: row.container_name ?? undefined
+            }
+          }
+        : {})
   }
 }
 

@@ -256,13 +256,17 @@ export const QueryWorkspace = forwardRef<
   // Non-null while the "Save query…" name field is open.
   const [saveName, setSaveName] = useState<string | null>(null)
   // Drafts hold query text, so they honor the same opt-in as history text
-  // (user story 53): off until the preference says otherwise.
+  // (user story 53): off until the preference says otherwise, and following
+  // it live, so opting out deletes the saved drafts right away.
   const [persistDrafts, setPersistDrafts] = useState(false)
   useEffect(() => {
     window.api.preferences
       .get()
       .then((prefs) => setPersistDrafts(prefs.queryHistory.persistQueryText))
       .catch(() => {})
+    return window.api.preferences.onUpdated((prefs) =>
+      setPersistDrafts(prefs.queryHistory.persistQueryText)
+    )
   }, [])
   const nextIndexRef = useRef(restored.tabs.length + 1)
   const executionsRef = useRef(new Map<string, ExecutionHandle>())

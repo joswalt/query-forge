@@ -1,11 +1,15 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { MoreIcon } from './icons'
+import { CheckIcon, MoreIcon } from './icons'
+
+const MENU_ITEMS = '[role^="menuitem"]:not(:disabled)'
 
 export interface OverflowMenuItem {
   label: string
   onSelect: () => void
   danger?: boolean
   disabled?: boolean
+  /** Makes the item an on/off setting (`menuitemcheckbox`) showing a check. */
+  checked?: boolean
 }
 
 /** "⋯" button opening a small action menu. Closes on outside click, Escape,
@@ -18,6 +22,7 @@ export function OverflowMenu({
   label: string
   items: OverflowMenuItem[]
 }): React.JSX.Element {
+  const hasSettings = items.some((item) => item.checked !== undefined)
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -25,7 +30,7 @@ export function OverflowMenu({
 
   useEffect(() => {
     if (!open) return
-    rootRef.current?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus()
+    rootRef.current?.querySelector<HTMLElement>(MENU_ITEMS)?.focus()
     function onPointerDown(event: PointerEvent): void {
       if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
     }
@@ -40,7 +45,7 @@ export function OverflowMenu({
       return
     }
     if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
-    const entries = [...(rootRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? [])]
+    const entries = [...(rootRef.current?.querySelectorAll<HTMLElement>(MENU_ITEMS) ?? [])]
     const index = entries.indexOf(document.activeElement as HTMLElement)
     const next = event.key === 'ArrowDown' ? index + 1 : index - 1
     entries[(next + entries.length) % entries.length]?.focus()
@@ -68,14 +73,16 @@ export function OverflowMenu({
             <li key={item.label} role="none">
               <button
                 type="button"
-                role="menuitem"
+                role={item.checked === undefined ? 'menuitem' : 'menuitemcheckbox'}
+                aria-checked={item.checked}
                 disabled={item.disabled}
-                className={`btn--ghost${item.danger ? ' btn--danger' : ''}`}
+                className={`btn--ghost${item.danger ? ' btn--danger' : ''}${hasSettings ? ' overflow-menu__item--indented' : ''}`}
                 onClick={() => {
                   setOpen(false)
                   item.onSelect()
                 }}
               >
+                {item.checked && <CheckIcon size={14} />}
                 {item.label}
               </button>
             </li>

@@ -10,8 +10,10 @@ import type {
 import type {
   QueryHistoryRepository,
   QueryHistoryStatus,
+  QueryHistoryTarget,
   RecordQueryHistoryInput
 } from '../local-storage/query-history-repository'
+import { recordQueryHistory, type SessionQueryText } from '../query-history/session-query-text'
 import type { PreferencesStore } from '../local-storage/preferences-store'
 import type {
   DmlCommitProgress,
@@ -61,7 +63,8 @@ export function registerQueryExecutionIpcHandlers(
   manager: ConnectionManager,
   client: QueryExecutionClient,
   historyRepository: QueryHistoryRepository,
-  preferencesStore: PreferencesStore
+  preferencesStore: PreferencesStore,
+  sessionQueryText: SessionQueryText
 ): void {
   // Execution IDs the renderer asked to cancel (via `query:cancel` below)
   // but whose `streamQuery` run hasn't yet settled. `executeQuery`'s
@@ -96,6 +99,7 @@ export function registerQueryExecutionIpcHandlers(
     manager,
     historyRepository,
     preferencesStore,
+    sessionQueryText,
     cancelledExecutionIds
   }
   ipcMain.handle(
@@ -391,6 +395,7 @@ interface StreamQueryDeps {
   manager: ConnectionManager
   historyRepository: QueryHistoryRepository
   preferencesStore: PreferencesStore
+  sessionQueryText: SessionQueryText
   cancelledExecutionIds: Set<ExecutionId>
 }
 
@@ -415,6 +420,7 @@ async function streamQuery(
   deps: StreamQueryDeps
 ): Promise<void> {
   const { profileId, executionId, query, options } = request
+  const target = toQueryHistoryTarget(options)
   const startedAt = Date.now()
   let rowCount = 0
 
@@ -425,7 +431,7 @@ async function streamQuery(
       sender.send(`query:chunk:${executionId}`, chunk)
     }
     if (!sender.isDestroyed()) sender.send(`query:done:${executionId}`)
-    recordHistory(deps, { profileId, query, status: 'success', startedAt, rowCount })
+    recordHistory(deps, { profileId, query, target, status: 'success', startedAt, rowCount })
     if (!sender.isDestroyed()) sender.send('history:updated')
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -434,6 +440,7 @@ async function streamQuery(
     recordHistory(deps, {
       profileId,
       query,
+      target,
       status,
       startedAt,
       rowCount,
@@ -448,6 +455,7 @@ async function streamQuery(
 interface RecordHistoryInput {
   profileId: string
   query: string
+  target?: QueryHistoryTarget
   status: QueryHistoryStatus
   startedAt: number
   rowCount: number
@@ -487,8 +495,18 @@ export function toRecordQueryHistoryInput(
     status: input.status,
     durationMs: finishedAt - input.startedAt,
     rowCount: input.rowCount,
-    errorMessage: input.errorMessage
+    errorMessage: input.errorMessage,
+    ...(input.target ? { target: input.target } : {})
   }
+}
+
+/** The Cosmos database/container a tab overrode, if any, so reopening the
+ * Query History Entry targets the same place. */
+export function toQueryHistoryTarget(
+  options: QueryOptions | undefined
+): QueryHistoryTarget | undefined {
+  if (!options?.database && !options?.container) return undefined
+  return { database: options.database || undefined, container: options.container || undefined }
 }
 
 /**
@@ -501,7 +519,14 @@ function recordHistory(deps: StreamQueryDeps, input: RecordHistoryInput): void {
   try {
     const profile = deps.manager.get(input.profileId)
     const { persistQueryText } = deps.preferencesStore.get().queryHistory
-    deps.historyRepository.record(toRecordQueryHistoryInput(input, profile?.name, persistQueryText))
+    // Built with the text, so it can be held as Session Query Text when the
+    // opt-in is off; recordQueryHistory decides what reaches disk.
+    recordQueryHistory(
+      deps.historyRepository,
+      deps.sessionQueryText,
+      toRecordQueryHistoryInput(input, profile?.name, true),
+      persistQueryText
+    )
   } catch (err) {
     console.error('Failed to record query history entry:', err)
   }
@@ -519,7 +544,12 @@ function recordDmlHistory(
   try {
     const { persistQueryText } = deps.preferencesStore.get().queryHistory
     const profileName = deps.manager.get(profileId)?.name
-    deps.historyRepository.record(build({ profileName, persistQueryText }))
+    recordQueryHistory(
+      deps.historyRepository,
+      deps.sessionQueryText,
+      build({ profileName, persistQueryText: true }),
+      persistQueryText
+    )
   } catch (err) {
     console.error('Failed to record query history entry:', err)
   }

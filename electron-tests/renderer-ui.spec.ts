@@ -88,6 +88,29 @@ test.describe('renderer UI (no database required)', () => {
     await expect(page.getByText('Enter the Tenant ID')).toBeVisible()
   })
 
+  test('tab drafts follow the keep-query-text setting without a relaunch (story 53)', async () => {
+    const drafts = (): Promise<string | null> =>
+      page.evaluate(() => localStorage.getItem('queryforge.drafts.v1'))
+    const historyOptions = page.getByRole('button', { name: 'History options' })
+    const keepQueryText = page.getByRole('menuitemcheckbox', {
+      name: 'Keep query text after quitting'
+    })
+
+    await page.getByRole('tab', { name: 'History', exact: true }).click()
+    await historyOptions.click()
+    await expect(keepQueryText).toHaveAttribute('aria-checked', 'false')
+    await keepQueryText.click()
+
+    await editor().click()
+    await editor().pressSequentially('SELECT 42')
+    await expect.poll(drafts).toContain('SELECT 42')
+
+    await historyOptions.click()
+    await expect(keepQueryText).toHaveAttribute('aria-checked', 'true')
+    await keepQueryText.click()
+    await expect.poll(drafts).toBeNull()
+  })
+
   test('toggles the theme and persists it across relaunch (story 54)', async () => {
     const html = page.locator('html')
     const before = await html.getAttribute('data-theme')

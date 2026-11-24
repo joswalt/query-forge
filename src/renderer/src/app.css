@@ -1,4 +1,4 @@
-/* App shell: top bar, sidebar (connections + history), workspace. */
+/* App shell: top bar, sidebar (connections + library), workspace. */
 
 .app {
   display: grid;
@@ -104,91 +104,145 @@
 }
 
 .sidebar {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
+  display: grid;
+  /* App.tsx overrides the row split (user-resizable, remembered). */
+  grid-template-rows: minmax(0, 55fr) auto minmax(0, 45fr);
   min-width: 0;
   min-height: 0;
-  padding: 16px 14px 20px;
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: hidden;
   border-right: 1px solid var(--qf-border);
   background: color-mix(in srgb, var(--qf-panel) 70%, transparent);
 }
 
-.sidebar__content {
+.sidebar[data-collapsed] {
   display: flex;
   flex-direction: column;
-  gap: 20px;
-  min-width: 0;
-}
-
-.sidebar__error {
-  margin: 0 14px 12px;
-}
-
-.sidebar[data-collapsed] .sidebar__error {
-  margin: 0 4px 8px;
-  padding: 4px;
-  font-size: 11px;
-}
-
-.sidebar__content[hidden] {
-  display: none;
-}
-
-.sidebar[data-collapsed] {
   padding: 12px 0;
   overflow-y: auto;
 }
 
-.sidebar__section {
-  display: grid;
-  /* A bare `display: grid` sizes its column to the widest nowrap child, which
-     is what pushed long container names (and the Edit button) past the edge. */
-  grid-template-columns: minmax(0, 1fr);
-  gap: 10px;
-}
-
-/* ---------- collapsible sections ---------- */
-
-.collapsible__body {
+/* Top area: always there, scrolls on its own. */
+.sidebar__connections {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
+  align-content: start;
   gap: 10px;
+  min-height: 0;
+  padding: 16px 14px;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
-.collapsible__body[hidden] {
+.sidebar__connections[hidden],
+.sidebar__library[hidden] {
   display: none;
 }
 
-.collapsible__title {
-  min-width: 0;
+.sidebar__error {
+  margin: 0;
 }
 
-.collapsible__toggle {
+.sidebar__heading {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  margin-left: -8px;
-  color: var(--qf-fg);
+  gap: 7px;
+  margin: 0;
   font-size: 15px;
   font-weight: 650;
   letter-spacing: -0.01em;
 }
 
-.collapsible__toggle svg {
-  flex: none;
+/* ---------- connections / library split ---------- */
+
+.sidebar-splitter {
+  position: relative;
+  z-index: 1;
+  height: 1px;
+  background: var(--qf-border);
+  cursor: row-resize;
+  touch-action: none;
+}
+
+/* A taller grab area than the 1px line it sits on. */
+.sidebar-splitter::before {
+  content: '';
+  position: absolute;
+  inset: -4px 0;
+}
+
+.sidebar-splitter::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -1px;
+  height: 3px;
+  background: transparent;
+  transition: background-color 120ms ease;
+}
+
+.sidebar-splitter:hover::after,
+.sidebar-splitter:focus-visible::after,
+.sidebar-splitter[data-dragging]::after {
+  background: var(--qf-accent);
+}
+
+.sidebar-splitter:focus-visible {
+  outline: none;
+}
+
+/* ---------- library pane (saved queries, history) ---------- */
+
+.sidebar__library {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.library {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.library__tabs {
+  display: flex;
+  gap: 4px;
+  padding: 6px 14px 0;
+  border-bottom: 1px solid var(--qf-border);
+}
+
+.library__tab,
+.library__tab:hover:not(:disabled) {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: -1px;
+  padding: 7px 6px 8px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
   color: var(--qf-muted);
-  transform: rotate(90deg);
-  transition: transform 120ms ease;
+  font-size: 13.5px;
+  font-weight: 600;
 }
 
-.collapsible[data-open='false'] .collapsible__toggle svg {
-  transform: rotate(0deg);
+.library__tab:hover:not(:disabled) {
+  color: var(--qf-fg);
 }
 
-.collapsible__count {
+.library__tab[aria-selected='true'] {
+  color: var(--qf-fg);
+  border-bottom-color: var(--qf-accent);
+}
+
+.library__tab:focus-visible {
+  outline-offset: -2px;
+}
+
+.library__count {
   min-width: 18px;
   padding: 0 6px;
   border-radius: var(--qf-r-chip);
@@ -198,8 +252,21 @@
   font-size: 11px;
   font-weight: 500;
   line-height: 1.5;
+  letter-spacing: 0;
   text-align: center;
   font-variant-numeric: tabular-nums;
+}
+
+.library__panel {
+  flex: 1;
+  min-height: 0;
+  padding: 10px 10px 16px 14px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.library__panel[hidden] {
+  display: none;
 }
 
 /* ---------- sidebar resize handle ---------- */
@@ -501,6 +568,12 @@
   --env-color: var(--qf-accent);
 }
 
+.chip--small {
+  padding: 0 6px;
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
 .chip--env {
   color: var(--env-color);
   border-color: color-mix(in srgb, var(--env-color) 45%, var(--qf-border));
@@ -596,8 +669,23 @@
 }
 
 .overflow-menu__list button {
+  position: relative;
   width: 100%;
   text-align: left;
+  white-space: nowrap;
+}
+
+/* Menus holding a setting leave room for its check, so labels align. */
+.overflow-menu__list .overflow-menu__item--indented {
+  padding-left: 28px;
+}
+
+.overflow-menu__item--indented svg {
+  position: absolute;
+  top: 50%;
+  left: 8px;
+  transform: translateY(-50%);
+  color: var(--qf-accent);
 }
 
 .visually-hidden {
@@ -617,9 +705,19 @@
 }
 
 .conn__message {
+  margin: 0;
+  padding-left: 34px;
   font-size: 12px;
   color: var(--qf-muted);
   overflow-wrap: anywhere;
+}
+
+.conn__message[data-tone='ok'] {
+  color: var(--qf-ok);
+}
+
+.conn__message[data-tone='error'] {
+  color: var(--qf-err);
 }
 
 /* ---------- object explorer ---------- */
@@ -635,8 +733,8 @@
   padding: 4px 9px;
 }
 
-/* A long container list scrolls on its own so Saved queries and History
-   below it stay reachable without scrolling past the whole tree. */
+/* A long container list scrolls on its own, so other connections stay
+   reachable without scrolling past the whole tree. */
 .tree-panel > .tree {
   max-height: min(46vh, 440px);
   overflow-y: auto;
@@ -699,6 +797,23 @@
 .tree__branch > summary:hover,
 .tree__leaf:hover {
   background: var(--qf-hover);
+}
+
+/* Opens a sample query; shown on hover, and always reachable by Tab. */
+.tree__open {
+  display: grid;
+  flex: none;
+  place-items: center;
+  align-self: center;
+  margin-left: auto;
+  padding: 2px 4px;
+  opacity: 0;
+}
+
+.tree__branch > summary:hover .tree__open,
+.tree__leaf:hover .tree__open,
+.tree__open:focus-visible {
+  opacity: 1;
 }
 
 .tree__name {
@@ -765,7 +880,11 @@
   .sidebar {
     border-right: 0;
     border-bottom: 1px solid var(--qf-border);
-    max-height: 60vh;
+    height: 70vh;
+  }
+
+  .sidebar[data-collapsed] {
+    height: auto;
   }
 
   .workspace {

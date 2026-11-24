@@ -6,7 +6,8 @@ import { NewConnectionForm } from './NewConnectionForm'
 import { QueryWorkspace, type QueryWorkspaceHandle } from './query-tabs/QueryWorkspace'
 import { HistoryPanel } from './history/HistoryPanel'
 import { SavedQueriesPanel } from './saved-queries/SavedQueriesPanel'
-import { Collapsible, OPEN_SECTION_EVENT } from './Collapsible'
+import { LibraryPane, useLibraryTab, type LibraryTab } from './library/LibraryPane'
+import { SidebarSplitter, useSidebarSplit } from './library/sidebar-split'
 import { ConnectionGroup, OPEN_GROUP_EVENT } from './ConnectionGroup'
 import { OverflowMenu } from './OverflowMenu'
 import { SidebarResizer, useSidebarWidth } from './SidebarResizer'
@@ -16,16 +17,23 @@ import { ENVIRONMENT_SHORT } from './connection-environment'
 import { markConnectionsLost, type ConnectionStatus } from './connection-status'
 import { formatLastUsed } from './last-used'
 import type { SavedQuery } from '@shared/types/saved-query'
-import { CosmosIcon, DatabaseIcon, MoonIcon, PlusIcon, SidebarIcon, SunIcon } from './icons'
+import type { QueryHistoryEntry } from '@shared/types/query-history'
+import { CosmosIcon, DatabaseIcon, MoonIcon, OpenIcon, PlusIcon, SidebarIcon, SunIcon } from './icons'
 import logoOnDark from './assets/brand/queryforge-logo-dark.png'
 import logoOnLight from './assets/brand/queryforge-logo-light.png'
 
+/** A line under a connection card: a test result, a connect failure, or a
+ * lost session. `tone` sets its colour. */
+interface ConnectionMessage {
+  text: string
+  tone: 'info' | 'ok' | 'error'
+}
 
 export function App(): React.JSX.Element {
   const [connections, setConnections] = useState<ConnectionProfile[]>([])
   const [error, setError] = useState<string | null>(null)
   const [statuses, setStatuses] = useState<Record<string, ConnectionStatus>>({})
-  const [testMessages, setTestMessages] = useState<Record<string, string>>({})
+  const [testMessages, setTestMessages] = useState<Record<string, ConnectionMessage>>({})
   const [metadataByConnection, setMetadataByConnection] = useState<
     Record<string, DatabaseMetadata>
   >({})
@@ -36,7 +44,11 @@ export function App(): React.JSX.Element {
   const workspaceRef = useRef<QueryWorkspaceHandle>(null)
   const sidebar = useSidebarWidth()
   const rail = useSidebarCollapsed()
+  const split = useSidebarSplit()
+  const sidebarRef = useRef<HTMLElement>(null)
+  const [libraryTab, setLibraryTab] = useLibraryTab()
   const [savedQueriesVersion, setSavedQueriesVersion] = useState(0)
+  const [savedCount, setSavedCount] = useState(0)
 
   // Story 63: the utilityProcess died, so every live connection is gone.
   // Messages are derived from a ref, not inside a state updater, which must
@@ -55,7 +67,10 @@ export function App(): React.JSX.Element {
           ...Object.fromEntries(
             lostIds.map((id) => [
               id,
-              'The query execution service stopped unexpectedly. Reconnect to continue.'
+              {
+                text: 'The query execution service stopped unexpectedly. Reconnect to continue.',
+                tone: 'error'
+              } satisfies ConnectionMessage
             ])
           )
         }))
@@ -95,7 +110,6 @@ export function App(): React.JSX.Element {
   /** Rail click: expand, then bring the card into view and focus it. */
   function revealConnection(id: string): void {
     rail.setCollapsed(false)
-    window.dispatchEvent(new CustomEvent(OPEN_SECTION_EVENT, { detail: 'connections' }))
     const groupName = connections.find((c) => c.id === id)?.groupName
     if (groupName) window.dispatchEvent(new CustomEvent(OPEN_GROUP_EVENT, { detail: groupName }))
     window.setTimeout(() => {
@@ -105,13 +119,10 @@ export function App(): React.JSX.Element {
     }, 0)
   }
 
-  function openSection(id: 'saved-queries' | 'history'): void {
+  /** Rail click: expand and show that library tab. */
+  function openLibrary(tab: LibraryTab): void {
     rail.setCollapsed(false)
-    window.dispatchEvent(new CustomEvent(OPEN_SECTION_EVENT, { detail: id }))
-    window.setTimeout(
-      () => document.getElementById(`section-${id}`)?.scrollIntoView({ block: 'nearest' }),
-      0
-    )
+    setLibraryTab(tab)
   }
 
   async function handleToggleTheme(): Promise<void> {
@@ -157,17 +168,19 @@ export function App(): React.JSX.Element {
   }
 
   async function handleTest(id: string): Promise<void> {
-    setTestMessages((prev) => ({ ...prev, [id]: 'Testing…' }))
+    setTestMessages((prev) => ({ ...prev, [id]: { text: 'Testing…', tone: 'info' } }))
     try {
       const result = await window.api.queryExecution.test({ profileId: id })
       setTestMessages((prev) => ({
         ...prev,
-        [id]: result.success ? 'Connection OK' : `Failed: ${result.message ?? 'unknown error'}`
+        [id]: result.success
+          ? { text: 'Connection OK', tone: 'ok' }
+          : { text: `Failed: ${result.message ?? 'unknown error'}`, tone: 'error' }
       }))
     } catch (err) {
       setTestMessages((prev) => ({
         ...prev,
-        [id]: `Failed: ${err instanceof Error ? err.message : String(err)}`
+        [id]: { text: `Failed: ${err instanceof Error ? err.message : String(err)}`, tone: 'error' }
       }))
     }
   }
@@ -183,7 +196,7 @@ export function App(): React.JSX.Element {
       setStatuses((prev) => ({ ...prev, [id]: 'error' }))
       setTestMessages((prev) => ({
         ...prev,
-        [id]: err instanceof Error ? err.message : String(err)
+        [id]: { text: err instanceof Error ? err.message : String(err), tone: 'error' }
       }))
     }
   }
@@ -205,16 +218,16 @@ export function App(): React.JSX.Element {
     } catch (err) {
       setTestMessages((prev) => ({
         ...prev,
-        [id]: err instanceof Error ? err.message : String(err)
+        [id]: { text: err instanceof Error ? err.message : String(err), tone: 'error' }
       }))
     }
   }
 
-  /** Double-click in the Object Explorer (user story 17): open a new query
-   * tab prefilled with a sample-records query for the object. */
+  /** Object Explorer open (user story 17), by double-click or the row's open
+   * button: a new query tab prefilled with a sample-records query. */
   function handleOpenObject(connection: ConnectionProfile, object: DatabaseMetadataObject): void {
+    if (!canOpenObject(connection, object)) return
     if (connection.config.kind === 'cosmos-db') {
-      if (object.kind !== 'container') return
       workspaceRef.current?.openQuery({
         title: object.name,
         connectionId: connection.id,
@@ -223,7 +236,6 @@ export function App(): React.JSX.Element {
       })
       return
     }
-    if (object.kind !== 'table' && object.kind !== 'view') return
     workspaceRef.current?.openQuery({
       title: object.name,
       connectionId: connection.id,
@@ -242,6 +254,23 @@ export function App(): React.JSX.Element {
       title: savedQuery.name,
       queryText: savedQuery.queryText,
       connectionId
+    })
+  }
+
+  /** History row click: a new tab with the entry's text, on its connection
+   * (if it still exists) and the Cosmos database/container it ran against. */
+  function handleOpenHistoryEntry(entry: QueryHistoryEntry): void {
+    if (entry.queryText === undefined || entry.dml) return
+    const connectionId = connections.some((c) => c.id === entry.profileId)
+      ? entry.profileId
+      : undefined
+    workspaceRef.current?.openQuery({
+      queryText: entry.queryText,
+      connectionId,
+      options:
+        connectionId && entry.target
+          ? { database: entry.target.database, container: entry.target.container }
+          : undefined
     })
   }
 
@@ -301,15 +330,9 @@ export function App(): React.JSX.Element {
           <strong className="conn__name" title={connection.name}>
             {connection.name}
           </strong>
-          {status === 'connected' ? (
-            <button
-              type="button"
-              className="btn--ghost conn__primary"
-              onClick={() => handleDisconnect(connection.id)}
-            >
-              Disconnect
-            </button>
-          ) : (
+          {/* Connected rows give the name the room: the dot and border
+              already say "connected", and Disconnect moves into the menu. */}
+          {status !== 'connected' && (
             <button
               type="button"
               className="btn--ghost conn__primary conn__connect"
@@ -322,6 +345,9 @@ export function App(): React.JSX.Element {
           <OverflowMenu
             label={`More actions for ${connection.name}`}
             items={[
+              ...(status === 'connected'
+                ? [{ label: 'Disconnect', onSelect: () => void handleDisconnect(connection.id) }]
+                : []),
               {
                 label: hasMetadata ? 'Refresh metadata' : 'Browse metadata',
                 disabled: status !== 'connected',
@@ -372,10 +398,15 @@ export function App(): React.JSX.Element {
             )}
           </div>
         )}
-        {message && <p className="conn__message">{message}</p>}
+        {message && (
+          <p className="conn__message" data-tone={message.tone}>
+            {message.text}
+          </p>
+        )}
         {metadataByConnection[connection.id] && (
           <MetadataTree
             metadata={metadataByConnection[connection.id]}
+            canOpen={(object) => canOpenObject(connection, object)}
             onOpen={(object) => handleOpenObject(connection, object)}
           />
         )}
@@ -445,90 +476,118 @@ export function App(): React.JSX.Element {
         }
       >
         <aside
+          ref={sidebarRef}
           id="sidebar"
           className="sidebar"
           data-collapsed={rail.collapsed || undefined}
           aria-label="Connections, saved queries and history"
+          style={
+            rail.collapsed
+              ? undefined
+              : {
+                  gridTemplateRows: `minmax(0, ${split.share}fr) auto minmax(0, ${1 - split.share}fr)`
+                }
+          }
         >
-          {error && (
-            <p role="alert" className="sidebar__error">
-              {error}
-            </p>
-          )}
           {rail.collapsed && (
             <SidebarRail
               connections={connections}
               statuses={statuses}
               onRevealConnection={revealConnection}
-              onOpenSection={openSection}
+              onOpenLibrary={openLibrary}
               onNewConnection={() => {
                 setShowNewForm(true)
                 rail.setCollapsed(false)
               }}
             />
           )}
-          {/* Stays mounted while collapsed (just hidden) so a half-filled form
-              or a history search survives. */}
-          <div className="sidebar__content" hidden={rail.collapsed}>
+          {/* Both areas stay mounted while collapsed (just hidden) so a
+              half-filled form or a history search survives. */}
+          <section
+            className="sidebar__connections"
+            aria-labelledby="connections-heading"
+            hidden={rail.collapsed}
+          >
+            {error && (
+              <p role="alert" className="sidebar__error">
+                {error}
+              </p>
+            )}
+            <div className="section-head">
+              <h2 id="connections-heading" className="sidebar__heading">
+                Connections
+                {connections.length > 0 && (
+                  <span className="library__count">{connections.length}</span>
+                )}
+              </h2>
+              <button
+                type="button"
+                className="btn--ghost section-head__action"
+                aria-expanded={showNewForm}
+                onClick={() => setShowNewForm((open) => !open)}
+              >
+                <PlusIcon size={14} /> New connection
+              </button>
+            </div>
 
-            <Collapsible
-              id="connections"
-              title="Connections"
-              actions={
-                <button
-                  type="button"
-                  className="btn--ghost section-head__action"
-                  aria-expanded={showNewForm}
-                  onClick={() => setShowNewForm((open) => !open)}
-                >
-                  <PlusIcon size={14} /> New connection
-                </button>
-              }
-            >
-              {showNewForm && (
-                <div className="sidebar__form">
-                  <NewConnectionForm
-                    onCreated={() => {
-                      setShowNewForm(false)
-                      void refresh()
-                    }}
-                  />
-                </div>
-              )}
+            {showNewForm && (
+              <div className="sidebar__form">
+                <NewConnectionForm
+                  onCreated={() => {
+                    setShowNewForm(false)
+                    void refresh()
+                  }}
+                />
+              </div>
+            )}
 
-              {connections.length === 0
-                ? !showNewForm && (
-                    <p className="empty">
-                      No saved connections yet. Add an Azure SQL Database or Cosmos DB account to
-                      start querying.
-                    </p>
+            {connections.length === 0
+              ? !showNewForm && (
+                  <p className="empty">
+                    No saved connections yet. Add an Azure SQL Database or Cosmos DB account to
+                    start querying.
+                  </p>
+                )
+              : groupKeys.map((key) => {
+                  const members = groups.get(key)!
+                  const list = <ul className="conn-list">{members.map(renderConnection)}</ul>
+                  return key ? (
+                    <ConnectionGroup
+                      key={key}
+                      name={key}
+                      count={members.length}
+                      forceOpen={members.some((c) => c.id === editingId)}
+                      connectedCount={
+                        members.filter((c) => statuses[c.id] === 'connected').length
+                      }
+                    >
+                      {list}
+                    </ConnectionGroup>
+                  ) : (
+                    <div key="(ungrouped)" className="conn-group">
+                      {list}
+                    </div>
                   )
-                : groupKeys.map((key) => {
-                    const members = groups.get(key)!
-                    const list = <ul className="conn-list">{members.map(renderConnection)}</ul>
-                    return key ? (
-                      <ConnectionGroup
-                        key={key}
-                        name={key}
-                        count={members.length}
-                        forceOpen={members.some((c) => c.id === editingId)}
-                        connectedCount={
-                          members.filter((c) => statuses[c.id] === 'connected').length
-                        }
-                      >
-                        {list}
-                      </ConnectionGroup>
-                    ) : (
-                      <div key="(ungrouped)" className="conn-group">
-                        {list}
-                      </div>
-                    )
-                  })}
-            </Collapsible>
+                })}
+          </section>
 
-            <SavedQueriesPanel refreshToken={savedQueriesVersion} onOpen={handleOpenSavedQuery} />
+          {!rail.collapsed && <SidebarSplitter split={split} containerRef={sidebarRef} />}
 
-            <HistoryPanel />
+          <div className="sidebar__library" hidden={rail.collapsed}>
+            <LibraryPane
+              tab={libraryTab}
+              onTabChange={setLibraryTab}
+              savedCount={savedCount}
+              saved={
+                <SavedQueriesPanel
+                  refreshToken={savedQueriesVersion}
+                  connections={connections}
+                  onOpen={handleOpenSavedQuery}
+                  onCountChange={setSavedCount}
+                />
+              }
+              history={<HistoryPanel connections={connections} onOpen={handleOpenHistoryEntry} />}
+            />
           </div>
         </aside>
         {!rail.collapsed && <SidebarResizer {...sidebar} />}
@@ -546,17 +605,28 @@ export function App(): React.JSX.Element {
   )
 }
 
+/** Whether an Object Explorer node opens a sample query: a container on
+ * Cosmos DB, a table or view on Azure SQL. */
+function canOpenObject(connection: ConnectionProfile, object: DatabaseMetadataObject): boolean {
+  return connection.config.kind === 'cosmos-db'
+    ? object.kind === 'container'
+    : object.kind === 'table' || object.kind === 'view'
+}
+
 /**
  * Object Explorer tree (user stories 14-17): nested, collapsible via native
  * <details>, showing column types/primary keys/indexes (`detail`) and
- * partition keys. Double-clicking a table/view/container opens a sample
- * query for it.
+ * partition keys. A table/view/container opens a sample query for it, by
+ * double-click or by its open button, which also makes it reachable from
+ * the keyboard.
  */
 function MetadataTree({
   metadata,
+  canOpen,
   onOpen
 }: {
   metadata: DatabaseMetadata
+  canOpen: (object: DatabaseMetadataObject) => boolean
   onOpen: (object: DatabaseMetadataObject) => void
 }): React.JSX.Element {
   const [filter, setFilter] = useState('')
@@ -579,6 +649,7 @@ function MetadataTree({
       ) : (
         <TreeList
           objects={objects}
+          canOpen={canOpen}
           onOpen={onOpen}
           parentSchema={undefined}
           forceOpen={term.length > 0}
@@ -621,12 +692,14 @@ function filterObjects(objects: DatabaseMetadataObject[], term: string): Databas
 
 function TreeList({
   objects: unsortedObjects,
+  canOpen,
   onOpen,
   parentSchema,
   forceOpen,
   openByDefault
 }: {
   objects: DatabaseMetadataObject[]
+  canOpen: (object: DatabaseMetadataObject) => boolean
   onOpen: (object: DatabaseMetadataObject) => void
   parentSchema: string | undefined
   /** Expand every branch (while a filter is active, so matches are visible). */
@@ -648,6 +721,22 @@ function TreeList({
             </span>
             {mixedKinds && <span className="tree__kind">{object.kind}</span>}
             {object.detail && <span className="tree__detail">{object.detail}</span>}
+            {canOpen(withSchema) && (
+              <button
+                type="button"
+                className="btn--ghost tree__open"
+                aria-label={`Open ${object.name} in a new query tab`}
+                title="Open in a new query tab"
+                onClick={(event) => {
+                  // Inside a <summary>, a click would also toggle the branch.
+                  event.preventDefault()
+                  onOpen(withSchema)
+                }}
+                onDoubleClick={(event) => event.stopPropagation()}
+              >
+                <OpenIcon size={12} />
+              </button>
+            )}
           </>
         )
         const hasChildren = object.children && object.children.length > 0
@@ -658,6 +747,7 @@ function TreeList({
                 <summary onDoubleClick={() => onOpen(withSchema)}>{label}</summary>
                 <TreeList
                   objects={object.children!}
+                  canOpen={canOpen}
                   onOpen={onOpen}
                   parentSchema={object.kind === 'schema' ? object.name : parentSchema}
                   forceOpen={forceOpen}
