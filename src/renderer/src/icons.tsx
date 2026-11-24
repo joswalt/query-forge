@@ -54,6 +54,12 @@ export const PlayIcon = (p: IconProps): React.JSX.Element => (
   </Svg>
 )
 
+export const StopIcon = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <rect x="3.5" y="3.5" width="9" height="9" rx="1.5" fill="currentColor" />
+  </Svg>
+)
+
 export const LockIcon = (p: IconProps): React.JSX.Element => (
   <Svg {...p}>
     <rect x="3.2" y="7" width="9.6" height="6.4" rx="1.6" />
